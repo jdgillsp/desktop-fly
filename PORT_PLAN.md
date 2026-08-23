@@ -26,19 +26,31 @@ keeps the "one binary, `cargo build`, no project file" spirit of the current
 below — now has a working transparent-GPU-overlay path on Windows that it did
 not have a year ago.
 
-**Recommended second creature: *C. elegans*** (302 neurons, the only complete
-cell-identified whole-animal connectome) — **but this needs your sign-off**, and
-there is one architectural consequence you should know before saying yes: *C.
-elegans* neurons are mostly **non-spiking**. An honest worm needs a *graded*
-membrane-potential integrator with explicit gap junctions, not the LIF spiking
-integrator the fly uses. That is a real finding — "just swap the data file"
-would produce a fake worm. §5 designs the abstraction to carry both.
+**Recommended second creature: *C. elegans*, rendered stylised or diagrammatic**
+(302 neurons, the only complete cell-identified whole-animal connectome). Two
+things to know before signing off:
 
-**Three decisions I need from you before Phase 1** (details in §8):
+- **It needs a different integrator.** *C. elegans* neurons are mostly
+  **non-spiking** — an honest worm needs a *graded* membrane-potential model with
+  explicit gap junctions, not the LIF spiking integrator the fly uses. "Just swap
+  the data file" would produce a fake worm. §5 designs the abstraction to carry both.
+- **Every complete connectome belongs to an invertebrate**, so the "don't creep
+  me out" constraint can't be solved by picking a cuddlier animal — there isn't
+  one with the data. It has to be solved in the rendering, which §6.1 argues is
+  the better lever anyway, and which opens up a genuinely novel option: a pet
+  whose body *is* its own nervous system.
 
-1. **Shell**: Rust (recommended) vs. Godot 4 (lower risk, heavier) vs. Windows-only native.
-2. **Second creature**: *C. elegans* vs. *Drosophila* larva vs. "deepen the existing fly with the VNC connectome" — see §6.
+**Decisions** (details in §8):
+
+1. ~~**Shell**~~ — **DECIDED 2026-08-23: Rust, gated on Spike 0.** Godot 4 stays
+   the documented fallback if the spike fails; `core/` is unaffected either way.
+2. **Second creature** — narrowed 2026-08-23 by a constraint that wasn't in the
+   first draft: *it must not be creepy to look at all day.* That kills the
+   *Drosophila* larva (it's a maggot) and promotes two options. **§6.1 argues
+   the constraint is mostly an art-direction decision, not a species one.**
 3. **macOS**: does the mac build stay alive on the new core (recommended), or does this fork go Windows-only and the mac Swift app is frozen?
+4. **Rendering register** (new, from §6.1): literal / stylised / diagrammatic.
+   This now gates the creature choice, so it wants answering first.
 
 Rough sizing, solo and focused: **5–8 weeks** to a Windows build with both
 creatures and macOS parity. A walking fly on Windows with no brain window is
@@ -450,19 +462,54 @@ make payable once.
 
 ## 6. Second-creature candidates — **DECISION NEEDED**
 
-The hard filter: **a complete, published, synapse-resolution connectome must
-exist and be redistributable.** Without it the app's central claim collapses.
-That eliminates every charismatic option — cat, octopus, honeybee, ant — and
-leaves a short list.
+Two hard filters:
 
-| Candidate | Size / completeness | Dynamics needed | Body | Desktop fit | Verdict |
+1. **A complete, published, synapse-resolution connectome must exist and be
+   redistributable.** Without it the app's central claim collapses. This
+   eliminates every charismatic option — cat, octopus, honeybee, ant, tardigrade,
+   zebrafish — and leaves a very short list.
+2. **It must not be creepy to have on your screen all day** (Jesse, 2026-08-23).
+   This is a real product constraint, not a nice-to-have — a desktop pet you
+   don't want to look at is a failed desktop pet. It interacts badly with filter
+   #1, because the complete-connectome list is *entirely* invertebrates.
+
+| Candidate | Size / completeness | Dynamics needed | Body | Creep factor | Verdict |
 |---|---|---|---|---|---|
-| ***C. elegans*** hermaphrodite | **302 neurons (279 synaptic), complete, cell-identified** — White et al. 1986; Cook et al. 2019 covers both sexes (385 male) | **Graded + gap junctions** (new engine, ~1 week) | Trivial: segmented sinusoid | Excellent — slow crawler, thigmotaxis along windows, thermotaxis, tap habituation | ⭐ **Recommended** |
-| ***Drosophila* larva** | **3,016 neurons, ~548k synapses, complete brain** — Winding et al. 2023, *Science* | Reuses the LIF engine (**major saving**) | Peristaltic crawler + head casting | Good — a maggot inching along your title bars | **Strong runner-up.** Pick this if you'd rather ship two creatures fast than build a second integrator. |
-| **Adult fly + VNC (MANC)** | Not a second creature — a *deeper* one. FlyWire is brain-only; the ventral nerve cord connectome would make the currently-procedural **tripod gait real** | Same LIF engine | Existing fly body, now neurally driven | N/A | **Different reading of your ask** — see §8. Scientifically the most impressive option on this list. |
-| ***Ciona intestinalis*** larva | ~177 neurons, complete (Ryan et al. 2016) | Likely graded-ish | Swimming tadpole | Poor — it swims; a desktop is not water | Dark horse |
-| **Zebrafish larva** | Whole-brain *activity* imaging exists; whole-brain *synaptic* connectome does **not** | — | — | — | **Reject** — would be modelled, not measured |
-| **Mouse cortex (MICrONS)** | ~200k neurons, real EM — but a **fragment** of one animal's visual cortex, not a nervous system | — | No behaviour derivable | — | **Reject as a creature**; would make a spectacular brain-window-only easter egg |
+| ***C. elegans*** hermaphrodite | **302 neurons (279 synaptic), complete, cell-identified** — White et al. 1986; Cook et al. 2019 covers both sexes (385 male) | **Graded + gap junctions** (new engine, ~1 week) | Trivial: segmented sinusoid | **Low *if* styled — see §6.1.** The animal is genuinely transparent and 1 mm long; photoreal = a worm, stylised = a glowing filament | ⭐ **Still recommended, conditional on art direction** |
+| ***Drosophila* larva** | **3,016 neurons, ~548k synapses, complete brain** — Winding et al. 2023, *Science* | Reuses the LIF engine (**major saving**) | Peristaltic crawler + head casting | **High.** It is a maggot. No styling saves this | **Rejected on filter #2** despite being the cheapest to build |
+| **Adult fly + VNC (MANC)** | Not a second creature — a *deeper* one. FlyWire is brain-only; the ventral nerve cord connectome would make the currently-procedural **tripod gait real** | Same LIF engine | Existing fly body, now neurally driven | **Zero new** — it's the fly you already have | **Promoted.** Scientifically the most impressive option here, and it adds no new organism to be squeamish about |
+| ***Ciona intestinalis*** larva | ~177 neurons, complete CNS (Ryan et al. 2016) — *needs licence/format verification* | Likely graded-ish | Swimming tadpole | **Lowest.** A translucent tadpole is closer to "cute" than anything else on this list | **Promoted to live option** under filter #2 |
+| **Zebrafish larva** | Whole-brain *activity* imaging exists; whole-brain *synaptic* connectome does **not** | — | — | Low (it's a fish) | **Reject** — would be modelled, not measured. The one that would have solved filter #2 cleanly, and the data isn't there |
+| **Mouse cortex (MICrONS)** | ~200k neurons, real EM — but a **fragment** of one animal's visual cortex, not a nervous system | — | No behaviour derivable | None | **Reject as a creature**; would make a spectacular brain-window-only easter egg |
+
+### 6.1 The creep constraint is mostly an art-direction problem
+
+Worth separating before the species choice gets made on vibes: **how disturbing
+the pet is depends far more on how it's rendered than on which animal it is.**
+The current fly is photoreal-ish — brown chitin, compound eyes, a textured
+abdomen — which is a deliberate choice, not a requirement.
+
+Three rendering registers, all of which run the same real connectome:
+
+- **Literal** (today's fly). Maximum "whoa, that's a fly," maximum squeamishness.
+- **Stylised** — accurate proportions and gait, but glassy/translucent materials,
+  soft emissive palette, no texture detail. *C. elegans* is actually transparent
+  in life, so this is the honest rendering, not a cop-out.
+- **Diagrammatic** — the creature's body *is* its nervous system: 302 labelled
+  points and their connections, arranged along the body, undulating along your
+  window edges with activity visibly propagating down the motor chain.
+
+The third one deserves serious consideration on its own merits, not just as
+creep-avoidance. It fits the project's actual thesis better than a photoreal
+animal does — the whole point is that the wiring is real — and it makes the
+brain window and the pet the *same object* instead of two views bolted together.
+A crawling data visualisation is also something nobody else has shipped.
+
+**Recommendation under both filters:** *C. elegans*, rendered stylised or
+diagrammatic, with the VNC/MANC "deepen the fly" work as the parallel track that
+carries no creep risk at all. If a stylised worm still reads as unpleasant in
+Phase 5's first render, *Ciona* is the fallback — same graded engine, same
+crawler-ish body code, swap the data and the silhouette.
 
 **Other readings of "give other option besides fly"** that I should not silently
 rule out — tell me if I've picked the wrong one:
@@ -521,7 +568,9 @@ Worm path: `GradedSim` integrator + its own test suite; ETL for the chosen
 dataset (with licence check); role manifest; crawler body with proprioceptive
 undulation; mechanosensory/thermotactic/tap-habituation transduction; brain view
 with per-neuron labels; tray "Creature ▸" picker.
-*Larva path is ~40% cheaper: reuses `LifSim`, needs only ETL + body + mapping.*
+*The VNC "deepen the fly" track is ~50% cheaper — it reuses `LifSim`, the
+existing body and the existing senses, and needs only ETL + a motor-neuron→leg
+mapping. If Phase 5 needs to be short, that is the version to run.*
 **Exit:** a new `--simtest`/`--behaviortest` pair for the second creature, with
 its own invariants (e.g. "anterior touch → reversal within N ms", "tap response
 habituates over 10 taps", "undulation frequency tracks `VB/DB` output").
@@ -540,16 +589,16 @@ Godot shell / larva-instead-of-worm choices respectively.
 
 ## 8. Open decisions & risks
 
-### Decisions I need from you
+### Decisions
 
-1. **Shell: Rust, or Godot 4?** — Rust matches this repo's spirit (one binary,
-   no project file, no runtime) and keeps mac alive; Godot removes ~2,000 lines
-   of renderer and de-risks the overlay, at 70 MB and an engine dependency.
-   My recommendation is Rust, gated on Spike 0. *This is genuinely a taste call
-   as much as an engineering one.*
-2. **Second creature: *C. elegans*, *Drosophila* larva, or the VNC "deepen the
-   fly" reading?** — see §6. I have designed §5 to make this swappable, but the
-   answer changes Phase 5 by roughly a factor of two.
+1. ~~**Shell: Rust, or Godot 4?**~~ — **DECIDED 2026-08-23: Rust, gated on
+   Spike 0.** Godot 4 remains the documented fallback and §2 keeps the full
+   comparison, because if Spike 0 fails this decision gets revisited on the spot.
+2. **Second creature** — *Drosophila* larva **eliminated 2026-08-23** on the
+   "not creepy" constraint. Live options: *C. elegans* (stylised or
+   diagrammatic), *Ciona* larva, or the VNC "deepen the fly" track. See §6 and
+   §6.1; the answer changes Phase 5 by roughly a factor of two.
+   **§6.1's rendering-register question gates this and should be answered first.**
 3. **Does macOS stay alive on the new core?** — recommended yes; it is also your
    only oracle for verifying the port. If no, option (c) in §2 (C# + Silk.NET)
    becomes competitive again.
@@ -572,11 +621,17 @@ Godot shell / larva-instead-of-worm choices respectively.
 
 ### Things I did **not** verify and you should not treat as settled
 
-- Redistribution terms for the *C. elegans* and larval-*Drosophila* datasets
-  (the FlyWire CC BY-NC split is known; these are not). **Check before Phase 5.**
+- Redistribution terms for the *C. elegans* dataset (the FlyWire CC BY-NC split
+  is known; this one is not). **Check before Phase 5.**
+- The *Ciona* connectome — I have it as ~177 neurons, complete CNS, Ryan, Lu &
+  Meinertzhagen 2016 (*eLife*), from memory and not from a source I checked in
+  this pass. **Verify the neuron count, completeness and licence before
+  promoting it past "fallback."**
+- Whether the MANC/VNC connectome is redistributable on the same terms as
+  FlyWire, and its data-access format — this now matters more, since the
+  "deepen the fly" track is a live Phase 5 option.
 - Access format and download path for the Winding et al. larval connectome —
-  the paper is `Science` 379, eadd9330; I did not confirm the data repository.
-- Whether the MANC/VNC connectome is redistributable on the same terms as FlyWire.
+  the paper is `Science` 379, eadd9330. Moot unless the larva comes back.
 - On-hardware behaviour of the wgpu DirectComposition path — documented, not
   yet tested on your machine. That is what Spike 0 is for.
 
