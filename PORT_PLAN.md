@@ -518,6 +518,115 @@ rule out — tell me if I've picked the wrong one:
 - **(B) Deepen the fly instead**: add the VNC connectome so the legs are real too.
 - **(C) A cosmetic skin** (different insect, same fly brain) — cheap, but it makes the app dishonest, so I'd argue against it.
 - **(D) "Other option" = a user-facing picker** — a tray menu "Creature ▸ Fruit fly / Worm". This is a *consequence* of (A), and the abstraction delivers it for free; if this is all you meant, §5 still stands and §6 gets simpler.
+- **(E) An invented creature** — raised 2026-08-23. See §6.2.
+
+### 6.2 Invented creatures
+
+*Raised by Jesse 2026-08-23: "cant we fabricate a new animal or a fictional one
+we make synthetic genome for."*
+
+Short answer: **yes, and it solves more problems than it creates** — but there
+are three different things this could mean, with wildly different costs, and one
+factual correction.
+
+**The correction, so it doesn't get designed around:** you cannot compute a
+connectome from a genome. Nobody can — not for a fly, not for a worm, not for
+anything. Genome → body plan → wiring is the central unsolved problem of
+developmental biology. What *is* real and buildable is a **developmental growth
+model**: a compact parameter seed that drives axon-guidance rules to grow a
+wiring diagram. "Genome" is a fair metaphor for that seed as long as the app
+never implies it's DNA.
+
+**Why an invented creature is attractive here** — it retires three live risks
+from §8 at once:
+
+| Risk it kills | How |
+|---|---|
+| Dataset licence unverified (blocks Phase 5) | Nothing to license. It's yours. |
+| Dataset access/format unknown | Nothing to download. |
+| "Don't creep me out" (§6.1) | Every complete real connectome belongs to an invertebrate. An invented creature has no such constraint — you can design the silhouette to be radially symmetric, limbless, soft, and unlike anything that triggers a vermin reflex. |
+
+It also makes an excellent **test fixture**: a 40-neuron synthetic creature
+exercises the whole `Creature` trait in a unit test without loading 668 real
+neurons.
+
+#### The three versions
+
+**(i) Fabricate a connectome outright.** Hand-author or randomly generate the
+wiring. Cheapest, and the only one I'd argue against shipping standalone — see
+the honesty rules below. Fine as a test fixture or a toy mode.
+
+**(ii) Chimera — real circuits, recombined.** *Recommended.* Build an animal that
+does not exist out of circuit modules that do: FlyWire's LC4/LPLC2 looming
+detectors for vision, a *C. elegans*-style locomotor CPG for the body wave, real
+motor pools, real sensory transduction — grafted together with synthetic
+connective interneurons. **Every module is measured data; only the composition is
+invented.** That is an honest and, as far as I know, novel thing to ship: "no
+such animal exists; every circuit inside it does."
+
+It also sidesteps the failure mode that kills version (iii): the modules are
+pre-validated, so you know the looming detector detects looming before you wire
+it to anything.
+
+**(iii) Grown from a seed.** A compact "genome" — body-plan parameters (segments,
+symmetry, limb placement), sensor complement and placement, neuron-type counts,
+gradient fields, axon-guidance rules, E/I ratio, a connection-probability-vs-distance
+kernel — fed to a developmental process that places somas, extends growth cones
+down gradients, forms synapses where they meet, and prunes. The connectome is not
+authored edge-by-edge; it *emerges*. Same seed → same creature, reproducibly.
+Different seed → a different animal, forever.
+
+This is the most fun version and the one with an open-ended scope. **The reason
+it's a stretch goal and not Phase 5:** a grown network has no guarantee of doing
+anything interesting. The fly works because evolution tuned it for 200 million
+years *and* because `etl.py` deliberately selected populations with known
+function. A randomly-grown network gives you silence, seizure, or noise —
+`CLAUDE.md`'s "operating point is razor-thin" warning is exactly this problem in
+miniature. Making it work means adding a **selection loop** (generate → simulate →
+score behavioural richness → mutate), which is a genuinely interesting project
+and is not a feature of a desktop pet. Budget it separately.
+
+#### Honesty rules, if any of this ships
+
+The project's entire value is that the brain is real. A synthetic creature
+doesn't damage that *if the distinction is structural rather than a disclaimer
+nobody reads*:
+
+1. **Provenance is already in the design.** §5's `Connectome.provenance` was put
+   there for licensing; it does double duty here — and it should move to
+   **per-neuron and per-edge**, so a chimera can be honest at the granularity it
+   actually mixes at:
+   ```rust
+   pub enum Provenance {
+       Measured  { source: &'static str, version: &'static str, citation: &'static str },
+       Grown     { generator: &'static str, seed: u64, matched: &'static [&'static str] },
+       Authored,
+   }
+   ```
+2. **The brain window does the explaining.** Real connectomes render at real soma
+   coordinates — they look like a brain because they are one. A synthetic one has
+   no anatomy, so render it as an obviously abstract force-directed graph. For a
+   chimera, **colour by provenance**: measured edges warm, synthetic edges cool.
+   You can see at a glance which parts of the animal are real. That is both the
+   honesty mechanism and the best-looking thing in the app.
+3. **Label it in the UI**: "Fruit fly — FlyWire v783" vs "«name» — synthetic,
+   seed 0x…". Same in the README's measured-vs-modelled table.
+4. **Never fabricate a real species.** An invented animal cannot be a lie about
+   anything. A fake "honeybee connectome" would be a straightforward
+   scientific-integrity failure, and the honeybee is exactly the kind of species
+   someone will ask for because the real data doesn't exist. Hard no.
+
+#### Cost
+
+- **(ii) chimera:** ~1 week on top of the Phase 4 abstraction — it is a
+  `Creature` impl plus a module-grafting step in the ETL. Nothing in §5 changes.
+- **(iii) grown + selection loop:** 2–4 weeks and genuinely open-ended. Separate
+  track, after a real second creature ships.
+
+**Recommendation:** ship a real second creature first (it's what makes the
+abstraction credible), then (ii) as the third creature — where the creep
+constraint and the licence risk both go to zero and you get the
+colour-by-provenance brain window as the payoff.
 
 ---
 
