@@ -628,6 +628,111 @@ abstraction credible), then (ii) as the third creature — where the creep
 constraint and the licence risk both go to zero and you get the
 colour-by-provenance brain window as the payoff.
 
+### 6.3 What would actually be most fun
+
+*Asked 2026-09-05: "what would be the most fun and engaging?"*
+
+Everything above optimises for correctness and cost. This section optimises for
+whether anyone still has it running in a month — a different question, with a
+different answer.
+
+**What makes a desktop pet survive past week one.** Novelty is spent in about ten
+minutes. What's left has to be one of: *it reacts to me in ways I discover*, *it
+changes over time*, *I can see why it did that*, or *it's mine specifically*. The
+existing app already nails the first and third — the cursor-lunge-versus-slow-
+approach asymmetry is a genuinely great mechanic, and the brain window is the
+only pet on earth that shows its reasoning. It has nothing for the second or
+fourth. **That's the gap worth filling, and the two cheapest items on this whole
+document fill it.**
+
+Ranked by fun per unit of work:
+
+**1. Habituation — the pet gets used to you. (~100 lines. Do this first.)**
+
+The single highest-leverage feature in this document, and it is nearly free.
+Add a slow-adapting depression term on the sensory→command pathway: repeated
+harmless stimuli weaken their own drive, and it recovers over hours. Persist the
+weights to disk between runs.
+
+The result is a creature that flinches at your cursor for the first week and
+gradually stops, *because you have never actually hurt it* — and that startles
+properly again after you leave it alone for a weekend. You now have a history
+with it. Nothing else on this list buys that much engagement for that little code.
+
+It is also **real biology, not a gimmick**: habituation, dishabituation and
+sensitization of the tap-withdrawal response are among the best-characterised
+learning phenomena in *C. elegans*, and looming-response habituation is
+documented in *Drosophila*. It belongs in the modelled-not-measured table —
+the connectome gives wiring, not learning rules — but the phenomenon and its
+circuit locus are real, so this is the same class of honest modelling choice as
+the LIF dynamics already are.
+
+**2. Glass anatomy — you can see the brain inside the body. (Material change + a point cloud you already render.)**
+
+This is my answer to the open §6.1 rendering question. Not literal, not a bare
+diagram: **a soft translucent body with the live connectome visible inside it,
+firing as it moves.**
+
+It wins on every axis at once:
+
+- **Kills the creep problem permanently**, for every creature, forever. Glass and
+  glow don't trigger a vermin reflex; chitin and compound eyes do. You stop
+  having to pick species by squeamishness.
+- **It's the app's thesis made visible.** Right now the pet and the brain window
+  are two objects and you look back and forth between them. Fuse them and the
+  reasoning is *in* the animal — you watch the escape command propagate and then
+  the body goes.
+- **It's the honest rendering for anything synthetic.** A grown creature has no
+  real anatomy, so a photoreal body would be invented detail presented as fact.
+  Glass isn't a stylistic compromise there; it's the only non-arbitrary choice.
+- **It's the distinctive one.** Plenty of desktop pets exist. None of them are
+  made of their own wiring.
+- Cheap: the point-cloud pipeline is already being built for the brain window in
+  Phase 3, and the body is already procedural. This is largely a material and
+  a coordinate mapping.
+
+Counter-argument worth taking seriously: a glowing wireframe is *cold*, and
+people bond with faces. The answer is that the personality has to live in
+**motion and reaction** rather than in eyes — closer to a firefly than a
+Tamagotchi. The existing gait, grooming, startle and sleep behaviours are already
+doing that work; they just need a silhouette you enjoy looking at.
+
+**3. Seeded chimera — a creature that is specifically yours. (~1–2 weeks on top of Phase 4.)**
+
+This is the fusion of §6.2 (ii) and (iii), and it **solves the failure mode that
+made (iii) a stretch goal.** Don't grow a network from scratch — have the seed
+select and compose *real, pre-validated circuit modules*: how many looming
+detectors, how many CPG segments, which sensor complement, what body plan, what
+E/I ratio, which gradients wire them together.
+
+Every creature you roll is then **guaranteed to function, because its parts are
+measured and already known to work.** The variation lives in composition and
+proportion, not in whether the thing does anything at all. That is the whole
+problem with grown-from-scratch networks — silence, seizure, or noise — and this
+sidesteps it without needing a selection loop.
+
+Then the engagement payload: **the seed is yours.** Hash a phrase you type, or
+your machine name. Everyone gets a different animal, reproducibly — "seed
+0xC0FFEE" is a creature you can send to someone and they get *the same animal*.
+Two seeds can produce a child. Mutation is a slider.
+
+**4. Everything else.** Breeding/lineage sits on top of 3. Full grown-from-scratch
+plus a selection loop (§6.2 iii) becomes largely unnecessary once 3 exists — it
+costs 2–4 weeks to reach a worse version of the same feeling.
+
+#### The cheap experiment
+
+Items 1 and 2 are **both testable on the existing macOS build, before any porting
+happens.** Habituation is a term in `Sim.swift`; glass anatomy is materials in
+`FlyModel.swift` plus the point cloud `BrainView.swift` already builds. If a Mac
+is available to run it on, that is a day or two of work that tells you whether
+the fun hypothesis is right *before* committing 5–8 weeks to a Rust port. If it
+isn't, these move to just after Phase 3 — but they should not wait until Phase 5.
+
+**Recommended running order, revised for fun:** Spike 0 → core+tests → Windows
+shell → brain window → **habituation + glass anatomy** → abstraction → second
+creature → seeded chimera.
+
 ---
 
 ## 7. Phased plan
