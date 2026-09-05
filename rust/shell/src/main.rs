@@ -14,6 +14,7 @@ mod math;
 mod mesh;
 mod render;
 mod snapshot;
+mod tray;
 mod transduction;
 
 use std::sync::Arc;
@@ -108,6 +109,12 @@ struct App {
     pending_tempo: f32,
     pending_sleepy: bool,
     last_env_cursor: Option<Vec2>,
+
+    tray: Option<tray::Tray>,
+    paused: bool,
+    /// Monitors, for the "Move to Next Display" command.
+    monitors: Vec<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)>,
+    monitor_index: usize,
 }
 
 impl App {
@@ -137,6 +144,10 @@ impl App {
             pending_tempo: 1.0,
             pending_sleepy: false,
             last_env_cursor: None,
+            tray: None,
+            paused: false,
+            monitors: Vec::new(),
+            monitor_index: 0,
         }
     }
 }
@@ -146,9 +157,20 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
+        self.monitors = event_loop
+            .available_monitors()
+            .map(|m| (m.position(), m.size()))
+            .collect();
         let monitor = event_loop
             .primary_monitor()
             .or_else(|| event_loop.available_monitors().next());
+        if let Some(m) = &monitor {
+            self.monitor_index = self
+                .monitors
+                .iter()
+                .position(|(p, _)| *p == m.position())
+                .unwrap_or(0);
+        }
         let (pos, size) = match &monitor {
             Some(m) => (m.position(), m.size()),
             None => (
@@ -233,6 +255,15 @@ impl ApplicationHandler for App {
             Err(e) => eprintln!("no brain data ({e}) - falling back to brainless behaviour"),
         }
 
+        let info = match &self.sim {
+            Some(sim) => format!("FlyWire v783 - circuit {}n", sim.n),
+            None => "no data - run etl.py".to_string(),
+        };
+        self.tray = tray::Tray::new(&info);
+        if self.tray.is_none() {
+            eprintln!("WARNING: no tray icon; quit with Task Manager");
+        }
+
         for note in self.senses.fidelity_notes() {
             println!("note: {note}");
         }
@@ -274,6 +305,37 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    /// Hop the creature to the next monitor, as the macOS build's
+    /// "Move to Next Display" does (main.swift:822).
+    fn move_to_next_display(&mut self) {
+        if self.monitors.len() < 2 {
+            return;
+        }
+        self.monitor_index = (self.monitor_index + 1) % self.monitors.len();
+        let (pos, size) = self.monitors[self.monitor_index];
+        self.space = ScreenSpace::new(Rect::new(
+            pos.x,
+            pos.y,
+            pos.x + size.width as i32,
+            pos.y + size.height as i32,
+        ));
+        if let Some(w) = &self.window {
+            w.set_outer_position(pos);
+            let _ = w.request_inner_size(size);
+        }
+        if let (Some(r), Some(s)) = (self.renderer.as_mut(), self.surface.as_ref()) {
+            r.resize(s, size.width, size.height);
+        }
+        // Terrain is stale until the next poll, and the fly must land inside
+        // the new display.
+        self.fly.terrain.clear();
+        self.fly.ledge = None;
+        let (w, h) = self.space.size();
+        self.fly.pos.x = self.fly.pos.x.clamp(-w / 2.0 + 40.0, w / 2.0 - 40.0);
+        self.fly.pos.y = self.fly.pos.y.clamp(-h / 2.0 + 40.0, h / 2.0 - 40.0);
+        println!("moved to display {} ({}x{})", self.monitor_index, size.width, size.height);
+    }
+
     fn tick(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         let dt = match self.last_frame {
@@ -284,6 +346,33 @@ impl App {
             }
         };
         self.last_frame = Some(now);
+
+        // Drain first so the tray borrow ends before anything mutates self.
+        let commands = self.tray.as_ref().map(|t| t.poll()).unwrap_or_default();
+        for cmd in commands {
+            match cmd {
+                tray::TrayCommand::Quit => {
+                    event_loop.exit();
+                    return;
+                }
+                tray::TrayCommand::TogglePause => {
+                    self.paused = !self.paused;
+                    if let Some(t) = &self.tray {
+                        t.set_paused(self.paused);
+                    }
+                }
+                tray::TrayCommand::EscapeTest | tray::TrayCommand::Scare => {
+                    // A real stimulus into the real circuit, not a scripted
+                    // takeoff: the fly flees only if its giant fiber fires.
+                    self.trans.trigger_scare();
+                }
+                tray::TrayCommand::ToggleShadows => self.args.shadows = !self.args.shadows,
+                tray::TrayCommand::NextDisplay => self.move_to_next_display(),
+            }
+        }
+        if self.paused {
+            return;
+        }
 
         // Senses at ~30 Hz, as the macOS build's timer does (main.swift:761).
         if now - self.last_sense >= Duration::from_millis(33) {

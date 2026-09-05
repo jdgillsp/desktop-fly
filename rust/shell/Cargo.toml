@@ -18,3 +18,4 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 raw-window-handle = "0.6.2"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 png = "0.18.1"
+tray-icon = "0.24.2"
