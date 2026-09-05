@@ -26,7 +26,17 @@ target/release/desktopfly.exe              # the fly, on your desktop
 target/release/desktopfly.exe --seconds 20 # ...for 20 s, then quit
 target/release/desktopfly.exe --snapshot fly.png   # offscreen render
 target/release/desktopfly.exe --diag       # per-stage frame tracing
+target/release/desktopfly.exe --fps 60     # default is 30; see below
+target/release/desktopfly.exe --literal    # photoreal fly instead of glass
+target/release/desktopfly.exe --no-brain   # overlay only
 ```
+
+**Frame rate.** The default is 30 fps, not 60. Spike 0 measured ~8% of a core
+just to clear and present a full-screen overlay, so frame rate is a real part
+of a background pet's idle cost. Measured here: 60 fps costs 15% of one core,
+30 fps costs 11% — a ~27% saving, smaller than it sounds because the 1 kHz
+simulation and the 30 Hz sense poll run at fixed rates regardless. A walking
+fly reads fine at 30.
 
 Quit from the tray icon. Windows files new tray icons under the overflow
 chevron — pin it to see the fly.

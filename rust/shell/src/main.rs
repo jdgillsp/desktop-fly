@@ -70,6 +70,10 @@ struct Args {
     /// Glass anatomy is the default register (PORT_PLAN.md §6.3 #2);
     /// --literal restores the photoreal fly.
     glass: bool,
+    /// Frame cap. A background pet does not need 60 fps, and Spike 0 measured
+    /// ~8% of a core just to clear and present a full-screen overlay -- so the
+    /// frame rate is most of the idle cost. See `--fps`.
+    fps: u32,
 }
 
 fn parse_args() -> Args {
@@ -85,6 +89,13 @@ fn parse_args() -> Args {
         diag: a.iter().any(|x| x == "--diag"),
         no_brain: a.iter().any(|x| x == "--no-brain"),
         glass: !a.iter().any(|x| x == "--literal"),
+        fps: a
+            .iter()
+            .position(|x| x == "--fps")
+            .and_then(|i| a.get(i + 1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30)
+            .clamp(5, 240),
     }
 }
 
@@ -443,9 +454,21 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _e: &ActiveEventLoop) {
-        if let Some(w) = &self.window {
-            w.request_redraw();
+    fn about_to_wait(&mut self, e: &ActiveEventLoop) {
+        // Sleep until the next frame is due rather than polling flat out. With
+        // ControlFlow::Poll the loop spins between presents; a pet that sits on
+        // the desktop all day should be cheap when nothing is happening.
+        let budget = Duration::from_secs_f32(1.0 / self.args.fps as f32);
+        let due = self
+            .last_frame
+            .map(|t| t.elapsed() >= budget)
+            .unwrap_or(true);
+        if due {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        } else if let Some(t) = self.last_frame {
+            e.set_control_flow(ControlFlow::WaitUntil(t + budget));
         }
         // Throttle the brain window to ~30 Hz. Requesting a redraw every
         // iteration keeps its update region permanently invalid, which floods
