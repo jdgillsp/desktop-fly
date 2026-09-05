@@ -334,6 +334,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dfplatform"
+version = "0.1.0"
+dependencies = [
+ "dfcore",
+ "windows",
+]
+
+[[package]]
 name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

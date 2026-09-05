@@ -1,6 +1,6 @@
-[workspace]
+﻿[workspace]
 resolver = "2"
-members = ["core", "spike0", "winprobe"]
+members = ["core", "platform", "spike0", "winprobe"]
 
 [workspace.package]
 edition = "2021"
