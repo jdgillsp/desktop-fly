@@ -9,6 +9,7 @@
 //!
 //! Run:  desktopfly [--seconds N] [--no-shadow] [--snapshot out.png]
 
+mod brain;
 mod flybody;
 mod math;
 mod mesh;
@@ -65,6 +66,7 @@ struct Args {
     shadows: bool,
     /// Per-stage frame tracing. Earned its keep finding the QUNS_BUSY bug.
     diag: bool,
+    no_brain: bool,
 }
 
 fn parse_args() -> Args {
@@ -78,6 +80,7 @@ fn parse_args() -> Args {
             .unwrap_or(0),
         shadows: !a.iter().any(|x| x == "--no-shadow"),
         diag: a.iter().any(|x| x == "--diag"),
+        no_brain: a.iter().any(|x| x == "--no-brain"),
     }
 }
 
@@ -91,6 +94,7 @@ struct App {
     frame_mesh: mesh::Mesh,
 
     sim: Option<LifSim>,
+    brain_points: Option<dfcore::data::BrainPointsFile>,
     signals: SignalBuilder,
     fly: Fly,
     trans: transduction::Transduction,
@@ -111,6 +115,11 @@ struct App {
     pending_sleepy: bool,
     last_env_cursor: Option<Vec2>,
 
+    gpu: Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)>,
+    brain: Option<brain::BrainView>,
+    brain_window: Option<Arc<Window>>,
+    brain_cursor: Option<(f32, f32)>,
+    brain_last_frame: Option<Instant>,
     tray: Option<tray::Tray>,
     paused: bool,
     last_mood: String,
@@ -131,6 +140,7 @@ impl App {
             meshes: flybody::FlyMeshes::build(),
             frame_mesh: mesh::Mesh::default(),
             sim: None,
+            brain_points: None,
             signals: SignalBuilder::new(),
             fly: Fly::new(Vec2::ZERO, dfcore::DEFAULT_SEED),
             trans: transduction::Transduction::new(),
@@ -147,6 +157,11 @@ impl App {
             pending_tempo: 1.0,
             pending_sleepy: false,
             last_env_cursor: None,
+            gpu: None,
+            brain: None,
+            brain_window: None,
+            brain_cursor: None,
+            brain_last_frame: None,
             tray: None,
             paused: false,
             last_mood: String::new(),
@@ -238,7 +253,24 @@ impl ApplicationHandler for App {
         }))
         .expect("no adapter");
 
-        let renderer = render::Renderer::new(&adapter, &surface, size.width, size.height);
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("desktopfly"),
+            required_features: wgpu::Features::empty(),
+            // Spike 0 finding 2: downlevel_defaults caps textures at 2048,
+            // smaller than an ordinary monitor.
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .expect("request device");
+
+        let renderer = render::Renderer::new(
+            device.clone(),
+            queue.clone(),
+            &adapter,
+            &surface,
+            size.width,
+            size.height,
+        );
         if !renderer.alpha_ok {
             eprintln!(
                 "WARNING: no premultiplied-alpha surface; the overlay will not be transparent"
@@ -251,6 +283,8 @@ impl ApplicationHandler for App {
                 let mut sim = LifSim::new(&brain.circuit, dfcore::DEFAULT_SEED);
                 // What the creature already knows about this user.
                 sim.habituation = persist::load();
+                // The brain window flashes spikes where they actually happen.
+                sim.collect_spikes = true;
                 println!(
                     "FlyWire v783 - {} somas - circuit {}n/{}e",
                     brain.points.points.len(),
@@ -258,8 +292,14 @@ impl ApplicationHandler for App {
                     brain.circuit.edges.len()
                 );
                 self.sim = Some(sim);
+                self.brain_points = Some(brain.points);
             }
             Err(e) => eprintln!("no brain data ({e}) - falling back to brainless behaviour"),
+        }
+
+        self.gpu = Some((instance, adapter, device, queue));
+        if !self.args.no_brain {
+            self.open_brain_window(event_loop, pos, size);
         }
 
         let info = match &self.sim {
@@ -286,7 +326,79 @@ impl ApplicationHandler for App {
         println!("overlay up on {}x{} - the fly is loose", w as i32, h as i32);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // The brain window is a separate, ordinary window; route its events here
+        // before the overlay's.
+        let is_brain = self
+            .brain_window
+            .as_ref()
+            .map(|w| w.id() == id)
+            .unwrap_or(false);
+        if is_brain {
+            match event {
+                WindowEvent::CloseRequested => {
+                    // Closing the brain window must not quit the app, only hide
+                    // the view — the same as the macOS panel's close button.
+                    self.brain = None;
+                    self.brain_window = None;
+                }
+                WindowEvent::Resized(new) => {
+                    if let Some(b) = self.brain.as_mut() {
+                        b.resize(new.width, new.height);
+                    }
+                }
+                WindowEvent::RedrawRequested => {
+                    // MUST draw here. A RedrawRequested that returns without
+                    // presenting leaves the update region invalid, Windows
+                    // re-posts WM_PAINT immediately, and the message pump
+                    // starves every other window — which is exactly what
+                    // stopped the overlay from ever rendering.
+                    let now = Instant::now();
+                    let bdt = self
+                        .brain_last_frame
+                        .map(|t| (now - t).as_secs_f32().clamp(0.0, 0.1))
+                        .unwrap_or(1.0 / 60.0);
+                    self.brain_last_frame = Some(now);
+                    if let (Some(b), Some(sim)) = (self.brain.as_mut(), self.sim.as_ref()) {
+                        b.update(bdt, sim);
+                        b.render();
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    self.brain_cursor = Some((position.x as f32, position.y as f32));
+                    // Hovering holds the rotation still so you can aim.
+                    if let Some(b) = self.brain.as_mut() {
+                        b.paused_by_hover = true;
+                    }
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    self.brain_cursor = None;
+                    if let Some(b) = self.brain.as_mut() {
+                        b.paused_by_hover = false;
+                    }
+                }
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Pressed,
+                    button: winit::event::MouseButton::Left,
+                    ..
+                } => {
+                    if let (Some(b), Some(sim), Some((cx, cy))) = (
+                        self.brain.as_mut(),
+                        self.sim.as_mut(),
+                        self.brain_cursor,
+                    ) {
+                        if let Some(label) = b.handle_click(cx, cy, sim) {
+                            println!("stimulating {label}");
+                            if let Some(w) = &self.brain_window {
+                                w.set_title(&format!("Fly Brain - {label}"));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(new) => {
@@ -308,10 +420,63 @@ impl ApplicationHandler for App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+        // Throttle the brain window to ~30 Hz. Requesting a redraw every
+        // iteration keeps its update region permanently invalid, which floods
+        // the message pump and starves the overlay.
+        if let Some(w) = &self.brain_window {
+            let due = self
+                .brain_last_frame
+                .map(|t| t.elapsed() >= Duration::from_millis(33))
+                .unwrap_or(true);
+            if due {
+                w.request_redraw();
+            }
+        }
     }
 }
 
 impl App {
+    /// Open (or reopen) the brain window. Separate from `resumed` so the tray's
+    /// Show/Hide Brain can bring it back after the user closes it.
+    fn open_brain_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        pos: winit::dpi::PhysicalPosition<i32>,
+        size: winit::dpi::PhysicalSize<u32>,
+    ) {
+        let Some((instance, adapter, device, queue)) = self.gpu.as_ref() else {
+            return;
+        };
+        let (Some(sim), Some(pts)) = (self.sim.as_ref(), self.brain_points.as_ref()) else {
+            return;
+        };
+        let (bw, bh) = (420u32, 340u32);
+        let attrs = Window::default_attributes()
+            .with_title("Fly Brain - FlyWire v783 (click = stimulate)")
+            .with_inner_size(winit::dpi::PhysicalSize::new(bw, bh))
+            .with_position(winit::dpi::PhysicalPosition::new(
+                pos.x + size.width as i32 - bw as i32 - 24,
+                pos.y + size.height as i32 - bh as i32 - 80,
+            ))
+            .with_window_level(WindowLevel::AlwaysOnTop);
+        match event_loop.create_window(attrs) {
+            Ok(w) => {
+                let w = Arc::new(w);
+                match instance.create_surface(w.clone()) {
+                    Ok(bs) => {
+                        self.brain = Some(brain::BrainView::new(
+                            device, queue, adapter, bs, pts, sim, bw, bh,
+                        ));
+                        self.brain_window = Some(w);
+                        println!("brain window open: {} somas", pts.points.len());
+                    }
+                    Err(e) => eprintln!("no brain surface: {e}"),
+                }
+            }
+            Err(e) => eprintln!("no brain window: {e}"),
+        }
+    }
+
     /// Hop the creature to the next monitor, as the macOS build's
     /// "Move to Next Display" does (main.swift:822).
     fn move_to_next_display(&mut self) {
@@ -378,6 +543,15 @@ impl App {
                 }
                 tray::TrayCommand::ToggleShadows => self.args.shadows = !self.args.shadows,
                 tray::TrayCommand::NextDisplay => self.move_to_next_display(),
+                tray::TrayCommand::ToggleBrain => {
+                    if self.brain.is_some() {
+                        self.brain = None;
+                        self.brain_window = None;
+                    } else {
+                        let (pos, size) = self.monitors[self.monitor_index];
+                        self.open_brain_window(event_loop, pos, size);
+                    }
+                }
                 tray::TrayCommand::ForgetMe => {
                     if let Some(sim) = self.sim.as_mut() {
                         sim.habituation.reset();

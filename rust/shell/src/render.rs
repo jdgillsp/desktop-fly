@@ -51,22 +51,16 @@ fn make_depth(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgp
 }
 
 impl Renderer {
+    /// Takes an existing device so the brain window can share it — two wgpu
+    /// devices on one GPU would double the memory for no benefit.
     pub fn new(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
         adapter: &wgpu::Adapter,
         surface: &wgpu::Surface<'static>,
         width: u32,
         height: u32,
     ) -> Self {
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("desktopfly"),
-            required_features: wgpu::Features::empty(),
-            // Spike 0 finding 2: downlevel_defaults caps textures at 2048,
-            // which is smaller than an ordinary monitor.
-            required_limits: adapter.limits(),
-            ..Default::default()
-        }))
-        .expect("request device");
-
         let caps = surface.get_capabilities(adapter);
         let alpha_mode = if caps
             .alpha_modes

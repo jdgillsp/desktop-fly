@@ -16,6 +16,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
     TogglePause,
+    ToggleBrain,
     EscapeTest,
     Scare,
     NextDisplay,
@@ -111,6 +112,7 @@ impl Tray {
         let title = MenuItem::new("DesktopFly", false, None);
         let info = MenuItem::new(data_info, false, None);
         let pause = MenuItem::new("Pause", true, None);
+        let brain = MenuItem::new("Show/Hide Brain", true, None);
         let escape = MenuItem::new("Escape Test (loom)", true, None);
         let scare = MenuItem::new("Scare Fly", true, None);
         let display = MenuItem::new("Move to Next Display", true, None);
@@ -121,6 +123,7 @@ impl Tray {
 
         let ids = vec![
             (pause.id().clone(), TrayCommand::TogglePause),
+            (brain.id().clone(), TrayCommand::ToggleBrain),
             (escape.id().clone(), TrayCommand::EscapeTest),
             (scare.id().clone(), TrayCommand::Scare),
             (display.id().clone(), TrayCommand::NextDisplay),
@@ -134,6 +137,7 @@ impl Tray {
             &info,
             &PredefinedMenuItem::separator(),
             &pause,
+            &brain,
             &escape,
             &scare,
             &display,
