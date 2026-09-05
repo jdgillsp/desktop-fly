@@ -142,7 +142,7 @@ impl Habituation {
         // millisecond; see `LifSim::step`.
         let floor = p.floor as f64;
         let d = dt as f64;
-        let mut update = |gain: &mut f64, exposure: &mut f64, drive: f32| {
+        let update = |gain: &mut f64, exposure: &mut f64, drive: f32| {
             let new = if drive > p.threshold {
                 // Depress in proportion to how strong the stimulus is.
                 let strength =

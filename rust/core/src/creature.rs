@@ -118,8 +118,7 @@ pub enum DynamicsSpec {
     /// Spiking. *Drosophila*: threshold, refractory period, delayed inhibition.
     Lif(LifParams),
     /// Graded / non-spiking with explicit electrical coupling. *C. elegans*.
-    /// Not yet implemented — the variant exists so the seam is real rather than
-    /// hypothetical, and so adding it is a new file rather than a redesign.
+    /// Implemented by [`crate::graded::GradedSim`].
     Graded(GradedParams),
 }
 
@@ -148,13 +147,23 @@ pub struct GradedParams {
 impl Default for GradedParams {
     fn default() -> Self {
         GradedParams {
-            c_m: 1.0,
+            // Membrane time constant is c_m / g_leak = 15 ms. Getting this
+            // wrong by three orders of magnitude is easy and silent: with
+            // c_m = 1.0 the membrane takes ten *seconds* to respond and the
+            // creature simply never does anything.
+            c_m: 0.0015,
             g_leak: 0.1,
             e_leak: -35.0,
-            g_syn: 1.0,
-            g_gap: 1.0,
-            v_eq: -35.0,
-            beta: 0.125,
+            // Synaptic conductances are small relative to leak, so a single
+            // synapse nudges rather than clamps — the graded analogue of the
+            // fly's 0.0008 weight scale.
+            g_syn: 0.02,
+            g_gap: 0.04,
+            // v_eq must sit ABOVE rest. Setting it equal to e_leak leaves every
+            // neuron 50% activated while quiescent, so the whole network is
+            // permanently half-driven and nothing reads as a response.
+            v_eq: -25.0,
+            beta: 0.30,
             e_exc: 0.0,
             e_inh: -45.0,
         }
@@ -223,6 +232,75 @@ impl Sim for LifSim {
             "loom_right" => &self.loom_right,
             _ => &[],
         }
+    }
+}
+
+impl Sim for crate::graded::GradedSim {
+    fn n(&self) -> usize {
+        self.n
+    }
+    fn step(&mut self, ms: i64) {
+        crate::graded::GradedSim::step(self, ms)
+    }
+    fn stimulate(&mut self, indices: &[usize], strength: f32, duration_ms: i64) {
+        crate::graded::GradedSim::stimulate(self, indices, strength, duration_ms)
+    }
+    /// Normalised depolarisation above rest. There are no spikes to flash, so
+    /// the brain window shows *how depolarised* each neuron is — which is what
+    /// "active" means for this animal.
+    fn activity(&self) -> Vec<f32> {
+        self.potentials()
+            .iter()
+            .map(|v| crate::util::clamp((v + 35.0) / 25.0, 0.0, 1.0))
+            .collect()
+    }
+    fn manifest(&self) -> &RoleManifest {
+        &self.manifest
+    }
+    fn positions(&self) -> &[[f32; 3]] {
+        &self.positions
+    }
+    fn roles(&self) -> &[String] {
+        &self.roles
+    }
+    fn group(&self, slug: &str) -> &[usize] {
+        crate::graded::GradedSim::group(self, slug)
+    }
+}
+
+/// Creature #2: *C. elegans*, the only complete cell-identified whole-animal
+/// connectome — and the reason the dynamics seam exists.
+///
+/// **Data status:** the connectome file is not shipped. PORT_PLAN.md §8 flags
+/// the redistribution terms as unverified, and shipping a dataset whose licence
+/// has not been checked is exactly the kind of thing `Provenance` exists to
+/// prevent. `etl/etl_celegans.py` documents how to fetch and convert it.
+pub struct CElegans;
+
+impl Creature for CElegans {
+    fn id(&self) -> &'static str {
+        "c_elegans"
+    }
+    fn display_name(&self) -> &'static str {
+        "Roundworm"
+    }
+    fn manifest(&self) -> RoleManifest {
+        crate::roles::c_elegans()
+    }
+    fn dynamics(&self) -> DynamicsSpec {
+        DynamicsSpec::Graded(GradedParams::default())
+    }
+    fn provenance(&self) -> Provenance {
+        Provenance::Measured {
+            source: "C. elegans hermaphrodite connectome".into(),
+            version: "White 1986 / Cook 2019".into(),
+            citation: "White et al., Phil. Trans. R. Soc. B 314:1-340 (1986);                        Cook et al., Nature 571:63-71 (2019)"
+                .into(),
+            license: "UNVERIFIED - see PORT_PLAN.md sec 8".into(),
+        }
+    }
+    fn data_dir(&self) -> &'static str {
+        "c_elegans"
     }
 }
 
@@ -407,6 +485,31 @@ mod tests {
         };
         assert_eq!(c.len(), 2);
         assert_eq!(c.electrical.len(), 1);
+    }
+
+    #[test]
+    fn the_worm_is_a_graded_creature_with_its_own_manifest() {
+        let w = CElegans;
+        assert_eq!(w.id(), "c_elegans");
+        assert!(matches!(w.dynamics(), DynamicsSpec::Graded(_)));
+        assert_eq!(w.manifest().creature, "c_elegans");
+        // The fly and the worm must not share an integrator.
+        assert!(matches!(Drosophila.dynamics(), DynamicsSpec::Lif(_)));
+    }
+
+    /// The worm's licence is genuinely unverified, and the code should say so
+    /// rather than quietly implying the data is cleared for redistribution.
+    #[test]
+    fn the_worm_data_licence_is_flagged_as_unverified() {
+        match CElegans.provenance() {
+            Provenance::Measured { license, .. } => {
+                assert!(
+                    license.contains("UNVERIFIED"),
+                    "licence must not claim clearance it does not have: {license}"
+                );
+            }
+            _ => panic!("worm data is measured, not synthetic"),
+        }
     }
 
     #[test]

@@ -6,3 +6,8 @@ nohup.out
 
 # Rust port
 rust/target/
+
+# C. elegans connectome: NOT shipped. PORT_PLAN.md sec 8 flags its
+# redistribution terms as unverified. Generate it locally with
+# etl_celegans.py and check the licence before committing anything here.
+data/c_elegans/

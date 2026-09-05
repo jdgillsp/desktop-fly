@@ -18,18 +18,6 @@ pub struct Mesh {
     pub indices: Vec<u32>,
 }
 
-impl Mesh {
-    pub fn append(&mut self, other: &Mesh, base_color: [f32; 4]) {
-        let off = self.verts.len() as u32;
-        self.verts.extend(other.verts.iter().map(|v| Vertex {
-            pos: v.pos,
-            normal: v.normal,
-            color: base_color,
-        }));
-        self.indices.extend(other.indices.iter().map(|i| i + off));
-    }
-}
-
 fn normalize(v: [f32; 3]) -> [f32; 3] {
     let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
     [v[0] / l, v[1] / l, v[2] / l]
@@ -74,7 +62,7 @@ pub fn capsule(cap_radius: f32, height: f32, rings: u32, sectors: u32) -> Mesh {
     let cyl_half = (height / 2.0 - cap_radius).max(0.0);
     let half_rings = rings.max(2) / 2;
 
-    let mut ring = |y_center: f32, phi_from: f32, phi_to: f32, steps: u32, m: &mut Mesh| {
+    let ring = |y_center: f32, phi_from: f32, phi_to: f32, steps: u32, m: &mut Mesh| {
         for r in 0..=steps {
             let phi = phi_from + (phi_to - phi_from) * r as f32 / steps as f32;
             for s in 0..=sectors {
