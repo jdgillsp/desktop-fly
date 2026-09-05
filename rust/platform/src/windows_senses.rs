@@ -25,7 +25,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO, VK_LBUTTON, VK_RBUTTON,
 };
 use windows::Win32::UI::Shell::{
-    SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+    SHQueryUserNotificationState, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
@@ -257,14 +257,16 @@ impl WindowsSenses {
         idle_secs < 0.6 && !cursor_moved
     }
 
+    /// Should the overlay get out of the way?
+    ///
+    /// Only for genuine exclusive-fullscreen D3D and presentation mode.
+    /// **Not** `QUNS_BUSY`: that also fires for an ordinary maximized window,
+    /// which would hide the fly during normal use — it did exactly that, and
+    /// looked like a renderer hang rather than a policy bug.
     fn fullscreen_app_active() -> bool {
         unsafe {
             match SHQueryUserNotificationState() {
-                Ok(s) => {
-                    s == QUNS_RUNNING_D3D_FULL_SCREEN
-                        || s == QUNS_PRESENTATION_MODE
-                        || s == QUNS_BUSY
-                }
+                Ok(s) => s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE,
                 Err(_) => false,
             }
         }
