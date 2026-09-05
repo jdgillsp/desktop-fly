@@ -1,18 +1,23 @@
-//! Persisting what the creature has learned.
+//! Persisting what the creature has learned, and which creature it is.
 //!
 //! Habituation is only interesting if it survives a restart: the point is a pet
 //! that stops flinching at you over *days*, not one that resets every launch.
-//! This is the only state the app keeps on disk, and it is small and readable
-//! on purpose — a user should be able to look at it, and delete it to get a
+//! It is kept **per creature**: what the fly has learned about your cursor is
+//! not what the worm has learned about your clicks, and switching animals
+//! must not hand one the other's history. The state is small and readable on
+//! purpose — a user should be able to look at it, and delete it to get a
 //! naive creature back.
+//!
+//! The only other thing on disk is the creature choice itself, so the tray's
+//! pick survives a restart.
 
 use std::path::PathBuf;
 
 use dfcore::Habituation;
 
-/// `%LOCALAPPDATA%\DesktopFly\habituation.json` on Windows,
-/// `$XDG_DATA_HOME`/`~/.local/share` elsewhere.
-pub fn state_path() -> Option<PathBuf> {
+/// `%LOCALAPPDATA%\DesktopFly\` on Windows, `$XDG_DATA_HOME`/`~/.local/share`
+/// elsewhere.
+fn data_dir() -> Option<PathBuf> {
     let base = if cfg!(target_os = "windows") {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
     } else {
@@ -20,11 +25,47 @@ pub fn state_path() -> Option<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
     }?;
-    Some(base.join("DesktopFly").join("habituation.json"))
+    Some(base.join("DesktopFly"))
 }
 
-pub fn load() -> Habituation {
-    let Some(p) = state_path() else {
+/// The fly's file keeps its original name so an existing installation's
+/// history is not orphaned by the creature picker; every other creature gets
+/// its own file beside it.
+pub fn state_path_for(creature_id: &str) -> Option<PathBuf> {
+    let name = if creature_id == "drosophila" {
+        "habituation.json".to_string()
+    } else {
+        format!("habituation-{creature_id}.json")
+    };
+    Some(data_dir()?.join(name))
+}
+
+fn settings_path() -> Option<PathBuf> {
+    Some(data_dir()?.join("settings.json"))
+}
+
+/// Which creature was running last time, if a choice was ever saved.
+pub fn load_creature_choice() -> Option<String> {
+    let text = std::fs::read_to_string(settings_path()?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("creature")?.as_str().map(|s| s.to_string())
+}
+
+pub fn save_creature_choice(creature_id: &str) {
+    let Some(p) = settings_path() else { return };
+    if let Some(dir) = p.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
+            return;
+        }
+    }
+    let v = serde_json::json!({ "creature": creature_id });
+    if let Err(e) = std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap_or_default()) {
+        eprintln!("could not save creature choice: {e}");
+    }
+}
+
+pub fn load(creature_id: &str) -> Habituation {
+    let Some(p) = state_path_for(creature_id) else {
         return Habituation::new();
     };
     match std::fs::read_to_string(&p) {
@@ -44,8 +85,8 @@ pub fn load() -> Habituation {
     }
 }
 
-pub fn save(h: &Habituation) {
-    let Some(p) = state_path() else { return };
+pub fn save(creature_id: &str, h: &Habituation) {
+    let Some(p) = state_path_for(creature_id) else { return };
     if let Some(dir) = p.parent() {
         if std::fs::create_dir_all(dir).is_err() {
             return;
@@ -61,8 +102,8 @@ pub fn save(h: &Habituation) {
     }
 }
 
-pub fn forget() {
-    if let Some(p) = state_path() {
+pub fn forget(creature_id: &str) {
+    if let Some(p) = state_path_for(creature_id) {
         let _ = std::fs::remove_file(p);
     }
 }
@@ -73,9 +114,21 @@ mod tests {
 
     #[test]
     fn the_state_path_is_under_a_per_user_data_directory() {
-        let p = state_path().expect("a state path on this platform");
+        let p = state_path_for("drosophila").expect("a state path on this platform");
         assert!(p.ends_with("DesktopFly/habituation.json") || p.ends_with("DesktopFly\\habituation.json"));
         assert!(p.is_absolute());
+    }
+
+    /// Two creatures must never share a history: the fly keeps the legacy
+    /// file name, and every other creature gets its own.
+    #[test]
+    fn each_creature_has_its_own_state_file() {
+        let fly = state_path_for("drosophila").unwrap();
+        let worm = state_path_for("c_elegans").unwrap();
+        assert_ne!(fly, worm);
+        assert!(fly.ends_with("habituation.json"), "the fly's file is the legacy one");
+        assert!(worm.to_string_lossy().ends_with("habituation-c_elegans.json"));
+        assert_eq!(fly.parent(), worm.parent());
     }
 
     /// A corrupt or truncated file must degrade to a naive creature, never

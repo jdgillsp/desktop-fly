@@ -6,12 +6,9 @@
 //! no window and no swapchain, so if the fly appears here and not on the
 //! desktop, the bug is in the overlay.
 
-use crate::flybody;
 use crate::math;
-use crate::mesh::{Mesh, Vertex};
-
-use dfcore::body::Fly;
-use dfcore::Vec2;
+use crate::mesh::Vertex;
+use crate::runtime::Runtime;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -21,9 +18,13 @@ struct Uniforms {
     params: [f32; 4],
 }
 
-/// Renders one frame of the fly into `path`, on a checkerboard so alpha is
-/// visible. `alt` lifts the fly into flight for testing the altitude scale.
+/// Renders one frame of the creature into `path`, on a checkerboard so alpha
+/// is visible. `alt` lifts a flier into flight for testing the altitude scale.
+///
+/// Goes through the same [`Runtime`] the desktop uses, so this diagnostic
+/// exercises the generic path rather than a private copy of the fly's.
 pub fn render_to_png(
+    rt: &mut dyn Runtime,
     path: &str,
     width: u32,
     height: u32,
@@ -56,58 +57,23 @@ pub fn render_to_png(
     }))
     .expect("device");
 
-    // Build the fly's geometry.
-    let meshes = flybody::FlyMeshes::build();
-    let mut fly = Fly::new(Vec2::ZERO, dfcore::DEFAULT_SEED);
-    fly.state = dfcore::State::Walking;
-    fly.speed = 60.0;
-    fly.heading = 0.4;
-    for _ in 0..walking_frames {
-        fly.update(1.0 / 60.0, (width as f32, height as f32), None, None);
-    }
-    fly.pos = Vec2::ZERO;
-    fly.alt = alt;
-    let mut frame = Mesh::default();
-    flybody::build_frame(&mut frame, &meshes, &fly, &fly.pose(), glass);
-
-    // Run the real circuit so the glass body shows real activity rather than a
-    // decorative sparkle. Without this the diagnostic would be a lie about the
-    // one thing the rendering is claiming.
-    let mut neuron_mesh = Mesh::default();
-    let mut have_neurons = false;
-    if glass {
-        if let Ok(brain) = dfcore::data::load() {
-            let mut sim = dfcore::LifSim::new(&brain.circuit, dfcore::DEFAULT_SEED);
-            sim.collect_spikes = true;
-            sim.step(1500);
-            // A cursor lunge, so the looming population is visibly hot.
-            sim.loom_l = 1.0;
-            sim.loom_r = 0.6;
-            sim.step(60);
-            let mut flash = vec![0.0f32; sim.n];
-            for ev in &sim.last_spikes {
-                if ev.neuron < flash.len() {
-                    flash[ev.neuron] = if ev.is_gf { 2.5 } else { 1.0 };
-                }
-            }
-            // A few frames of decay so it looks like a moment, not a freeze.
-            for f in flash.iter_mut() {
-                *f *= 0.9;
-            }
-            flybody::build_neuron_field(&mut neuron_mesh, &sim, &flash, &fly, &fly.pose());
-            have_neurons = !neuron_mesh.indices.is_empty();
-            println!(
-                "snapshot: {} neurons lit ({} spiked this step)",
-                neuron_mesh.verts.len() / 4,
-                sim.last_spikes.len()
-            );
-        }
-    }
+    // Pose the creature and build its geometry through the generic path. The
+    // circuit is run for real inside `snapshot_pose`, so the glass body shows
+    // real activity rather than a decorative sparkle.
+    rt.snapshot_pose(alt, walking_frames, (width as f32, height as f32));
+    let geometry = rt.build(glass);
+    let frame = geometry.body.clone();
+    let neuron_mesh = geometry
+        .neurons
+        .filter(|m| !m.indices.is_empty())
+        .cloned();
+    let have_neurons = neuron_mesh.is_some();
+    let neuron_mesh = neuron_mesh.unwrap_or_default();
     println!(
-        "snapshot: {} verts, {} indices, scale {:.2}",
+        "snapshot: {} verts, {} indices, {} neurons lit",
         frame.verts.len(),
         frame.indices.len(),
-        fly.scale()
+        neuron_mesh.verts.len() / 4
     );
 
     let format = wgpu::TextureFormat::Rgba8Unorm;

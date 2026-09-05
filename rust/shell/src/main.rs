@@ -7,7 +7,11 @@
 //! adapter limits, WS_EX_TOOLWINDOW set explicitly after every winit call and
 //! re-asserted, and DirectComposition for per-pixel alpha.
 //!
-//! Run:  desktopfly [--seconds N] [--no-shadow] [--snapshot out.png]
+//! Run:  desktopfly [--creature ID] [--seconds N] [--no-shadow] [--snapshot out.png]
+//!
+//! Which creature is running is the `Runtime`'s business (`runtime.rs`); this
+//! file owns the overlay, the clocks, the tray and the brain window, and never
+//! names a species.
 
 mod brain;
 mod flybody;
@@ -15,17 +19,21 @@ mod math;
 mod mesh;
 mod persist;
 mod render;
+mod runtime;
 mod snapshot;
 mod tray;
 mod transduction;
+mod wormbody;
+mod wormrt;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dfcore::body::Fly;
 use dfcore::env::{Rect, ScreenSpace, Senses};
-use dfcore::{LifSim, SignalBuilder, Sim, Vec2};
+use dfcore::Vec2;
 use dfplatform::HostSenses;
+
+use runtime::Runtime;
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -74,11 +82,37 @@ struct Args {
     /// ~8% of a core just to clear and present a full-screen overlay -- so the
     /// frame rate is most of the idle cost. See `--fps`.
     fps: u32,
+    /// Which creature: `--creature` wins, then the saved choice, then the fly.
+    creature: String,
+}
+
+/// Resolve the creature id from the command line and the saved choice. An
+/// unknown id — a typo, or a settings file from a build that had a creature
+/// this one does not — falls back to the fly and says so, rather than
+/// panicking on the way to the desktop.
+fn creature_arg(a: &[String]) -> String {
+    let asked = a
+        .iter()
+        .position(|x| x == "--creature")
+        .and_then(|i| a.get(i + 1))
+        .cloned()
+        .or_else(persist::load_creature_choice)
+        .unwrap_or_else(|| "drosophila".to_string());
+    if dfcore::by_id(&asked).is_some() {
+        asked
+    } else {
+        eprintln!(
+            "unknown creature '{asked}' (have: {}) - running the fly",
+            dfcore::CREATURE_IDS.join(", ")
+        );
+        "drosophila".to_string()
+    }
 }
 
 fn parse_args() -> Args {
     let a: Vec<String> = std::env::args().collect();
     Args {
+        creature: creature_arg(&a),
         seconds: a
             .iter()
             .position(|x| x == "--seconds")
@@ -110,21 +144,11 @@ struct App {
     surface: Option<wgpu::Surface<'static>>,
     renderer: Option<render::Renderer>,
 
-    meshes: flybody::FlyMeshes,
-    frame_mesh: mesh::Mesh,
-    neuron_mesh: mesh::Mesh,
-    /// Per-neuron flash brightness for the glass body, decayed each frame.
-    body_flash: Vec<f32>,
-
-    sim: Option<LifSim>,
-    brain_points: Option<dfcore::data::BrainPointsFile>,
-    signals: SignalBuilder,
-    fly: Fly,
-    trans: transduction::Transduction,
+    /// The creature: brain, body, senses and geometry, behind one seam.
+    rt: Box<dyn Runtime>,
     senses: HostSenses,
     space: ScreenSpace,
 
-    ms_accumulator: f64,
     last_frame: Option<Instant>,
     last_sense: Instant,
     start: Instant,
@@ -133,9 +157,7 @@ struct App {
     last_harden: Instant,
     hidden_for_fullscreen: bool,
 
-    // Carried between the 30 Hz sense poll and the per-frame update.
-    pending_tempo: f32,
-    pending_sleepy: bool,
+    /// Carried between the 30 Hz sense poll and the per-frame update.
     last_env_cursor: Option<Vec2>,
 
     gpu: Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)>,
@@ -155,23 +177,15 @@ struct App {
 impl App {
     fn new(args: Args) -> Self {
         let space = ScreenSpace::new(Rect::new(0, 0, 1920, 1080));
+        let rt = runtime::make(&args.creature, dfcore::DEFAULT_SEED);
         App {
             args,
             window: None,
             surface: None,
             renderer: None,
-            meshes: flybody::FlyMeshes::build(),
-            frame_mesh: mesh::Mesh::default(),
-            neuron_mesh: mesh::Mesh::default(),
-            body_flash: Vec::new(),
-            sim: None,
-            brain_points: None,
-            signals: SignalBuilder::new(),
-            fly: Fly::new(Vec2::ZERO, dfcore::DEFAULT_SEED),
-            trans: transduction::Transduction::new(),
+            rt,
             senses: HostSenses::new(),
             space,
-            ms_accumulator: 0.0,
             last_frame: None,
             last_sense: Instant::now(),
             start: Instant::now(),
@@ -179,8 +193,6 @@ impl App {
             last_report: Instant::now(),
             last_harden: Instant::now(),
             hidden_for_fullscreen: false,
-            pending_tempo: 1.0,
-            pending_sleepy: false,
             last_env_cursor: None,
             gpu: None,
             brain: None,
@@ -309,56 +321,38 @@ impl ApplicationHandler for App {
             );
         }
 
-        // The brain.
-        match dfcore::data::load() {
-            Ok(brain) => {
-                let mut sim = LifSim::new(&brain.circuit, dfcore::DEFAULT_SEED);
-                // The brain window flashes spikes where they actually happen.
-                sim.collect_spikes = true;
-                let sim_n = sim.n;
-                println!(
-                    "FlyWire v783 - {} somas - circuit {}n/{}e",
-                    brain.points.points.len(),
-                    brain.circuit.neurons.len(),
-                    brain.circuit.edges.len()
-                );
-                self.sim = Some(sim);
-                self.body_flash = vec![0.0; sim_n];
-                self.brain_points = Some(brain.points);
-            }
-            Err(e) => eprintln!("no brain data ({e}) - falling back to brainless behaviour"),
-        }
-
+        // The brain was loaded with the creature, in `runtime::make`.
         self.gpu = Some((instance, adapter, device, queue));
         if !self.args.no_brain {
             self.open_brain_window(event_loop, pos, size);
         }
 
-        let info = match &self.sim {
-            Some(sim) => format!("FlyWire v783 - circuit {}n", sim.n),
-            None => "no data - run etl.py".to_string(),
-        };
-        self.tray = tray::Tray::new(&info);
+        self.tray = tray::Tray::new(&self.rt.brain_info(), self.rt.creature().id());
         if self.tray.is_none() {
             eprintln!("WARNING: no tray icon; quit with Task Manager");
         }
 
         // What the creature already knows about this user.
-        self.trans.habituation = persist::load();
+        *self.rt.habituation_mut() = persist::load(self.rt.creature().id());
 
         for note in self.senses.fidelity_notes() {
             println!("note: {note}");
         }
 
         let (w, h) = self.space.size();
-        self.fly.pos = Vec2::new(w * 0.2, -h * 0.15);
+        self.rt.place(Vec2::new(w * 0.2, -h * 0.15));
 
         self.surface = Some(surface);
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.start = Instant::now();
         self.last_report = Instant::now();
-        println!("overlay up on {}x{} - the fly is loose", w as i32, h as i32);
+        println!(
+            "overlay up on {}x{} - the {} is loose",
+            w as i32,
+            h as i32,
+            self.rt.creature().display_name().to_lowercase()
+        );
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -394,8 +388,8 @@ impl ApplicationHandler for App {
                         .map(|t| (now - t).as_secs_f32().clamp(0.0, 0.1))
                         .unwrap_or(1.0 / 60.0);
                     self.brain_last_frame = Some(now);
-                    if let (Some(b), Some(sim)) = (self.brain.as_mut(), self.sim.as_ref()) {
-                        b.update(bdt, sim as &dyn Sim);
+                    if let (Some(b), Some(sim)) = (self.brain.as_mut(), self.rt.sim()) {
+                        b.update(bdt, sim);
                         b.render();
                     }
                 }
@@ -417,15 +411,16 @@ impl ApplicationHandler for App {
                     button: winit::event::MouseButton::Left,
                     ..
                 } => {
+                    let name = self.rt.creature().display_name();
                     if let (Some(b), Some(sim), Some((cx, cy))) = (
                         self.brain.as_mut(),
-                        self.sim.as_mut(),
+                        self.rt.sim_mut(),
                         self.brain_cursor,
                     ) {
-                        if let Some(label) = b.handle_click(cx, cy, sim as &mut dyn Sim) {
+                        if let Some(label) = b.handle_click(cx, cy, sim) {
                             println!("stimulating {label}");
                             if let Some(w) = &self.brain_window {
-                                w.set_title(&format!("Fly Brain - {label}"));
+                                w.set_title(&format!("{name} Brain - {label}"));
                             }
                         }
                     }
@@ -503,12 +498,17 @@ impl App {
         let Some((instance, adapter, device, queue)) = self.gpu.as_ref() else {
             return;
         };
-        let (Some(sim), Some(pts)) = (self.sim.as_ref(), self.brain_points.as_ref()) else {
+        let (Some(sim), Some(pts)) = (self.rt.sim(), self.rt.brain_points()) else {
             return;
         };
         let (bw, bh) = (420u32, 340u32);
+        let title = format!(
+            "{} Brain - {} (click = stimulate)",
+            self.rt.creature().display_name(),
+            self.rt.creature().provenance().describe()
+        );
         let attrs = Window::default_attributes()
-            .with_title("Fly Brain - FlyWire v783 (click = stimulate)")
+            .with_title(title)
             .with_inner_size(winit::dpi::PhysicalSize::new(bw, bh))
             .with_position(winit::dpi::PhysicalPosition::new(
                 pos.x + size.width as i32 - bw as i32 - 24,
@@ -521,14 +521,7 @@ impl App {
                 match instance.create_surface(w.clone()) {
                     Ok(bs) => {
                         self.brain = Some(brain::BrainView::new(
-                            device,
-                            queue,
-                            adapter,
-                            bs,
-                            pts,
-                            sim as &dyn Sim,
-                            bw,
-                            bh,
+                            device, queue, adapter, bs, pts, sim, bw, bh,
                         ));
                         self.brain_window = Some(w);
                         println!("brain window open: {} somas", pts.points.len());
@@ -566,14 +559,42 @@ impl App {
             r.scale = scale as f32;
             r.resize(s, size.width, size.height);
         }
-        // Terrain is stale until the next poll, and the fly must land inside
-        // the new display.
-        self.fly.terrain.clear();
-        self.fly.ledge = None;
-        let (w, h) = self.space.size();
-        self.fly.pos.x = self.fly.pos.x.clamp(-w / 2.0 + 40.0, w / 2.0 - 40.0);
-        self.fly.pos.y = self.fly.pos.y.clamp(-h / 2.0 + 40.0, h / 2.0 - 40.0);
+        self.rt.moved_display(self.space.size());
         println!("moved to display {} ({}x{})", self.monitor_index, size.width, size.height);
+    }
+
+    /// Swap the running creature for another, in place: the new animal appears
+    /// where the old one was, with its own habituation history, and the brain
+    /// window is rebuilt for its data (or closed if it has none).
+    fn switch_creature(&mut self, event_loop: &ActiveEventLoop, id: &str) {
+        if id == self.rt.creature().id() {
+            return;
+        }
+        persist::save(self.rt.creature().id(), self.rt.habituation());
+        let at = self.rt.position();
+        let mut rt = runtime::make(id, dfcore::DEFAULT_SEED);
+        *rt.habituation_mut() = persist::load(id);
+        rt.place(at);
+        self.rt = rt;
+        persist::save_creature_choice(id);
+
+        let had_brain = self.brain.is_some();
+        self.brain = None;
+        self.brain_window = None;
+        if had_brain {
+            let (pos, size, _) = self.monitors[self.monitor_index];
+            self.open_brain_window(event_loop, pos, size);
+        }
+        if let Some(t) = &self.tray {
+            t.set_creature(id, &self.rt.brain_info());
+            t.set_mood(&self.rt.habituation().describe());
+        }
+        self.last_mood.clear();
+        println!(
+            "now running the {} ({})",
+            self.rt.creature().display_name().to_lowercase(),
+            self.rt.brain_info()
+        );
     }
 
     fn tick(&mut self, event_loop: &ActiveEventLoop) {
@@ -592,10 +613,11 @@ impl App {
         for cmd in commands {
             match cmd {
                 tray::TrayCommand::Quit => {
-                    persist::save(&self.trans.habituation);
+                    persist::save(self.rt.creature().id(), self.rt.habituation());
                     event_loop.exit();
                     return;
                 }
+                tray::TrayCommand::SelectCreature(id) => self.switch_creature(event_loop, id),
                 tray::TrayCommand::TogglePause => {
                     self.paused = !self.paused;
                     if let Some(t) = &self.tray {
@@ -605,7 +627,7 @@ impl App {
                 tray::TrayCommand::EscapeTest | tray::TrayCommand::Scare => {
                     // A real stimulus into the real circuit, not a scripted
                     // takeoff: the fly flees only if its giant fiber fires.
-                    self.trans.trigger_scare();
+                    self.rt.scare();
                 }
                 tray::TrayCommand::ToggleShadows => self.args.shadows = !self.args.shadows,
                 tray::TrayCommand::NextDisplay => self.move_to_next_display(),
@@ -619,8 +641,8 @@ impl App {
                     }
                 }
                 tray::TrayCommand::ForgetMe => {
-                    self.trans.habituation.reset();
-                    persist::forget();
+                    self.rt.habituation_mut().reset();
+                    persist::forget(self.rt.creature().id());
                     println!("habituation reset - the creature is naive again");
                 }
             }
@@ -657,89 +679,37 @@ impl App {
                 }
             }
 
-            self.fly.terrain = env.ledges.clone();
-
             if self.args.diag && self.frames < 3 { eprintln!("[diag] A: about to transduce"); }
-            if let Some(sim) = self.sim.as_mut() {
-                let (tempo, sleepy) = self.trans.apply(sim, &self.fly, &env, sense_dt);
-                if self.args.diag && self.frames < 3 { eprintln!("[diag] B: transduced"); }
-                self.pending_tempo = tempo;
-                self.pending_sleepy = sleepy;
-            }
+            self.rt.sense(&env, sense_dt);
+            if self.args.diag && self.frames < 3 { eprintln!("[diag] B: transduced"); }
             self.last_env_cursor = env.cursor;
         }
 
-        // Step the brain at a true 1 kHz, decoupled from the frame rate.
-        let mut signals = None;
-        if let Some(sim) = self.sim.as_mut() {
-            self.ms_accumulator += dt as f64 * 1000.0;
-            let steps = (self.ms_accumulator as i64).min(50);
-            self.ms_accumulator -= steps as f64;
-            if self.args.diag && self.frames < 3 { eprintln!("[diag] C: stepping sim {steps} ms"); }
-            sim.step(steps);
-            if self.args.diag && self.frames < 3 { eprintln!("[diag] D: sim stepped"); }
-            let mut s = self.signals.make(sim, dt);
-            s.tempo = self.pending_tempo;
-            s.sleep = self.pending_sleepy;
-            signals = Some(s);
-        }
-
+        // The brain at a true 1 kHz, decoupled from the frame rate, then the
+        // body once — both inside the runtime, whichever creature it is.
+        if self.args.diag && self.frames < 3 { eprintln!("[diag] C: stepping creature"); }
         let bounds = self.space.size();
-        self.fly
-            .update(dt, bounds, self.last_env_cursor, signals);
-
+        self.rt.tick(dt, bounds, self.last_env_cursor);
         if self.args.diag && self.frames < 3 { eprintln!("[diag] E: body updated"); }
-        let pose = self.fly.pose();
-        flybody::build_frame(
-            &mut self.frame_mesh,
-            &self.meshes,
-            &self.fly,
-            &pose,
-            self.args.glass,
-        );
 
-        // The connectome inside the glass shell: decay, then light up whatever
-        // just spiked. Same data the brain window draws, on the creature itself.
-        let mut has_neurons = false;
-        if self.args.glass {
-            if let Some(sim) = self.sim.as_ref() {
-                let decay = (-dt * 7.0).exp();
-                for f in self.body_flash.iter_mut() {
-                    *f *= decay;
-                }
-                for ev in &sim.last_spikes {
-                    if ev.neuron < self.body_flash.len() {
-                        self.body_flash[ev.neuron] = if ev.is_gf { 2.5 } else { 1.0 };
-                    }
-                }
-                flybody::build_neuron_field(
-                    &mut self.neuron_mesh,
-                    sim,
-                    &self.body_flash,
-                    &self.fly,
-                    &pose,
-                );
-                has_neurons = true;
-            }
-        }
-        if self.args.diag && self.frames < 3 { eprintln!("[diag] F: geometry built"); }
+        let diag = self.args.diag && self.frames < 3;
+        let (glass, shadows) = (self.args.glass, self.args.shadows);
+        let hidden = self.hidden_for_fullscreen;
+        let at = self.rt.position();
+        let geometry = self.rt.build(glass);
+        if diag { eprintln!("[diag] F: geometry built"); }
 
         if let (Some(r), Some(s)) = (self.renderer.as_mut(), self.surface.as_ref()) {
-            if !self.hidden_for_fullscreen {
+            if !hidden {
                 let t0 = Instant::now();
-                let neurons = if has_neurons {
-                    Some(&self.neuron_mesh)
-                } else {
-                    None
-                };
-                r.render(s, &self.frame_mesh, neurons, self.args.shadows);
-                if self.args.diag && self.frames < 3 {
+                r.render(s, geometry.body, geometry.neurons, shadows);
+                if diag {
                     eprintln!(
-                        "[diag] render took {:?}, {} verts, fly at ({:.0},{:.0})",
+                        "[diag] render took {:?}, {} verts, creature at ({:.0},{:.0})",
                         t0.elapsed(),
-                        self.frame_mesh.verts.len(),
-                        self.fly.pos.x,
-                        self.fly.pos.y
+                        geometry.body.verts.len(),
+                        at.x,
+                        at.y
                     );
                 }
             }
@@ -757,7 +727,7 @@ impl App {
                 harden_overlay_styles(w);
             }
         }
-        let mood = self.trans.habituation.describe();
+        let mood = self.rt.habituation().describe();
         if mood != self.last_mood {
             self.last_mood = mood.clone();
             if let Some(t) = &self.tray {
@@ -768,24 +738,18 @@ impl App {
         // accumulated familiarity.
         if self.last_state_save.elapsed() >= Duration::from_secs(60) {
             self.last_state_save = Instant::now();
-            persist::save(&self.trans.habituation);
+            persist::save(self.rt.creature().id(), self.rt.habituation());
         }
 
         if self.last_report.elapsed() >= Duration::from_secs(10) {
             let fps = self.frames as f32 / self.last_report.elapsed().as_secs_f32();
-            println!(
-                "fps {fps:.0}  state {:?}  pos ({:.0},{:.0})  ledges {}",
-                self.fly.state,
-                self.fly.pos.x,
-                self.fly.pos.y,
-                self.fly.terrain.len()
-            );
+            println!("fps {fps:.0}  {}", self.rt.status());
             self.frames = 0;
             self.last_report = Instant::now();
         }
 
         if self.args.seconds > 0 && self.start.elapsed() >= Duration::from_secs(self.args.seconds) {
-            persist::save(&self.trans.habituation);
+            persist::save(self.rt.creature().id(), self.rt.habituation());
             event_loop.exit();
         }
     }
@@ -802,7 +766,8 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.0);
         let glass = !argv.iter().any(|a| a == "--literal");
-        snapshot::render_to_png(&path, 320, 320, alt, 20, glass);
+        let mut rt = runtime::make(&creature_arg(&argv), dfcore::DEFAULT_SEED);
+        snapshot::render_to_png(rt.as_mut(), &path, 320, 320, alt, 20, glass);
         return;
     }
 

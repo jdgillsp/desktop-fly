@@ -34,6 +34,11 @@ pub struct CircuitFile {
     pub neurons: Vec<CircuitNeuron>,
     /// `[pre_index, post_index, signed_synapse_count]`
     pub edges: Vec<Vec<f32>>,
+    /// `[a_index, b_index, conductance]` gap junctions. Absent from the fly's
+    /// file (FlyWire is chemical-only); written by `etl_celegans.py`, where
+    /// it is a third of the graph.
+    #[serde(default)]
+    pub electrical: Vec<Vec<f32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,5 +105,28 @@ pub fn load_from_dir(dir: &Path) -> Result<BrainData, String> {
 pub fn load() -> Result<BrainData, String> {
     let dir = find_data_dir()
         .ok_or_else(|| "no data/ directory found — run etl.py, or set DESKTOPFLY_DATA".to_string())?;
+    load_from_dir(&dir)
+}
+
+/// Load a creature's data by its `Creature::data_dir()`, relative to the
+/// shipped `data/` directory. `"."` is the fly; `"c_elegans"` the worm.
+///
+/// The fly's files anchor `find_data_dir`, so a second creature's directory is
+/// always looked up beside them rather than searched for on its own — one
+/// data root, several animals.
+pub fn load_for(data_dir: &str) -> Result<BrainData, String> {
+    let root = find_data_dir()
+        .ok_or_else(|| "no data/ directory found — run etl.py, or set DESKTOPFLY_DATA".to_string())?;
+    let dir = if data_dir == "." {
+        root
+    } else {
+        root.join(data_dir)
+    };
+    if !dir.join("circuit.json").is_file() {
+        return Err(format!(
+            "no connectome under {} — this creature's data is not shipped; see its ETL script",
+            dir.display()
+        ));
+    }
     load_from_dir(&dir)
 }

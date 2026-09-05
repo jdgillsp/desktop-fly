@@ -8,8 +8,10 @@
 //! `tray-icon` wraps `Shell_NotifyIcon` on Windows and `NSStatusItem` on macOS,
 //! so the same code serves both shells (PORT_PLAN.md §4).
 
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+
+use dfcore::CREATURE_IDS;
 
 /// What the user picked. Kept as an enum so the app loop stays declarative and
 /// this file owns nothing but presentation.
@@ -22,14 +24,20 @@ pub enum TrayCommand {
     NextDisplay,
     ToggleShadows,
     ForgetMe,
+    /// The "Creature" submenu: switch to this creature id.
+    SelectCreature(&'static str),
     Quit,
 }
 
 pub struct Tray {
     _icon: TrayIcon,
     pause: MenuItem,
+    /// Which data the running creature is on.
+    info: MenuItem,
     /// Shows what the creature currently thinks of you.
     mood: MenuItem,
+    /// One check item per creature, in `CREATURE_IDS` order.
+    creatures: Vec<(&'static str, CheckMenuItem)>,
     ids: Vec<(tray_icon::menu::MenuId, TrayCommand)>,
 }
 
@@ -106,22 +114,39 @@ fn fly_icon_rgba() -> Vec<u8> {
 }
 
 impl Tray {
-    pub fn new(data_info: &str) -> Option<Self> {
+    /// `current` is the running creature's id; `data_info` its data line.
+    pub fn new(data_info: &str, current: &str) -> Option<Self> {
         let menu = Menu::new();
 
         let title = MenuItem::new("DesktopFly", false, None);
         let info = MenuItem::new(data_info, false, None);
         let pause = MenuItem::new("Pause", true, None);
         let brain = MenuItem::new("Show/Hide Brain", true, None);
-        let escape = MenuItem::new("Escape Test (loom)", true, None);
-        let scare = MenuItem::new("Scare Fly", true, None);
+        let escape = MenuItem::new("Escape Test (startle)", true, None);
+        let scare = MenuItem::new("Scare It", true, None);
         let display = MenuItem::new("Move to Next Display", true, None);
         let shadow = MenuItem::new("Toggle Shadow", true, None);
         let mood = MenuItem::new("getting to know you", false, None);
         let forget = MenuItem::new("Forget Me (reset habituation)", true, None);
         let quit = MenuItem::new("Quit", true, None);
 
-        let ids = vec![
+        // The creature picker. Check items rather than plain ones so the menu
+        // shows which animal is running without a separate status line.
+        let creatures: Vec<(&'static str, CheckMenuItem)> = CREATURE_IDS
+            .iter()
+            .map(|id| {
+                let name = dfcore::by_id(id)
+                    .map(|c| c.display_name())
+                    .unwrap_or(id);
+                (*id, CheckMenuItem::new(name, true, *id == current, None))
+            })
+            .collect();
+        let submenu = Submenu::new("Creature", true);
+        for (_, item) in &creatures {
+            submenu.append(item).ok()?;
+        }
+
+        let mut ids = vec![
             (pause.id().clone(), TrayCommand::TogglePause),
             (brain.id().clone(), TrayCommand::ToggleBrain),
             (escape.id().clone(), TrayCommand::EscapeTest),
@@ -131,10 +156,14 @@ impl Tray {
             (forget.id().clone(), TrayCommand::ForgetMe),
             (quit.id().clone(), TrayCommand::Quit),
         ];
+        for (id, item) in &creatures {
+            ids.push((item.id().clone(), TrayCommand::SelectCreature(id)));
+        }
 
         menu.append_items(&[
             &title,
             &info,
+            &submenu,
             &PredefinedMenuItem::separator(),
             &pause,
             &brain,
@@ -161,9 +190,19 @@ impl Tray {
         Some(Tray {
             _icon: tray,
             pause,
+            info,
             mood,
+            creatures,
             ids,
         })
+    }
+
+    /// Reflect a creature switch: tick the right item, update the data line.
+    pub fn set_creature(&self, id: &str, data_info: &str) {
+        for (cid, item) in &self.creatures {
+            item.set_checked(*cid == id);
+        }
+        self.info.set_text(data_info);
     }
 
     /// Drain any menu activations since the last frame.

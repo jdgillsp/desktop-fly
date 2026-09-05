@@ -10,7 +10,7 @@ implementation — it is the oracle this port is checked against.
 |---|---|---|
 | `core/` (`dfcore`) | connectome loading, the 1 kHz LIF sim, rates→drives, body behaviour, habituation, both ground-truth suites | **no** — builds and tests on any target |
 | `platform/` (`dfplatform`) | the only crate that knows what an OS is; fills in one `EnvSnapshot` 30×/s | yes, per-OS |
-| `shell/` (`dfshell`) | overlay window, wgpu renderer, tray, transduction, persistence | yes |
+| `shell/` (`dfshell`) | overlay window, wgpu renderer, tray, persistence, and one `Runtime` per creature (`runtime.rs`: brain + body + senses + geometry behind one seam, so `main.rs` never names a species) | yes |
 | `spike0/` | the Spike 0 overlay proof — kept because it is the minimal reproducer for transparency problems | yes |
 | `winprobe/` | window-terrain / ex-style auditor, used to verify the overlay at OS level | yes |
 
@@ -29,7 +29,17 @@ target/release/desktopfly.exe --diag       # per-stage frame tracing
 target/release/desktopfly.exe --fps 60     # default is 30; see below
 target/release/desktopfly.exe --literal    # photoreal fly instead of glass
 target/release/desktopfly.exe --no-brain   # overlay only
+target/release/desktopfly.exe --creature c_elegans   # the worm (see below)
 ```
+
+**Creatures.** The tray has a *Creature* submenu; the choice is saved and
+survives a restart, and `--creature ID` overrides it for one run (ids:
+`drosophila`, `c_elegans`). Switching keeps the new animal where the old one
+was and rebuilds the brain window for its data. The worm's connectome is
+**not shipped** (its licence is unverified — `PORT_PLAN.md` §8), so until
+`etl_celegans.py` has been run it crawls *brainless* at a constant drive and
+the tray says so; nothing about it reacts to you. An unknown id falls back to
+the fly with a message rather than a panic.
 
 **Frame rate.** The default is 30 fps, not 60. Spike 0 measured ~8% of a core
 just to clear and present a full-screen overlay, so frame rate is a real part
@@ -88,6 +98,9 @@ Two macOS senses are genuinely weaker on Windows, and
 
 ## State on disk
 
-`%LOCALAPPDATA%\DesktopFly\habituation.json` — what the creature has learned
-about you. Delete it, or use the tray's "Forget Me", to get a naive creature.
-Nothing else is persisted.
+`%LOCALAPPDATA%\DesktopFly\habituation.json` — what the fly has learned about
+you; every other creature keeps its own file beside it
+(`habituation-c_elegans.json`), because what the fly learned about your cursor
+is not what the worm learned about your clicks. Delete one, or use the tray's
+"Forget Me", to get a naive creature. `settings.json` in the same folder holds
+the creature choice. Nothing else is persisted.

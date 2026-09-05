@@ -110,6 +110,62 @@ impl Connectome {
     pub fn is_empty(&self) -> bool {
         self.roles.is_empty()
     }
+
+    /// Build from a shipped `circuit.json`. The fly's [`LifSim`] reads the
+    /// file directly (it predates this type and is checked against the Swift
+    /// oracle, so it stays untouched); every other integrator starts here.
+    pub fn from_circuit(file: &crate::data::CircuitFile, provenance: Provenance) -> Self {
+        let n = file.neurons.len();
+        let edge = |row: &Vec<f32>| -> Option<Edge> {
+            if row.len() < 3 {
+                return None;
+            }
+            let (pre, post) = (row[0] as usize, row[1] as usize);
+            if pre >= n || post >= n {
+                return None;
+            }
+            Some(Edge {
+                pre: pre as u32,
+                post: post as u32,
+                weight: row[2],
+            })
+        };
+        Connectome {
+            roles: file.neurons.iter().map(|x| x.role.clone()).collect(),
+            cell_types: file.neurons.iter().map(|x| x.cell_type.clone()).collect(),
+            sides: file.neurons.iter().map(|x| x.side.clone()).collect(),
+            positions: file
+                .neurons
+                .iter()
+                .map(|x| {
+                    let p = &x.pos;
+                    [
+                        p.first().copied().unwrap_or(0.0),
+                        p.get(1).copied().unwrap_or(0.0),
+                        p.get(2).copied().unwrap_or(0.0),
+                    ]
+                })
+                .collect(),
+            chemical: file.edges.iter().filter_map(edge).collect(),
+            electrical: file.electrical.iter().filter_map(edge).collect(),
+            provenance,
+        }
+    }
+}
+
+/// Every creature the engine can run, in menu order. The fly is first because
+/// it is the one with shipped data.
+pub const CREATURE_IDS: [&str; 2] = ["drosophila", "c_elegans"];
+
+/// Look a creature up by its `id()`. `None` for an id that is not a creature,
+/// so a stale settings file or a typo on the command line degrades to the
+/// caller's default rather than a panic.
+pub fn by_id(id: &str) -> Option<Box<dyn Creature>> {
+    match id {
+        "drosophila" => Some(Box::new(Drosophila)),
+        "c_elegans" => Some(Box::new(CElegans)),
+        _ => None,
+    }
 }
 
 /// Which integrator a creature needs.
@@ -506,5 +562,44 @@ mod tests {
     #[test]
     fn a_crawler_and_a_flier_are_distinguishable_substrates() {
         assert_ne!(Substrate::Crawler, Substrate::WalkerFlier);
+    }
+
+    /// The picker's contract: every listed id resolves, and resolves to a
+    /// creature that reports the same id back — otherwise a persisted choice
+    /// could silently load a different animal.
+    #[test]
+    fn every_listed_creature_id_round_trips() {
+        for id in CREATURE_IDS {
+            let c = by_id(id).unwrap_or_else(|| panic!("{id} is listed but not constructible"));
+            assert_eq!(c.id(), id);
+        }
+        assert!(by_id("honeybee").is_none(), "no fabricated species (PORT_PLAN.md §6.2 rule 4)");
+    }
+
+    /// A circuit file becomes a connectome with both edge lists, and malformed
+    /// rows are dropped rather than indexing out of range in the integrator.
+    #[test]
+    fn a_circuit_file_becomes_a_connectome_with_both_edge_lists() {
+        use crate::data::{CircuitFile, CircuitNeuron};
+        let neuron = |role: &str, side: &str| CircuitNeuron {
+            id: role.into(),
+            cell_type: role.to_uppercase(),
+            role: role.into(),
+            side: side.into(),
+            pos: vec![1.0, 2.0, 3.0],
+        };
+        let file = CircuitFile {
+            neurons: vec![neuron("touch", "left"), neuron("forward", "right")],
+            edges: vec![vec![0.0, 1.0, -4.0], vec![0.0, 9.0, 1.0], vec![1.0]],
+            electrical: vec![vec![0.0, 1.0, 2.0]],
+        };
+        let c = Connectome::from_circuit(&file, Provenance::Authored { note: "fixture".into() });
+        assert_eq!(c.len(), 2);
+        assert_eq!(c.roles, vec!["touch", "forward"]);
+        assert_eq!(c.cell_types[0], "TOUCH");
+        assert_eq!(c.positions[1], [1.0, 2.0, 3.0]);
+        assert_eq!(c.chemical.len(), 1, "out-of-range and short rows are dropped");
+        assert_eq!(c.chemical[0].weight, -4.0);
+        assert_eq!(c.electrical.len(), 1);
     }
 }

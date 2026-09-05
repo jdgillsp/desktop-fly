@@ -755,7 +755,7 @@ before a single pixel is drawn.
 | **Phase 3** — brain window | ✅ **done** | `assets/windows-brain.png`. 23,210 somas, role-coloured circuit, spike flashes, tested click-to-stimulate. |
 | **§6.3 #2** — glass anatomy | ✅ **done** | `assets/glass-anatomy.png`. Now the default; `--literal` restores the photoreal fly. Decision 4 answered. |
 | **Phase 4** — creature abstraction | ✅ **done** | Pure refactor; suites bit-identical. Roles are one data manifest; `Sim`, `Body`, `Creature` are traits. |
-| **Phase 5** — second creature | 🟨 **engine done, data blocked** | Graded integrator, worm manifest, crawler body and ETL all built and tested. The connectome is **not shipped** — its redistribution terms are unverified (below), so the worm cannot yet be *run*. |
+| **Phase 5** — second creature | 🟨 **engine and shell done, data blocked** | Graded integrator, worm manifest, crawler body and ETL all built and tested. Since 2026-09-05 the shell is generic (`rust/shell/src/runtime.rs`): a tray *Creature* picker, `--creature`, per-creature habituation, and the worm rendered as a glass tube — it crawls on the desktop, **brainless**, because the connectome is still not shipped (redistribution terms unverified, below). The fly's `--snapshot` is byte-identical through the generic path. |
 | **Phase 6** — macOS parity | ⬜ not started | Needs a Mac to verify; cannot be tested from here. |
 
 **104 tests pass, no warnings.** The fly runs at 59 fps on ~13% of one core
@@ -770,8 +770,9 @@ with the brain window open.
    `CElegans::provenance()` records the licence as `UNVERIFIED` rather than
    implying a clearance it does not have. Verify the source's terms, run the
    ETL, and the creature runs.
-2. **Rendering the worm in the shell.** The crawler body produces a pose; the
-   renderer only draws the fly. Straightforward once there is a worm to draw.
+2. ~~**Rendering the worm in the shell.**~~ Done 2026-09-05 as Phase 0 of
+   `SPIDER_PLAN.md`: `wormbody.rs` sweeps a tapered capsule down the body,
+   `wormrt.rs` gives the worm its own senses (touch only — it is blind).
 3. **macOS parity.** `platform/macos.rs` via `objc2`. Untestable here.
 
 Bugs the build found that the plan did not predict are recorded in

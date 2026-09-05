@@ -22,9 +22,10 @@ seams), §6.2 (invented creatures and the honesty rules) and §6.3 (what is fun)
   walker with a ballistic jump and a dragline, and a small, permission-free,
   content-blind set of "coding" senses (which app is in front, typing cadence,
   an opt-in build-result hook).
-- **Before any of it: the shell has no creature picker.** The worm from Phase 5
-  exists only in `dfcore`; `rust/shell/src/main.rs` still constructs `LifSim`
-  and `Fly` by name. That is Phase 0 here and it is owed regardless.
+- **Before any of it: the shell had no creature picker.** The worm from Phase 5
+  existed only in `dfcore`; `rust/shell/src/main.rs` constructed `LifSim` and
+  `Fly` by name. That was Phase 0 here, owed regardless, and it is **done**
+  (§7).
 - Roughly **3–4 weeks**, in six phases, each with its own suite gate.
 
 ## 1. What "coding spider" means here
@@ -231,18 +232,22 @@ it.
 Each phase ends with `cargo test --workspace` green and both ground-truth
 suites unchanged for the fly. Estimates are working days.
 
-### Phase 0 — creature picker in the shell (2–3 days)
+### Phase 0 — creature picker in the shell (2–3 days) — ✅ done 2026-09-05
 
-- `--creature drosophila|c_elegans|salticid` and a tray submenu; the choice is
-  persisted next to `habituation.json`.
-- Shell holds `Box<dyn Sim>` and `Box<dyn Body>`; transduction becomes a trait
-  with the fly's as the first implementation (`PORT_PLAN.md` §5 always said
-  this layer is replaced wholesale per creature).
-- A `CreatureRenderer` seam: the fly's glass and literal meshes behind it, the
-  worm as a stroked polyline (cheap, and proves the seam with two bodies before
-  the third arrives).
-- **Gate:** the fly runs identically through the generic path (`--snapshot`
-  diff against `assets/windows-fly-snapshot.png`; suites unchanged).
+- `--creature drosophila|c_elegans` and a tray *Creature* submenu; the choice
+  is persisted in `settings.json` next to the habituation files, which are
+  now **per creature**.
+- One seam rather than three: `rust/shell/src/runtime.rs` puts brain, body,
+  senses→stimulus, rates→commands *and* geometry behind a `Runtime` trait,
+  because those five vary together per creature and splitting them would have
+  meant three trait objects that only ever travel as a set. `FlyRuntime` is
+  the old `main.rs` code moved, not rewritten; `wormrt.rs` is the worm's, with
+  touch-only senses and a `GradedSignalBuilder` in core for its readout.
+- The worm renders as a tapered glass capsule tube (`wormbody.rs`), brainless
+  until its data ships.
+- **Gate met:** the fly's `--snapshot` (glass and literal) is byte-identical
+  to the pre-seam build through the generic path; all 122 tests pass; both
+  creatures run live and exit cleanly.
 
 ### Phase 1 — chimera plumbing (3–4 days)
 

@@ -32,7 +32,10 @@ otherwise.
   second creature is an implementation rather than a fork. *C. elegans* runs
   on a **graded, non-spiking** integrator (`rust/core/src/graded.rs`) — its
   neurons do not spike, and its data is not shipped because the licence is
-  unverified.
+  unverified. In the shell, everything per-creature sits behind one `Runtime`
+  (`rust/shell/src/runtime.rs`); the tray picks the creature and `--creature`
+  overrides it. A third creature is a `Creature` impl in core plus a `Runtime`
+  in the shell — see `SPIDER_PLAN.md`.
 - The PRNG is seeded, so the suites are reproducible run to run.
 - Scene units are **logical**, not physical pixels — the creature keeps a
   constant apparent size on a scaled display.
