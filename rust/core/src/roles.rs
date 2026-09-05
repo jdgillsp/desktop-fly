@@ -248,6 +248,147 @@ pub fn drosophila() -> RoleManifest {
     }
 }
 
+/// *Caenorhabditis elegans*, hermaphrodite.
+///
+/// 302 neurons, 279 of them with synapses — the only complete, cell-identified
+/// whole-animal connectome (White et al. 1986; Cook et al. 2019 covers both
+/// sexes). Unlike the fly, **every neuron has a name and a known job**, which
+/// is why the brain window for a worm can label individual cells rather than
+/// regions.
+///
+/// Baselines here are membrane-potential offsets, not spike-rate drives: this
+/// creature runs on [`crate::graded::GradedSim`], because *C. elegans* neurons
+/// are predominantly non-spiking.
+///
+/// Populations are grouped by function, following the standard locomotor
+/// circuit description:
+///
+/// - **command interneurons** set direction: `AVB`/`PVC` drive forward,
+///   `AVA`/`AVD`/`AVE` drive reversal.
+/// - **motor neuron classes** execute it: `VB`/`DB` forward, `VA`/`DA`
+///   backward, `VD`/`DD` inhibitory.
+/// - **mechanosensors** decide when: `ALM`/`AVM` anterior touch triggers
+///   reversal, `PLM` posterior touch accelerates forward. This is the
+///   tap-withdrawal circuit, the canonical assay for habituation.
+/// - **`AFD`** is the thermosensor — the worm migrates toward its cultivation
+///   temperature, which is the mapping that makes machine heat meaningful.
+/// - **`AWA`/`AWC`** are chemosensors; **`RIS`** gates sleep-like quiescence.
+pub fn c_elegans() -> RoleManifest {
+    use Baseline::*;
+    use Membership::*;
+    RoleManifest {
+        creature: "c_elegans",
+        default_baseline: Fixed(0.0),
+        default_color: [0.55, 0.58, 0.62],
+        populations: vec![
+            Population {
+                slug: "forward",
+                label: "AVB / PVC - forward command",
+                membership: Role("forward"),
+                bilateral: true,
+                baseline: Fixed(0.6),
+                color: [0.35, 0.90, 0.60],
+            },
+            Population {
+                slug: "reverse",
+                label: "AVA / AVD / AVE - reverse command",
+                membership: Role("reverse"),
+                bilateral: true,
+                baseline: Fixed(0.4),
+                color: [0.95, 0.45, 0.35],
+            },
+            Population {
+                slug: "motor_b",
+                label: "VB / DB - forward motor neurons",
+                membership: Role("motor_b"),
+                bilateral: false,
+                baseline: Fixed(0.2),
+                color: [0.40, 0.80, 0.95],
+            },
+            Population {
+                slug: "motor_a",
+                label: "VA / DA - backward motor neurons",
+                membership: Role("motor_a"),
+                bilateral: false,
+                baseline: Fixed(0.2),
+                color: [0.95, 0.65, 0.35],
+            },
+            Population {
+                slug: "motor_d",
+                label: "VD / DD - inhibitory motor neurons",
+                membership: Role("motor_d"),
+                bilateral: false,
+                baseline: Fixed(0.1),
+                color: [0.65, 0.45, 0.90],
+            },
+            Population {
+                slug: "touch",
+                label: "ALM / AVM - anterior touch (reversal)",
+                membership: Role("touch"),
+                bilateral: true,
+                baseline: Fixed(0.0),
+                color: [1.00, 0.85, 0.30],
+            },
+            Population {
+                slug: "touch_post",
+                label: "PLM / PVM - posterior touch (accelerate)",
+                membership: Role("touch_post"),
+                bilateral: true,
+                baseline: Fixed(0.0),
+                color: [1.00, 0.70, 0.20],
+            },
+            Population {
+                slug: "thermo",
+                label: "AFD - thermosensor (thermotaxis)",
+                membership: Role("thermo"),
+                bilateral: true,
+                baseline: Fixed(0.0),
+                color: [0.95, 0.35, 0.55],
+            },
+            Population {
+                slug: "chemo",
+                label: "AWA / AWC - chemosensors",
+                membership: Role("chemo"),
+                bilateral: true,
+                baseline: Fixed(0.0),
+                color: [0.40, 0.95, 0.85],
+            },
+            Population {
+                slug: "turn",
+                label: "RIM / RIV / SMD - omega turn",
+                membership: Role("turn"),
+                bilateral: true,
+                baseline: Fixed(0.15),
+                color: [0.90, 0.55, 0.95],
+            },
+            Population {
+                slug: "sleep",
+                label: "RIS - quiescence",
+                membership: Role("sleep"),
+                bilateral: false,
+                baseline: Fixed(0.05),
+                color: [0.45, 0.50, 0.85],
+            },
+            Population {
+                slug: "inter",
+                label: "interneurons",
+                membership: Role("inter"),
+                bilateral: false,
+                baseline: Range(0.05, 0.25),
+                color: [0.55, 0.58, 0.62],
+            },
+            Population {
+                slug: "sensory",
+                label: "sensory neurons",
+                membership: Role("sensory"),
+                bilateral: false,
+                baseline: Fixed(0.0),
+                color: [0.30, 0.70, 0.80],
+            },
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,146 +529,5 @@ mod tests {
         let m = drosophila();
         let lum = |c: [f32; 4]| c[0] + c[1] + c[2];
         assert!(lum(m.color_for("gf")) > lum(m.color_for("other")));
-    }
-}
-
-/// *Caenorhabditis elegans*, hermaphrodite.
-///
-/// 302 neurons, 279 of them with synapses — the only complete, cell-identified
-/// whole-animal connectome (White et al. 1986; Cook et al. 2019 covers both
-/// sexes). Unlike the fly, **every neuron has a name and a known job**, which
-/// is why the brain window for a worm can label individual cells rather than
-/// regions.
-///
-/// Baselines here are membrane-potential offsets, not spike-rate drives: this
-/// creature runs on [`crate::graded::GradedSim`], because *C. elegans* neurons
-/// are predominantly non-spiking.
-///
-/// Populations are grouped by function, following the standard locomotor
-/// circuit description:
-///
-/// - **command interneurons** set direction: `AVB`/`PVC` drive forward,
-///   `AVA`/`AVD`/`AVE` drive reversal.
-/// - **motor neuron classes** execute it: `VB`/`DB` forward, `VA`/`DA`
-///   backward, `VD`/`DD` inhibitory.
-/// - **mechanosensors** decide when: `ALM`/`AVM` anterior touch triggers
-///   reversal, `PLM` posterior touch accelerates forward. This is the
-///   tap-withdrawal circuit, the canonical assay for habituation.
-/// - **`AFD`** is the thermosensor — the worm migrates toward its cultivation
-///   temperature, which is the mapping that makes machine heat meaningful.
-/// - **`AWA`/`AWC`** are chemosensors; **`RIS`** gates sleep-like quiescence.
-pub fn c_elegans() -> RoleManifest {
-    use Baseline::*;
-    use Membership::*;
-    RoleManifest {
-        creature: "c_elegans",
-        default_baseline: Fixed(0.0),
-        default_color: [0.55, 0.58, 0.62],
-        populations: vec![
-            Population {
-                slug: "forward",
-                label: "AVB / PVC - forward command",
-                membership: Role("forward"),
-                bilateral: true,
-                baseline: Fixed(0.6),
-                color: [0.35, 0.90, 0.60],
-            },
-            Population {
-                slug: "reverse",
-                label: "AVA / AVD / AVE - reverse command",
-                membership: Role("reverse"),
-                bilateral: true,
-                baseline: Fixed(0.4),
-                color: [0.95, 0.45, 0.35],
-            },
-            Population {
-                slug: "motor_b",
-                label: "VB / DB - forward motor neurons",
-                membership: Role("motor_b"),
-                bilateral: false,
-                baseline: Fixed(0.2),
-                color: [0.40, 0.80, 0.95],
-            },
-            Population {
-                slug: "motor_a",
-                label: "VA / DA - backward motor neurons",
-                membership: Role("motor_a"),
-                bilateral: false,
-                baseline: Fixed(0.2),
-                color: [0.95, 0.65, 0.35],
-            },
-            Population {
-                slug: "motor_d",
-                label: "VD / DD - inhibitory motor neurons",
-                membership: Role("motor_d"),
-                bilateral: false,
-                baseline: Fixed(0.1),
-                color: [0.65, 0.45, 0.90],
-            },
-            Population {
-                slug: "touch",
-                label: "ALM / AVM - anterior touch (reversal)",
-                membership: Role("touch"),
-                bilateral: true,
-                baseline: Fixed(0.0),
-                color: [1.00, 0.85, 0.30],
-            },
-            Population {
-                slug: "touch_post",
-                label: "PLM / PVM - posterior touch (accelerate)",
-                membership: Role("touch_post"),
-                bilateral: true,
-                baseline: Fixed(0.0),
-                color: [1.00, 0.70, 0.20],
-            },
-            Population {
-                slug: "thermo",
-                label: "AFD - thermosensor (thermotaxis)",
-                membership: Role("thermo"),
-                bilateral: true,
-                baseline: Fixed(0.0),
-                color: [0.95, 0.35, 0.55],
-            },
-            Population {
-                slug: "chemo",
-                label: "AWA / AWC - chemosensors",
-                membership: Role("chemo"),
-                bilateral: true,
-                baseline: Fixed(0.0),
-                color: [0.40, 0.95, 0.85],
-            },
-            Population {
-                slug: "turn",
-                label: "RIM / RIV / SMD - omega turn",
-                membership: Role("turn"),
-                bilateral: true,
-                baseline: Fixed(0.15),
-                color: [0.90, 0.55, 0.95],
-            },
-            Population {
-                slug: "sleep",
-                label: "RIS - quiescence",
-                membership: Role("sleep"),
-                bilateral: false,
-                baseline: Fixed(0.05),
-                color: [0.45, 0.50, 0.85],
-            },
-            Population {
-                slug: "inter",
-                label: "interneurons",
-                membership: Role("inter"),
-                bilateral: false,
-                baseline: Range(0.05, 0.25),
-                color: [0.55, 0.58, 0.62],
-            },
-            Population {
-                slug: "sensory",
-                label: "sensory neurons",
-                membership: Role("sensory"),
-                bilateral: false,
-                baseline: Fixed(0.0),
-                color: [0.30, 0.70, 0.80],
-            },
-        ],
     }
 }

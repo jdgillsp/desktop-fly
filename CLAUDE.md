@@ -1,9 +1,44 @@
 # DesktopFly — agent notes
 
-A 3D fruit fly on a transparent macOS overlay, behavior-driven by a 1 kHz
+A 3D fruit fly on a transparent desktop overlay, behavior-driven by a 1 kHz
 leaky-integrate-and-fire (LIF) simulation of a 668-neuron circuit extracted
-from the real FlyWire connectome (FAFB v783). The body is procedural
-SceneKit; the brain data is real.
+from the real FlyWire connectome (FAFB v783). The body is procedural; the
+brain data is real.
+
+## Two builds — read this first
+
+| | macOS (Swift) | Windows (Rust) |
+|---|---|---|
+| where | repo root, `*.swift` | `rust/` |
+| status | **reference implementation**, unchanged | active development |
+| build | `./build.sh` | `cd rust && cargo build --release` |
+| suites | `./DesktopFly --simtest --behaviortest` | `cargo test --workspace`, or `dfcore.exe --simtest --behaviortest` |
+
+The Swift app is the **oracle**: the Rust port is checked against it
+numerically, and its numbers must not drift. If you are changing simulation or
+behavior, run *both* suites in whichever tree you touched.
+
+The port's plan, decisions and progress are in `PORT_PLAN.md`; its layout,
+deliberate deviations and platform fidelity notes are in `rust/README.md`.
+Everything below this section describes the **Swift** build unless it says
+otherwise.
+
+### What differs in the Rust build
+
+- Roles are **data**, not string literals: one manifest in
+  `rust/core/src/roles.rs`. The eight-step recipe below collapses to four
+  steps in two files (ETL, manifest row, readout, test).
+- `Sim`, `Body` and `Creature` are traits (`rust/core/src/creature.rs`), so a
+  second creature is an implementation rather than a fork. *C. elegans* runs
+  on a **graded, non-spiking** integrator (`rust/core/src/graded.rs`) — its
+  neurons do not spike, and its data is not shipped because the licence is
+  unverified.
+- The PRNG is seeded, so the suites are reproducible run to run.
+- Scene units are **logical**, not physical pixels — the creature keeps a
+  constant apparent size on a scaled display.
+- Extras with no Swift counterpart: habituation (persisted), glass-anatomy
+  rendering (default; `--literal` for the photoreal fly), and yielding the
+  overlay to fullscreen apps.
 
 ## Files
 
@@ -17,7 +52,7 @@ SceneKit; the brain data is real.
 | `etl.py` | raw Codex dumps → `data/brain_points.json` + `data/circuit.json` |
 | `data/` | shipped derived data (CC BY-NC 4.0 — see `data/DATA_LICENSE.md`) |
 
-## Build, run, verify
+## Build, run, verify (macOS / Swift)
 
 ```sh
 ./build.sh                     # bare swiftc, -swift-version 5, no Xcode project

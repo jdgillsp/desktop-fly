@@ -153,6 +153,10 @@ pub struct LifSim {
     /// the readout) share one source of truth for colours, labels and
     /// membership instead of maintaining parallel copies.
     pub manifest: RoleManifest,
+    /// Resolved population membership, by manifest slug. Backs `Sim::group`, so
+    /// the trait answers from the same table the simulation was built from
+    /// rather than from a hand-written slug list that has to be kept in sync.
+    pub(crate) groups: std::collections::HashMap<&'static str, Vec<usize>>,
 }
 
 impl LifSim {
@@ -228,6 +232,22 @@ impl LifSim {
             .collect();
 
         let baseline = manifest.baselines(&roles, &mut rng);
+
+        // Flattened membership for `Sim::group`, plus the two side-split
+        // aliases the fly's readout needs.
+        let mut flat_groups: std::collections::HashMap<&'static str, Vec<usize>> = groups
+            .iter()
+            .map(|(k, (l, r))| {
+                let mut all = l.clone();
+                all.extend(r.iter().copied());
+                all.sort_unstable();
+                (*k, all)
+            })
+            .collect();
+        flat_groups.insert("dna_left", dna_l.clone());
+        flat_groups.insert("dna_right", dna_r.clone());
+        flat_groups.insert("loom_left", loom_left.clone());
+        flat_groups.insert("loom_right", loom_right.clone());
 
         // CSR build.
         let mut counts = vec![0usize; n];
@@ -311,6 +331,7 @@ impl LifSim {
             habituation: Habituation::new(),
             habituation_enabled: true,
             manifest,
+            groups: flat_groups,
         }
     }
 
@@ -343,7 +364,7 @@ impl LifSim {
         if ms <= 0 {
             return;
         }
-        for mut p in self.pending_stims.drain(..).collect::<Vec<_>>() {
+        for mut p in std::mem::take(&mut self.pending_stims) {
             p.until_ms = self.sim_ms + p.duration_ms;
             self.active_stims.push(p);
         }

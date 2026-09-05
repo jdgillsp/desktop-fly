@@ -8,7 +8,7 @@
 //! whatever the network does downstream is what the body does.
 
 use dfcore::data::BrainPointsFile;
-use dfcore::LifSim;
+use dfcore::Sim;
 
 use crate::math::{self, Mat4};
 
@@ -27,10 +27,11 @@ const CLASS_COLORS: [[f32; 4]; 9] = [
 
 /// Human-readable name for a picked region (BrainView.swift:300), resolved
 /// through the creature's role manifest rather than a table duplicated here.
-fn region_name(sim: &LifSim, picked: &[usize]) -> String {
+fn region_name(sim: &dyn Sim, picked: &[usize]) -> String {
+    let roles = sim.roles();
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for &i in picked {
-        *counts.entry(sim.roles[i].as_str()).or_default() += 1;
+        *counts.entry(roles[i].as_str()).or_default() += 1;
     }
     let mut best = ("other", 0usize);
     for (k, v) in &counts {
@@ -39,7 +40,7 @@ fn region_name(sim: &LifSim, picked: &[usize]) -> String {
             best = (k, *v);
         }
     }
-    format!("{} ({} neurons)", sim.manifest.label_for(best.0), picked.len())
+    format!("{} ({} neurons)", sim.manifest().label_for(best.0), picked.len())
 }
 
 #[repr(C)]
@@ -168,7 +169,7 @@ impl BrainView {
         adapter: &wgpu::Adapter,
         surface: wgpu::Surface<'static>,
         points: &BrainPointsFile,
-        sim: &LifSim,
+        sim: &dyn Sim,
         width: u32,
         height: u32,
     ) -> Self {
@@ -211,11 +212,11 @@ impl BrainView {
         let cloud_index_count = ci.len() as u32;
 
         // --- the 668-neuron circuit, rebuilt each frame for spike flashes ---
-        let circuit_pos: Vec<[f32; 3]> = sim.positions.clone();
+        let circuit_pos: Vec<[f32; 3]> = sim.positions().to_vec();
         let circuit_base: Vec<[f32; 4]> = sim
-            .roles
+            .roles()
             .iter()
-            .map(|r| sim.manifest.color_for(r))
+            .map(|r| sim.manifest().color_for(r))
             .collect();
         let circuit_seed: Vec<([f32; 3], [f32; 4], f32)> = circuit_pos
             .iter()
@@ -349,7 +350,7 @@ impl BrainView {
             circuit_index_count,
             circuit_pos,
             circuit_base,
-            flash: vec![0.0; sim.n],
+            flash: vec![0.0; sim.n()],
             scratch: qv,
             rotation: 0.0,
             paused_by_hover: false,
@@ -369,20 +370,26 @@ impl BrainView {
         math::mul(math::rotate_x(-0.25), math::rotate_y(self.rotation))
     }
 
-    pub fn update(&mut self, dt: f32, sim: &LifSim) {
+    /// Reads through the `Sim` trait rather than a concrete simulation, so the
+    /// window works for a creature whose neurons never spike: `activity()` is
+    /// spike flashes for the fly and normalised depolarisation for the worm.
+    ///
+    /// Sampled rather than accumulated — the brain redraws at ~30 Hz while the
+    /// sim steps on the render tick, so brief activity between reads is missed.
+    /// The decay makes that read as a glow rather than a stutter.
+    pub fn update(&mut self, dt: f32, sim: &dyn Sim) {
         if !self.paused_by_hover {
             self.rotation += dt * 0.35;
         }
-        // Decay existing flashes, then light up whatever just spiked.
         let decay = (-dt * 6.0).exp();
         for f in self.flash.iter_mut() {
             *f *= decay;
         }
-        for ev in &sim.last_spikes {
-            if ev.neuron < self.flash.len() {
-                // The giant fiber gets a brighter, longer flash — it is the
-                // event the whole app is about.
-                self.flash[ev.neuron] = if ev.is_gf { 3.0 } else { 1.0 };
+        for (i, a) in sim.activity().iter().enumerate() {
+            if i < self.flash.len() && *a > 0.0 {
+                // Take the brighter of decayed and current, so a flash reads as
+                // an event rather than flickering with the sampling rate.
+                self.flash[i] = self.flash[i].max(a * 3.0);
             }
         }
     }
@@ -480,7 +487,7 @@ impl BrainView {
     ///
     /// The reaction is whatever the real network does downstream — click the
     /// Giant Fiber and the fly escapes; click DNg11 and it grooms.
-    pub fn handle_click(&mut self, px: f32, py: f32, sim: &mut LifSim) -> Option<String> {
+    pub fn handle_click(&mut self, px: f32, py: f32, sim: &mut dyn Sim) -> Option<String> {
         let (w, h) = (self.config.width as f32, self.config.height as f32);
         let best = pick_neuron(&self.circuit_pos, &self.model(), px, py, w, h, 3.0)?;
         let anchor = self.circuit_pos[best];

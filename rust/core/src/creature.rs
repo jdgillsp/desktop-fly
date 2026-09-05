@@ -199,11 +199,15 @@ impl Sim for LifSim {
     fn stimulate(&mut self, indices: &[usize], strength: f32, duration_ms: i64) {
         LifSim::stimulate(self, indices, strength, duration_ms)
     }
+    /// A spike is a third of full scale; a giant-fiber spike is full scale.
+    /// The GF firing *is* the maximal event in this animal — it is the escape
+    /// command the whole app is built around — so it earns the top of the range
+    /// and reads as a distinct flash rather than one bright dot among many.
     fn activity(&self) -> Vec<f32> {
         let mut a = vec![0.0; self.n];
         for ev in &self.last_spikes {
             if ev.neuron < a.len() {
-                a[ev.neuron] = if ev.is_gf { 1.0 } else { 0.6 };
+                a[ev.neuron] = if ev.is_gf { 1.0 } else { 1.0 / 3.0 };
             }
         }
         a
@@ -218,20 +222,7 @@ impl Sim for LifSim {
         &self.roles
     }
     fn group(&self, slug: &str) -> &[usize] {
-        match slug {
-            "gf" => &self.gf,
-            "dnp09" => &self.fwd,
-            "dng11" => &self.groom,
-            "mdn" => &self.mdn,
-            "escw" => &self.escw,
-            "sens" => &self.sens,
-            "ascend" => &self.ascend,
-            "dna_left" => &self.dna_l,
-            "dna_right" => &self.dna_r,
-            "loom_left" => &self.loom_left,
-            "loom_right" => &self.loom_right,
-            _ => &[],
-        }
+        self.groups.get(slug).map(|g| g.as_slice()).unwrap_or(&[])
     }
 }
 

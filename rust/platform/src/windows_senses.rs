@@ -98,11 +98,9 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         std::mem::size_of::<RECT>() as u32,
     )
     .is_err()
-    {
-        if GetWindowRect(hwnd, &mut frame).is_err() {
+        && GetWindowRect(hwnd, &mut frame).is_err() {
             return BOOL(1);
         }
-    }
     if (frame.right - frame.left) < 160 || (frame.bottom - frame.top) < 60 {
         return BOOL(1);
     }

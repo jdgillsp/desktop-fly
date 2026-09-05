@@ -56,9 +56,16 @@ impl Pcg32 {
     }
 
     /// Uniform integer in [lo, hi], inclusive — matches `Int.random(in: a...b)`.
+    ///
+    /// An empty range returns `lo` rather than dividing by zero. Callers derive
+    /// `hi` from collection lengths (`len - 1`), so an empty collection would
+    /// otherwise panic in release with a modulo-by-zero — a latent crash that a
+    /// `debug_assert` alone does not catch.
     #[inline]
     pub fn int_range(&mut self, lo: i64, hi: i64) -> i64 {
-        debug_assert!(hi >= lo);
+        if hi <= lo {
+            return lo;
+        }
         let span = (hi - lo + 1) as u64;
         lo + (self.next_u32() as u64 % span) as i64
     }
@@ -103,6 +110,16 @@ mod tests {
         let n = 200_000;
         let mean: f64 = (0..n).map(|_| r.f32() as f64).sum::<f64>() / n as f64;
         assert!((mean - 0.5).abs() < 0.01, "mean {mean}");
+    }
+
+    /// Empty ranges arise from `len - 1` on an empty collection and must not
+    /// panic in release.
+    #[test]
+    fn an_empty_int_range_returns_its_bound_rather_than_dividing_by_zero() {
+        let mut r = Pcg32::new(4);
+        assert_eq!(r.int_range(0, -1), 0);
+        assert_eq!(r.int_range(7, 7), 7);
+        assert_eq!(r.int_range(3, 1), 3);
     }
 
     #[test]

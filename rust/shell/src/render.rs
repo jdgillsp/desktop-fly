@@ -33,6 +33,9 @@ pub struct Renderer {
     bind_group: wgpu::BindGroup,
     depth: wgpu::TextureView,
     pub alpha_ok: bool,
+    /// Physical pixels per logical scene unit; keeps the creature the same
+    /// apparent size on a scaled display.
+    pub scale: f32,
 }
 
 fn make_depth(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
@@ -277,6 +280,7 @@ impl Renderer {
             bind_group,
             depth,
             alpha_ok,
+            scale: 1.0,
         }
     }
 
@@ -297,12 +301,17 @@ impl Renderer {
         if mesh.indices.is_empty() {
             return;
         }
-        assert!(
-            mesh.verts.len() <= self.vbuf_cap && mesh.indices.len() <= self.ibuf_cap,
-            "frame geometry exceeded the preallocated buffers ({} verts, {} indices)",
-            mesh.verts.len(),
-            mesh.indices.len()
-        );
+        // Skip the frame rather than panic. A dropped frame is a blink; an
+        // assert here takes down a pet that is supposed to sit on the desktop
+        // for days.
+        if mesh.verts.len() > self.vbuf_cap || mesh.indices.len() > self.ibuf_cap {
+            eprintln!(
+                "frame geometry exceeds buffers ({} verts, {} indices) - skipping",
+                mesh.verts.len(),
+                mesh.indices.len()
+            );
+            return;
+        }
         self.queue
             .write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&mesh.verts));
         self.queue
@@ -318,8 +327,12 @@ impl Renderer {
             _ => 0,
         };
 
-        let half_w = self.config.width as f32 / 2.0;
-        let half_h = self.config.height as f32 / 2.0;
+        // The scene is in logical units, the surface in physical pixels, so the
+        // orthographic extent has to be divided through by the DPI scale — or
+        // the creature renders at 1 scene unit per physical pixel and shrinks
+        // on a scaled display.
+        let half_w = self.config.width as f32 / 2.0 / self.scale;
+        let half_h = self.config.height as f32 / 2.0 / self.scale;
         let proj = math::ortho(half_w, half_h, 1.0, 600.0);
         let view = math::translate(0.0, 0.0, -300.0);
         self.queue.write_buffer(

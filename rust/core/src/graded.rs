@@ -115,8 +115,6 @@ pub struct GradedSim {
     pending: Vec<Stim>,
     active: Vec<Stim>,
     pub sim_ms: i64,
-    rng: Pcg32,
-    noise: f32,
 }
 
 impl GradedSim {
@@ -127,6 +125,8 @@ impl GradedSim {
         seed: u64,
     ) -> Self {
         let n = connectome.len();
+        // Only used to draw per-neuron baselines; the graded model itself is
+        // deterministic, unlike the fly's noise-driven LIF network.
         let mut rng = Pcg32::new(seed);
 
         // Chemical synapses are directional and signed; the sign selects the
@@ -187,8 +187,6 @@ impl GradedSim {
             pending: Vec::new(),
             active: Vec::new(),
             sim_ms: 0,
-            rng,
-            noise: 0.0,
         }
     }
 
@@ -237,7 +235,7 @@ impl GradedSim {
         if ms <= 0 {
             return;
         }
-        for mut p in self.pending.drain(..).collect::<Vec<_>>() {
+        for mut p in std::mem::take(&mut self.pending) {
             p.until_ms += self.sim_ms;
             self.active.push(p);
         }
@@ -289,9 +287,6 @@ impl GradedSim {
                     if s.idx.contains(&i) {
                         i_ext += s.strength;
                     }
-                }
-                if self.noise > 0.0 {
-                    i_ext += (self.rng.f32() - 0.5) * self.noise;
                 }
 
                 let v_inf = (g_e + i_ext) / g_tot;

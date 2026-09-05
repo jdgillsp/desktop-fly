@@ -60,33 +60,63 @@ impl Rect {
 ///
 /// Scene space matches the Swift build's convention: origin at the *centre* of
 /// the display the creature is on, x right, **y up**.
+///
+/// Scene units are **logical**, not physical pixels. macOS works in points, so
+/// the Swift build gets this free; on Windows every coordinate that arrives
+/// from Win32 (`GetCursorPos`, `DwmGetWindowAttribute`, monitor bounds) is in
+/// physical pixels, and using those directly makes the creature shrink by the
+/// display's scale factor — 33% smaller on a 150% display, half size on a 200%
+/// one. Dividing through here means everything downstream (body size, walking
+/// speed, ledge widths, escape distances) keeps a constant *apparent* size,
+/// which is PORT_PLAN.md §8 decision 4.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenSpace {
+    /// The display's bounds in physical pixels.
     pub display: Rect,
+    /// Physical pixels per logical unit. 1.0 at 100%, 1.5 at 150%.
+    pub scale: f32,
 }
 
 impl ScreenSpace {
+    /// Unscaled — for tests and for platforms that report logical bounds.
     pub fn new(display: Rect) -> Self {
-        ScreenSpace { display }
+        ScreenSpace {
+            display,
+            scale: 1.0,
+        }
     }
 
-    /// Physical pixel -> scene. Note the y flip.
+    pub fn with_scale(display: Rect, scale: f32) -> Self {
+        ScreenSpace {
+            display,
+            scale: if scale > 0.05 { scale } else { 1.0 },
+        }
+    }
+
+    /// Physical pixel -> scene. Note the y flip and the DPI divide.
     #[inline]
     pub fn to_scene(&self, x: f32, y: f32) -> Vec2 {
-        Vec2::new(x - self.display.center_x(), self.display.center_y() - y)
+        Vec2::new(
+            (x - self.display.center_x()) / self.scale,
+            (self.display.center_y() - y) / self.scale,
+        )
     }
 
     /// Scene -> physical pixel.
     #[inline]
     pub fn to_physical(&self, p: Vec2) -> (f32, f32) {
         (
-            p.x + self.display.center_x(),
-            self.display.center_y() - p.y,
+            p.x * self.scale + self.display.center_x(),
+            self.display.center_y() - p.y * self.scale,
         )
     }
 
+    /// Logical size of the display — the bounds the creature lives inside.
     pub fn size(&self) -> (f32, f32) {
-        (self.display.width() as f32, self.display.height() as f32)
+        (
+            self.display.width() as f32 / self.scale,
+            self.display.height() as f32 / self.scale,
+        )
     }
 
     /// A window's top edge becomes a walkable ledge, clipped to this display.
@@ -97,9 +127,9 @@ impl ScreenSpace {
             return None;
         }
         let (width, height) = self.size();
-        let top_y = self.display.center_y() - w.top as f32;
-        let x0 = (w.left as f32 - self.display.center_x()).max(-width / 2.0 + 15.0);
-        let x1 = (w.right as f32 - self.display.center_x()).min(width / 2.0 - 15.0);
+        let top_y = (self.display.center_y() - w.top as f32) / self.scale;
+        let x0 = ((w.left as f32 - self.display.center_x()) / self.scale).max(-width / 2.0 + 15.0);
+        let x1 = ((w.right as f32 - self.display.center_x()) / self.scale).min(width / 2.0 - 15.0);
         if top_y < height / 2.0 - 8.0 && top_y > -height / 2.0 + 8.0 && x1 - x0 > 100.0 {
             Some(Ledge {
                 y: top_y,
@@ -240,6 +270,54 @@ mod tests {
         assert!(s
             .ledge_from_window(&Rect::new(0, -800, 2000, 900), 3)
             .is_none());
+    }
+
+    /// The DPI bug this exists to prevent: on a scaled display, physical
+    /// coordinates make the creature and its world shrink.
+    #[test]
+    fn scene_units_are_logical_not_physical() {
+        let unscaled = ScreenSpace::new(Rect::new(0, 0, 2560, 1440));
+        let scaled = ScreenSpace::with_scale(Rect::new(0, 0, 2560, 1440), 2.0);
+
+        // The same physical monitor is half as many logical units across.
+        assert_eq!(unscaled.size(), (2560.0, 1440.0));
+        assert_eq!(scaled.size(), (1280.0, 720.0));
+
+        // A cursor at the same physical pixel is half as far from centre.
+        let a = unscaled.to_scene(2560.0, 720.0);
+        let b = scaled.to_scene(2560.0, 720.0);
+        assert!((a.x - 1280.0).abs() < 1e-3);
+        assert!((b.x - 640.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn scaled_round_trips() {
+        let s = ScreenSpace::with_scale(Rect::new(-1920, -200, 0, 880), 1.5);
+        for (x, y) in [(-1920.0, -200.0), (0.0, 880.0), (-433.0, 91.0)] {
+            let (bx, by) = s.to_physical(s.to_scene(x, y));
+            assert!((bx - x).abs() < 1e-2 && (by - y).abs() < 1e-2, "{x},{y}");
+        }
+    }
+
+    #[test]
+    fn ledges_are_reported_in_logical_units_too() {
+        let s = ScreenSpace::with_scale(Rect::new(0, 0, 2560, 1440), 2.0);
+        // A window 480 physical px down from the top of the screen.
+        let l = s
+            .ledge_from_window(&Rect::new(200, 480, 1600, 1200), 1)
+            .expect("should be a ledge");
+        // The screen centre is 720 physical px down; the window top is 480, so
+        // the edge is 240 physical px above centre = 120 logical px at 2x.
+        assert!((l.y - 120.0).abs() < 1e-3, "ledge y {}", l.y);
+        assert!(l.x1 <= 640.0, "clipped to the logical display: {}", l.x1);
+    }
+
+    /// A zero or nonsense scale factor must not produce a divide-by-zero world.
+    #[test]
+    fn a_broken_scale_factor_falls_back_to_unscaled() {
+        let s = ScreenSpace::with_scale(Rect::new(0, 0, 800, 600), 0.0);
+        assert_eq!(s.scale, 1.0);
+        assert_eq!(s.size(), (800.0, 600.0));
     }
 
     #[test]

@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use dfcore::body::Fly;
 use dfcore::env::{Rect, ScreenSpace, Senses};
-use dfcore::{LifSim, SignalBuilder, Vec2};
+use dfcore::{LifSim, SignalBuilder, Sim, Vec2};
 use dfplatform::HostSenses;
 
 use winit::application::ApplicationHandler;
@@ -114,7 +114,7 @@ struct App {
     start: Instant,
     frames: u32,
     last_report: Instant,
-    hardened: bool,
+    last_harden: Instant,
     hidden_for_fullscreen: bool,
 
     // Carried between the 30 Hz sense poll and the per-frame update.
@@ -132,7 +132,7 @@ struct App {
     last_mood: String,
     last_state_save: Instant,
     /// Monitors, for the "Move to Next Display" command.
-    monitors: Vec<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)>,
+    monitors: Vec<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>, f64)>,
     monitor_index: usize,
 }
 
@@ -161,7 +161,7 @@ impl App {
             start: Instant::now(),
             frames: 0,
             last_report: Instant::now(),
-            hardened: false,
+            last_harden: Instant::now(),
             hidden_for_fullscreen: false,
             pending_tempo: 1.0,
             pending_sleepy: false,
@@ -188,7 +188,7 @@ impl ApplicationHandler for App {
         }
         self.monitors = event_loop
             .available_monitors()
-            .map(|m| (m.position(), m.size()))
+            .map(|m| (m.position(), m.size(), m.scale_factor()))
             .collect();
         let monitor = event_loop
             .primary_monitor()
@@ -197,22 +197,28 @@ impl ApplicationHandler for App {
             self.monitor_index = self
                 .monitors
                 .iter()
-                .position(|(p, _)| *p == m.position())
+                .position(|(p, _, _)| *p == m.position())
                 .unwrap_or(0);
         }
-        let (pos, size) = match &monitor {
-            Some(m) => (m.position(), m.size()),
+        let (pos, size, scale) = match &monitor {
+            Some(m) => (m.position(), m.size(), m.scale_factor()),
             None => (
                 winit::dpi::PhysicalPosition::new(0, 0),
                 winit::dpi::PhysicalSize::new(1920, 1080),
+                1.0,
             ),
         };
-        self.space = ScreenSpace::new(Rect::new(
-            pos.x,
-            pos.y,
-            pos.x + size.width as i32,
-            pos.y + size.height as i32,
-        ));
+        // Scene units are logical, so the creature keeps a constant apparent
+        // size across displays with different scaling (PORT_PLAN.md §8 dec. 4).
+        self.space = ScreenSpace::with_scale(
+            Rect::new(
+                pos.x,
+                pos.y,
+                pos.x + size.width as i32,
+                pos.y + size.height as i32,
+            ),
+            scale as f32,
+        );
 
         let mut attrs = Window::default_attributes()
             .with_title("DesktopFly")
@@ -272,7 +278,7 @@ impl ApplicationHandler for App {
         }))
         .expect("request device");
 
-        let renderer = render::Renderer::new(
+        let mut renderer = render::Renderer::new(
             device.clone(),
             queue.clone(),
             &adapter,
@@ -280,6 +286,7 @@ impl ApplicationHandler for App {
             size.width,
             size.height,
         );
+        renderer.scale = scale as f32;
         if !renderer.alpha_ok {
             eprintln!(
                 "WARNING: no premultiplied-alpha surface; the overlay will not be transparent"
@@ -371,7 +378,7 @@ impl ApplicationHandler for App {
                         .unwrap_or(1.0 / 60.0);
                     self.brain_last_frame = Some(now);
                     if let (Some(b), Some(sim)) = (self.brain.as_mut(), self.sim.as_ref()) {
-                        b.update(bdt, sim);
+                        b.update(bdt, sim as &dyn Sim);
                         b.render();
                     }
                 }
@@ -398,7 +405,7 @@ impl ApplicationHandler for App {
                         self.sim.as_mut(),
                         self.brain_cursor,
                     ) {
-                        if let Some(label) = b.handle_click(cx, cy, sim) {
+                        if let Some(label) = b.handle_click(cx, cy, sim as &mut dyn Sim) {
                             println!("stimulating {label}");
                             if let Some(w) = &self.brain_window {
                                 w.set_title(&format!("Fly Brain - {label}"));
@@ -416,6 +423,15 @@ impl ApplicationHandler for App {
                 if let (Some(r), Some(s)) = (self.renderer.as_mut(), self.surface.as_ref()) {
                     r.resize(s, new.width, new.height);
                 }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // Dragging to a differently-scaled monitor, or the user changing
+                // display scaling while the pet is running.
+                self.space = ScreenSpace::with_scale(self.space.display, scale_factor as f32);
+                if let Some(r) = self.renderer.as_mut() {
+                    r.scale = scale_factor as f32;
+                }
+                println!("display scale is now {scale_factor:.2}");
             }
             WindowEvent::RedrawRequested => {
                 if self.args.diag && self.frames < 3 {
@@ -476,7 +492,14 @@ impl App {
                 match instance.create_surface(w.clone()) {
                     Ok(bs) => {
                         self.brain = Some(brain::BrainView::new(
-                            device, queue, adapter, bs, pts, sim, bw, bh,
+                            device,
+                            queue,
+                            adapter,
+                            bs,
+                            pts,
+                            sim as &dyn Sim,
+                            bw,
+                            bh,
                         ));
                         self.brain_window = Some(w);
                         println!("brain window open: {} somas", pts.points.len());
@@ -495,18 +518,23 @@ impl App {
             return;
         }
         self.monitor_index = (self.monitor_index + 1) % self.monitors.len();
-        let (pos, size) = self.monitors[self.monitor_index];
-        self.space = ScreenSpace::new(Rect::new(
-            pos.x,
-            pos.y,
-            pos.x + size.width as i32,
-            pos.y + size.height as i32,
-        ));
+        let (pos, size, scale) = self.monitors[self.monitor_index];
+        // Monitors can differ in DPI, so the scale travels with the creature.
+        self.space = ScreenSpace::with_scale(
+            Rect::new(
+                pos.x,
+                pos.y,
+                pos.x + size.width as i32,
+                pos.y + size.height as i32,
+            ),
+            scale as f32,
+        );
         if let Some(w) = &self.window {
             w.set_outer_position(pos);
             let _ = w.request_inner_size(size);
         }
         if let (Some(r), Some(s)) = (self.renderer.as_mut(), self.surface.as_ref()) {
+            r.scale = scale as f32;
             r.resize(s, size.width, size.height);
         }
         // Terrain is stale until the next poll, and the fly must land inside
@@ -559,7 +587,7 @@ impl App {
                         self.brain = None;
                         self.brain_window = None;
                     } else {
-                        let (pos, size) = self.monitors[self.monitor_index];
+                        let (pos, size, _) = self.monitors[self.monitor_index];
                         self.open_brain_window(event_loop, pos, size);
                     }
                 }
@@ -685,10 +713,13 @@ impl App {
             }
         }
 
-        // Spike 0 finding 4: re-assert the ex-style once the window is live.
+        // Spike 0 finding 4: winit owns GWL_EXSTYLE and rewrites the whole value
+        // on calls such as set_cursor_hittest and set_visible — and the
+        // fullscreen-yield path calls set_visible. Asserting once at startup is
+        // not enough; re-assert on the same ~1 Hz cadence as the window poll.
         self.frames += 1;
-        if !self.hardened && self.frames > 4 {
-            self.hardened = true;
+        if self.last_harden.elapsed() >= Duration::from_secs(1) {
+            self.last_harden = Instant::now();
             #[cfg(target_os = "windows")]
             if let Some(w) = &self.window {
                 harden_overlay_styles(w);

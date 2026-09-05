@@ -208,7 +208,7 @@ mod tests {
     }
 
     fn indices_are_valid(m: &Mesh) -> bool {
-        m.indices.iter().all(|&i| (i as usize) < m.verts.len()) && m.indices.len() % 3 == 0
+        m.indices.iter().all(|&i| (i as usize) < m.verts.len()) && m.indices.len().is_multiple_of(3)
     }
 
     #[test]
