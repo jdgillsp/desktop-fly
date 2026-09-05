@@ -1,6 +1,8 @@
 # DesktopFly → Windows + a second creature
 
-**Status:** assessment & architecture only. No port code written. For review.
+**Status:** assessment, architecture — and, since 2026-09-05, implementation.
+Spike 0 and Phases 1–2 are built and verified; see `rust/` and the
+"Progress" section below. Phase 5 is blocked on decision 2.
 **Branch:** `windows-port-plan`
 **Date:** 2026-08-23
 **Scope:** (1) how to get this onto Windows, (2) what is portable vs. what must be
@@ -739,6 +741,27 @@ creature → seeded chimera.
 
 Sequenced so the highest-risk unknown dies first and the science is verified
 before a single pixel is drawn.
+
+### Progress as of 2026-09-05
+
+| Phase | Status | Evidence |
+|---|---|---|
+| **Spike 0** — overlay | ✅ **PASS** | `rust/SPIKE0_RESULTS.md`. Transparent, click-through, always-on-top, no taskbar entry, DX12 + DirectComposition, 60 fps. Mechanism falsified with a control run. |
+| **Phase 1** — core + suites | ✅ **done** | `rust/core`. All population counts match `CLAUDE.md`; GF silent at rest; **4 ms** escape latency; walk duty 37–44%; all 17 behaviour checks pass across 7 seeds. |
+| **Phase 2a** — platform senses | ✅ **done** | `rust/platform`. Terrain, looms, cursor, taps, idle, typing, heat, monitors, fullscreen-yield. |
+| **Phase 2b** — shell + renderer | ✅ **done** | `rust/shell`. **The fly walks on the Windows desktop** (`assets/windows-fly.png`). |
+| **Phase 2c** — tray | ✅ **done** | Parity with the macOS menu bar, plus the display hop. |
+| **§6.3 #1** — habituation | ✅ **done** | Persists across restarts; ground truth unaffected. |
+| **§6.3 #2** — glass anatomy | ⬜ not started | Pending decision 4 (rendering register). |
+| **Phase 3** — brain window | ⬜ not started | |
+| **Phase 4** — creature abstraction | ⬜ not started | |
+| **Phase 5** — second creature | 🚫 **blocked** | Needs decisions 2 and 4. |
+| **Phase 6** — macOS parity | ⬜ not started | |
+
+Bugs the build found that the plan did not predict are recorded in
+`rust/SPIKE0_RESULTS.md` and in the commit messages; the two most useful were
+`QUNS_BUSY` hiding the overlay during normal use, and an f32 underflow that
+silently stalled habituation recovery at 94%.
 
 ### Spike 0 — prove the overlay (1–2 days) · *gate on everything else*
 Minimal Rust binary: transparent, click-through, always-on-top, no-taskbar
