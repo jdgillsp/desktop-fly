@@ -752,8 +752,8 @@ before a single pixel is drawn.
 | **Phase 2b** — shell + renderer | ✅ **done** | `rust/shell`. **The fly walks on the Windows desktop** (`assets/windows-fly.png`). |
 | **Phase 2c** — tray | ✅ **done** | Parity with the macOS menu bar, plus the display hop. |
 | **§6.3 #1** — habituation | ✅ **done** | Persists across restarts; ground truth unaffected. |
+| **Phase 3** — brain window | ✅ **done** | `assets/windows-brain.png`. 23,210 somas, role-coloured circuit, spike flashes, tested click-to-stimulate. |
 | **§6.3 #2** — glass anatomy | ⬜ not started | Pending decision 4 (rendering register). |
-| **Phase 3** — brain window | ⬜ not started | |
 | **Phase 4** — creature abstraction | ⬜ not started | |
 | **Phase 5** — second creature | 🚫 **blocked** | Needs decisions 2 and 4. |
 | **Phase 6** — macOS parity | ⬜ not started | |
