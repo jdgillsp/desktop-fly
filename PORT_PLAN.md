@@ -753,10 +753,26 @@ before a single pixel is drawn.
 | **Phase 2c** — tray | ✅ **done** | Parity with the macOS menu bar, plus the display hop. |
 | **§6.3 #1** — habituation | ✅ **done** | Persists across restarts; ground truth unaffected. |
 | **Phase 3** — brain window | ✅ **done** | `assets/windows-brain.png`. 23,210 somas, role-coloured circuit, spike flashes, tested click-to-stimulate. |
-| **§6.3 #2** — glass anatomy | ⬜ not started | Pending decision 4 (rendering register). |
-| **Phase 4** — creature abstraction | ⬜ not started | |
-| **Phase 5** — second creature | 🚫 **blocked** | Needs decisions 2 and 4. |
-| **Phase 6** — macOS parity | ⬜ not started | |
+| **§6.3 #2** — glass anatomy | ✅ **done** | `assets/glass-anatomy.png`. Now the default; `--literal` restores the photoreal fly. Decision 4 answered. |
+| **Phase 4** — creature abstraction | ✅ **done** | Pure refactor; suites bit-identical. Roles are one data manifest; `Sim`, `Body`, `Creature` are traits. |
+| **Phase 5** — second creature | 🟨 **engine done, data blocked** | Graded integrator, worm manifest, crawler body and ETL all built and tested. The connectome is **not shipped** — its redistribution terms are unverified (below), so the worm cannot yet be *run*. |
+| **Phase 6** — macOS parity | ⬜ not started | Needs a Mac to verify; cannot be tested from here. |
+
+**104 tests pass, no warnings.** The fly runs at 59 fps on ~13% of one core
+with the brain window open.
+
+### What is left, and why
+
+1. **The worm needs a connectome.** Everything else about it exists and is
+   tested: the graded integrator, the role manifest by neuron name, the
+   crawler body, and `etl_celegans.py`. What is missing is the data, and that
+   is deliberate — §8 flags its redistribution terms as unverified, and
+   `CElegans::provenance()` records the licence as `UNVERIFIED` rather than
+   implying a clearance it does not have. Verify the source's terms, run the
+   ETL, and the creature runs.
+2. **Rendering the worm in the shell.** The crawler body produces a pose; the
+   renderer only draws the fly. Straightforward once there is a worm to draw.
+3. **macOS parity.** `platform/macos.rs` via `objc2`. Untestable here.
 
 Bugs the build found that the plan did not predict are recorded in
 `rust/SPIKE0_RESULTS.md` and in the commit messages; the two most useful were
