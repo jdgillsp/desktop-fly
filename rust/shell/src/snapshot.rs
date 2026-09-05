@@ -31,6 +31,7 @@ pub fn render_to_png(
     alt: f32,
     walking_frames: u32,
     glass: bool,
+    zoom: f32,
 ) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         #[cfg(target_os = "windows")]
@@ -264,8 +265,10 @@ pub fn render_to_png(
         usage: wgpu::BufferUsages::INDEX,
     });
 
-    let half_w = width as f32 / 2.0;
-    let half_h = height as f32 / 2.0;
+    // `zoom` > 1 magnifies: the creature is a few dozen units across, and a
+    // 320 px frame at 1:1 is for checking compositing, not anatomy.
+    let half_w = width as f32 / 2.0 / zoom.max(0.1);
+    let half_h = height as f32 / 2.0 / zoom.max(0.1);
     queue.write_buffer(
         &ubuf,
         0,

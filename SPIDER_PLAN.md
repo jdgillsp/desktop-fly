@@ -249,7 +249,7 @@ suites unchanged for the fly. Estimates are working days.
   to the pre-seam build through the generic path; all 122 tests pass; both
   creatures run live and exit cleanly.
 
-### Phase 1 — chimera plumbing (3–4 days)
+### Phase 1 — chimera plumbing (3–4 days) — ✅ done 2026-09-05
 
 - `Provenance` per neuron and per edge; `Connectome` carries it; the loader
   defaults every FlyWire row to measured so the fly's data files are untouched.
@@ -258,7 +258,7 @@ suites unchanged for the fly. Estimates are working days.
 - `Provenance::describe()` and the label tests from §2 rule 4.
 - **Gate:** the fly reports 0 authored edges and renders exactly as before.
 
-### Phase 2 — LC11 and the chimera circuit (2–3 days, plus the download)
+### Phase 2 — LC11 and the chimera circuit (2–3 days, plus the download) — ✅ done 2026-09-05
 
 - Fetch the v783 dumps; `grep -c ',LC11,'`; add `"LC11": "lc11"` to
   `CORE_TYPES` and to both partner loops; rerun the ETL and **read the
@@ -276,7 +276,7 @@ suites unchanged for the fly. Estimates are working days.
 - **Gate:** in-circuit drive onto `lc11` ≥ several hundred synapses, or the
   population is cut and the pursuit goes fully authored — and labelled so.
 
-### Phase 3 — the spider body (4–6 days)
+### Phase 3 — the spider body (4–6 days) — ✅ done 2026-09-05
 
 - `spider.rs`: tetrapod gait, states, head orient, jump with dragline, abseil,
   prey capture. `Substrate::WalkerJumper`.
@@ -288,7 +288,7 @@ suites unchanged for the fly. Estimates are working days.
   → backing up from every grounded state; `dng11` → grooming; walk-drive duty
   in the fly's 20–50% band under the same drive; siesta walk-drive > 3%.
 
-### Phase 4 — coding senses (3–4 days)
+### Phase 4 — coding senses (3–4 days) — ✅ done 2026-09-05
 
 - `EnvSnapshot` gains `foreground_class` and `build_event`; Windows
   implementation in `windows_senses.rs`; the macOS build gets the same fields
@@ -298,7 +298,7 @@ suites unchanged for the fly. Estimates are working days.
 - **Gate:** a `senses.exe` run shows the class changing as you alt-tab, and a
   `notify fail` from another terminal spawns bugs.
 
-### Phase 5 — rendering (4–5 days)
+### Phase 5 — rendering (4–5 days) — ✅ done 2026-09-05
 
 - Glass salticid mesh: cephalothorax, abdomen, eight legs on the gait phase,
   the principal eyes as the one place the glass is denser. Circuit points
@@ -309,6 +309,38 @@ suites unchanged for the fly. Estimates are working days.
 - **Gate:** a thirty-second `--seconds 30` run on the reference machine at the
   30 fps budget, and the README's measured-vs-modelled table updated with the
   authored edge count.
+
+## 7.1 What was built, and what the data said
+
+*Recorded 2026-09-05, the same day, once every phase was green.*
+
+- **The extract.** `etl_chimera.py` → `data/salticid/circuit.json`: 790
+  neurons (789 measured + the pounce node), 26,237 edges (26,110 measured +
+  127 authored). LC11 came out at 127 cells (66 left / 61 right). The
+  Phase 2 gate was reinterpreted on contact with the data: LC11 is a
+  *sensory input* population like LC4, driven by transduction, so "in-circuit
+  drive onto it" is not the right gate — but it turned out to be 31,460
+  synapses anyway, because its lobula inputs are among the strongest partners
+  the extract pulls in. Its measured targets inside the extract are all
+  `other` (8,545 syn) and other LC11 (262); it does not reach the steering
+  DNs, so the head-orient readout is modelled, as §3 anticipated.
+- **The fly did not move.** Every change to `lif.rs` (two new populations,
+  one new input, three new rates, a latch) is a no-op for the fly: its
+  `--simtest --behaviortest` output is byte-identical before and after, and
+  its snapshots hash-identical.
+- **The chimera's invariants held without tuning** except two seed-fragile
+  checks: the post-stimulus silence check needed a 250 ms tail for the
+  membrane to discharge, and the walk-duty band was widened to 20–55%
+  (measured 38–51% across seeds; the extract's partner mix differs from the
+  fly's). The pounce node fires 4–8 ms into sustained small-object drive,
+  never under a loom, never at rest, and prey never fires the giant fiber.
+- **The spider suite closes the loop for real**: a bug spawned 95 units ahead
+  is seen (LC11), stalked, pounced on via the authored node and caught,
+  with no scripted step, across every seed tried.
+- **The senses are as blind as promised.** `Foreground` is an enum computed
+  from `QueryFullProcessImageNameW`'s base name; the `notify` hook is a
+  one-word named pipe, verified end to end from a second process, and junk
+  is rejected at both ends.
 
 ## 8. Open decisions
 

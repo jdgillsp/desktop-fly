@@ -10,17 +10,20 @@ use std::collections::HashSet;
 use std::ffi::c_void;
 use std::time::Instant;
 
-use dfcore::env::{EnvSnapshot, Rect, ScreenSpace, Senses, WindowLoom};
+use dfcore::env::{EnvSnapshot, Foreground, Rect, ScreenSpace, Senses, WindowLoom};
 use dfcore::util::clamp;
 
-use windows::core::BOOL;
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows::core::{BOOL, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
 };
 use windows::Win32::System::Power::{CallNtPowerInformation, ProcessorInformation};
 use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
-use windows::Win32::System::Threading::{GetCurrentProcessId, GetSystemTimes};
+use windows::Win32::System::Threading::{
+    GetCurrentProcessId, GetSystemTimes, OpenProcess, QueryFullProcessImageNameW,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO, VK_LBUTTON, VK_RBUTTON,
 };
@@ -28,7 +31,7 @@ use windows::Win32::UI::Shell::{
     SHQueryUserNotificationState, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
+    EnumWindows, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
     GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
 };
 
@@ -120,6 +123,8 @@ pub struct WindowsSenses {
     last_poll: Instant,
     /// EMA, matching the macOS `typingLevel` smoothing (main.swift:772).
     typing_level: f32,
+    /// The build hook's pipe server (SPIDER_PLAN.md §5).
+    notify: crate::notify::NotifyServer,
     prev_click_down: (bool, bool),
     prev_cpu: Option<(u64, u64)>,
     cpu_load: f32,
@@ -145,6 +150,7 @@ impl WindowsSenses {
             last_cursor: None,
             last_poll: Instant::now(),
             typing_level: 0.0,
+            notify: crate::notify::NotifyServer::start(),
             prev_click_down: (false, false),
             prev_cpu: None,
             cpu_load: 0.0,
@@ -275,6 +281,38 @@ impl WindowsSenses {
     /// **Not** `QUNS_BUSY`: that also fires for an ordinary maximized window,
     /// which would hide the fly during normal use — it did exactly that, and
     /// looked like a renderer hang rather than a policy bug.
+    /// The class of the foreground app, from its process image name only.
+    /// The name never leaves this function; the title is never read.
+    fn foreground_class() -> Foreground {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0.is_null() {
+                return Foreground::Unknown;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 {
+                return Foreground::Unknown;
+            }
+            let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                return Foreground::Unknown;
+            };
+            let mut buf = [0u16; 1024];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+            let _ = CloseHandle(h);
+            if !ok {
+                return Foreground::Unknown;
+            }
+            let path = String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())]);
+            let stem = std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            Foreground::classify(stem)
+        }
+    }
+
     fn fullscreen_app_active() -> bool {
         unsafe {
             match SHQueryUserNotificationState() {
@@ -367,6 +405,8 @@ impl Senses for WindowsSenses {
         snap.machine_heat = self.machine_heat();
         snap.local_hour = Self::local_hour();
         snap.fullscreen_app_active = Self::fullscreen_app_active();
+        snap.foreground = Self::foreground_class();
+        snap.build_events = self.notify.drain();
         snap
     }
 

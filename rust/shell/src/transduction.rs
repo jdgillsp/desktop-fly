@@ -7,10 +7,13 @@
 //! This is the honesty boundary the README's "What's modeled vs. measured"
 //! section describes: **everything in this file is a modelling choice**, and
 //! everything downstream of the sensory neurons it drives is FlyWire data. It is
-//! also the layer a second creature would replace wholesale — a worm is blind,
-//! so a cursor cannot be a looming predator for it (PORT_PLAN.md §5.2).
+//! also the layer a second creature replaces wholesale — a worm is blind, so a
+//! cursor cannot be a looming predator for it (PORT_PLAN.md §5.2). The spider
+//! chimera, whose looming module *is* the fly's, reuses this file as-is and
+//! adds its small-object channel on top (`spiderrt.rs`), which is why the
+//! subject is any `Body` rather than the fly.
 
-use dfcore::body::Fly;
+use dfcore::Body;
 use dfcore::env::EnvSnapshot;
 use dfcore::util::{clamp, hypot};
 use dfcore::{circadian_activity, Habituation, LifSim, Vec2};
@@ -57,7 +60,7 @@ impl Transduction {
     /// range is a big, fast-growing object. This is why a slow approach is
     /// tolerated and a lunge is not — the escape decision itself is made by the
     /// real LC4/LPLC2 -> giant fiber circuit, not here.
-    fn compute_loom(&mut self, fly: &Fly, cursor: Option<Vec2>, dt: f32) -> (f32, f32, f32) {
+    fn compute_loom(&mut self, body: &impl Body, cursor: Option<Vec2>, dt: f32) -> (f32, f32, f32) {
         let Some(m) = cursor else {
             return (0.0, 0.0, 0.0);
         };
@@ -70,7 +73,7 @@ impl Transduction {
         }
         self.prev_cursor = Some(m);
 
-        let rel = Vec2::new(m.x - fly.pos.x, m.y - fly.pos.y);
+        let rel = Vec2::new(m.x - body.position().x, m.y - body.position().y);
         let dist = hypot(rel.x, rel.y).max(20.0);
         // Radial approach speed; positive means the cursor is closing in.
         let approach = -(rel.x * self.cursor_vel.x + rel.y * self.cursor_vel.y) / dist;
@@ -80,7 +83,7 @@ impl Transduction {
         loom = clamp(loom + self.loom_override, 0.0, 1.0);
 
         // Split between the eyes by bearing relative to heading.
-        let f = Vec2::new(fly.heading.cos(), fly.heading.sin());
+        let f = Vec2::new(body.heading().cos(), body.heading().sin());
         let rd = Vec2::new(rel.x / dist, rel.y / dist);
         let cross_z = f.x * rd.y - f.y * rd.x; // > 0: threat on the left
         let lw = clamp(0.5 + 0.5 * cross_z, 0.12, 1.0);
@@ -93,10 +96,10 @@ impl Transduction {
 
     /// A window appearing near the fly is a real looming object; which eye sees
     /// it depends on where it appeared relative to the fly's heading.
-    fn inject_window_loom(&mut self, fly: &Fly, strength: f32, at: Vec2) {
-        let rel = Vec2::new(at.x - fly.pos.x, at.y - fly.pos.y);
+    fn inject_window_loom(&mut self, body: &impl Body, strength: f32, at: Vec2) {
+        let rel = Vec2::new(at.x - body.position().x, at.y - body.position().y);
         let dist = hypot(rel.x, rel.y).max(1.0);
-        let f = Vec2::new(fly.heading.cos(), fly.heading.sin());
+        let f = Vec2::new(body.heading().cos(), body.heading().sin());
         let cross_z = (f.x * rel.y - f.y * rel.x) / dist;
         self.window_loom_l = self
             .window_loom_l
@@ -111,7 +114,7 @@ impl Transduction {
     pub fn apply(
         &mut self,
         sim: &mut LifSim,
-        fly: &Fly,
+        body: &impl Body,
         env: &EnvSnapshot,
         dt: f32,
     ) -> (f32, bool) {
@@ -121,7 +124,7 @@ impl Transduction {
         // and a creature that never stops flinching at your mouse is wrong.
         let tap_gain = self.habituation.tap_gain_f32();
         for c in &env.clicks {
-            let d = hypot(c.x - fly.pos.x, c.y - fly.pos.y);
+            let d = hypot(c.x - body.position().x, c.y - body.position().y);
             let strength = clamp(1.0 - d / 520.0, 0.0, 1.0);
             if strength > 0.05 {
                 let sens = sim.sens.clone();
@@ -131,14 +134,14 @@ impl Transduction {
 
         // New windows loom; the circuit decides whether to flee your dialogs.
         for w in &env.new_windows {
-            let d = hypot(w.center.x - fly.pos.x, w.center.y - fly.pos.y);
+            let d = hypot(w.center.x - body.position().x, w.center.y - body.position().y);
             let strength = clamp(1.0 - d / 480.0, 0.0, 1.0) * 0.75;
             if strength > 0.08 {
-                self.inject_window_loom(fly, strength, w.center);
+                self.inject_window_loom(body, strength, w.center);
             }
         }
 
-        let (l, r, puff) = self.compute_loom(fly, env.cursor, dt);
+        let (l, r, puff) = self.compute_loom(body, env.cursor, dt);
         let decay = (-4.0 * dt).exp();
         self.window_loom_l *= decay;
         self.window_loom_r *= decay;
@@ -161,8 +164,8 @@ impl Transduction {
         sim.air_puff = raw_puff * self.habituation.tap_gain_f32();
 
         // Body -> brain: leg proprioception from the current gait.
-        sim.gait_drive = fly.walking_intensity();
-        sim.gait_phase = fly.gait_phase;
+        sim.gait_drive = body.proprioception().drive;
+        sim.gait_phase = body.proprioception().phase;
 
         // Circadian + sleep neuromodulation. Compressed toward 1 on purpose:
         // the LIF neurons sit just below threshold, so a raw multiplier

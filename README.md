@@ -135,6 +135,47 @@ cd - && python3 etl.py /tmp/flywire
 ./DesktopFly --brainshot b.png # offscreen brain render
 ```
 
+## Creature #3: a jumping spider that does not exist (Windows build)
+
+<p align="center">
+  <img src="assets/windows-spider.png" width="240" alt="The glass jumping spider, circuit crackling inside">
+  <img src="assets/windows-spider-literal.png" width="240" alt="The same spider in the literal register">
+</p>
+
+The Rust build (`rust/`) can run a third creature, picked from the tray or
+with `--creature salticid`: a **jumping spider** built for people who code.
+It watches you from a window ledge, turns its head toward your cursor and
+stalks it, abseils off ledges on a dragline, jumps away from a lunge, and
+pounces on "bugs" — three drifting points that appear when you tell it a
+build failed (`desktopfly notify fail`; `notify pass` sends them off).
+
+**No spider connectome exists**, so this animal is a labelled **chimera**:
+every circuit inside it is measured FlyWire data, recombined; the animal is
+invented. Its 790-neuron circuit is the fly's looming, escape, steering,
+walking, grooming and backing-up modules (the wing module dropped) plus
+**LC11 (127)**, FlyWire's small-object motion detectors, with their strongest
+downstream partners — and exactly **one authored neuron**, the pounce node,
+with **127 authored edges** from LC11. The brain window colours it cool and
+draws it larger so it can never hide among real neurons; the tray and the
+brain window call it a chimera, never a spider brain. See
+[`SPIDER_PLAN.md`](SPIDER_PLAN.md) and
+[`data/salticid/PROVENANCE.md`](data/salticid/PROVENANCE.md).
+
+| spider behavior | driven by | status |
+|---|---|---|
+| escape jump (dragline first) | DNp01 giant fiber spike | measured wiring |
+| stalking, walking speed, steering, grooming, backing away | DNp09 / DNa01+02 / DNg11 / MDN, as the fly | measured wiring |
+| prey detection | LC11 population rate | measured wiring; size tuning modelled in the transduction |
+| head orientation toward prey | LC11 left−right rate | **modelled readout** (LC11 does not reach the steering DNs in the extract) |
+| the pounce | the authored pounce node | **authored** |
+| settling while you work, bugs on a failed build | foreground app *class*, `notify` hook | senses; content-blind |
+
+Its own suites: `dfcore --creature salticid --simtest` (14 circuit checks:
+the giant fiber still fires 4 ms after an abrupt loom; LC11 ignores looms;
+the pounce node is silent at rest and under looms, fires only under
+small-object drive, and never fires the giant fiber) and `--behaviortest`
+(14 end-to-end checks, including bug → LC11 → pounce → capture).
+
 ## What's modeled vs. measured
 
 Honesty section: the connectome gives wiring, not physiology. The LIF
@@ -143,6 +184,14 @@ on LC→GF and wind→GF (documented electrical coupling), synaptic delays, and
 the sensory transduction (cursor → looming value) are standard modeling
 choices layered on the real graph. Everything downstream of the sensory
 neurons — who connects to whom, and how strongly — is FlyWire data.
+
+The Rust build adds, all labelled as such in code and UI: **habituation**
+(a modelled learning rule; the phenomenon is real, the connectome does not
+carry it); and for the chimera, the **small-object size tuning** presented to
+LC11 (the lobula is outside the extract), the **head-orientation readout**
+of LC11's left−right rate, and the **authored pounce node** — 1 neuron and
+127 edges out of 790 neurons and 26,237 edges, counted by the data, not by
+a constant.
 
 ## License & citation
 

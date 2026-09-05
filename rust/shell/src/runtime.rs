@@ -87,6 +87,7 @@ pub trait Runtime {
 pub fn make(id: &str, seed: u64) -> Box<dyn Runtime> {
     match id {
         "c_elegans" => Box::new(crate::wormrt::WormRuntime::new(seed)),
+        "salticid" => Box::new(crate::spiderrt::SpiderRuntime::new(seed)),
         _ => Box::new(FlyRuntime::new(seed)),
     }
 }

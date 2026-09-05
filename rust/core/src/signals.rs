@@ -32,6 +32,13 @@ pub struct BrainSignals {
     pub tempo: f32,
     /// Circadian + idle -> sleep-like state.
     pub sleep: bool,
+    /// LC11 small-object population rate, 0..1. Zero for the fly, whose
+    /// extract has no LC11; the chimera's prey-detection drive.
+    pub pursuit: f32,
+    /// LC11 left-minus-right, -1..1: which eye the small object is in.
+    pub prey_bias: f32,
+    /// The authored pounce node spiked -> pounce NOW, if something is in range.
+    pub pounce: bool,
 }
 
 impl BrainSignals {
@@ -73,6 +80,17 @@ impl SignalBuilder {
         s.groom_drive = sim.rate_groom / 8.0;
         s.wing_drive = clamp(sim.rate_escw / 10.0, 0.0, 1.3);
         s.arousal = clamp(sim.rate_pop / 20.0, 0.0, 1.0);
+        // Chimera-only populations. Every one of these is zero for the fly,
+        // whose extract has no LC11 and no pounce node, so its readout is
+        // numerically unchanged.
+        let lc11 = sim.rate_lc11_l + sim.rate_lc11_r;
+        s.pursuit = clamp(lc11 / 80.0, 0.0, 1.0);
+        s.prey_bias = if lc11 > 1.0 {
+            clamp((sim.rate_lc11_l - sim.rate_lc11_r) / lc11, -1.0, 1.0)
+        } else {
+            0.0
+        };
+        s.pounce = sim.consume_pounce();
         s
     }
 }
@@ -156,6 +174,8 @@ mod graded_tests {
             positions: vec![[0.0; 3]; 2],
             chemical: vec![],
             electrical: vec![],
+            neuron_origin: Vec::new(),
+            edge_origin: Vec::new(),
             provenance: Provenance::Authored { note: "fixture".into() },
         };
         GradedSim::new(&c, manifest, GradedParams::default(), 1)

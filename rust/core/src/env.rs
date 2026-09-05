@@ -174,6 +174,78 @@ pub struct EnvSnapshot {
     /// Whether a fullscreen app or presentation is running; the overlay should
     /// hide rather than fight it. No macOS equivalent is needed.
     pub fullscreen_app_active: bool,
+    /// What kind of application is in front — an enum, never a name or a
+    /// title, so nothing about *what* the user is doing can leak downstream
+    /// (SPIDER_PLAN.md §5).
+    pub foreground: Foreground,
+    /// Build or test outcomes the user chose to report since the last poll,
+    /// via `desktopfly notify pass|fail`. Opt-in only: nothing is watched.
+    pub build_events: Vec<BuildEvent>,
+}
+
+/// The class of the foreground application. Derived from the process name
+/// alone; the platform layer exposes no string, so there is nothing to leak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Foreground {
+    #[default]
+    Unknown,
+    Editor,
+    Terminal,
+    Browser,
+    Other,
+}
+
+impl Foreground {
+    /// Classify an executable's base name (lower-cased, no extension). The
+    /// list is deliberately short and boring; "Other" is the safe answer.
+    pub fn classify(exe_stem: &str) -> Foreground {
+        const EDITORS: &[&str] = &[
+            "code", "code - insiders", "cursor", "windsurf", "devenv", "rider64", "idea64",
+            "pycharm64", "clion64", "goland64", "webstorm64", "rustrover64", "sublime_text",
+            "notepad++", "nvim", "neovide", "vim", "gvim", "emacs", "zed", "atom", "claude",
+            "kate", "notepad",
+        ];
+        const TERMINALS: &[&str] = &[
+            "windowsterminal", "wt", "cmd", "powershell", "pwsh", "conhost", "alacritty",
+            "wezterm-gui", "wezterm", "hyper", "mintty", "kitty", "ghostty", "tabby",
+        ];
+        const BROWSERS: &[&str] = &[
+            "chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "arc", "chromium",
+            "safari", "zen",
+        ];
+        let s = exe_stem.to_ascii_lowercase();
+        if EDITORS.contains(&s.as_str()) {
+            Foreground::Editor
+        } else if TERMINALS.contains(&s.as_str()) {
+            Foreground::Terminal
+        } else if BROWSERS.contains(&s.as_str()) {
+            Foreground::Browser
+        } else {
+            Foreground::Other
+        }
+    }
+
+    /// Is the user coding, as far as the spider can tell?
+    pub fn is_work(self) -> bool {
+        matches!(self, Foreground::Editor | Foreground::Terminal)
+    }
+}
+
+/// A reported build or test outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildEvent {
+    Pass,
+    Fail,
+}
+
+impl BuildEvent {
+    pub fn parse(word: &str) -> Option<BuildEvent> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "pass" | "ok" | "green" | "success" | "0" => Some(BuildEvent::Pass),
+            "fail" | "failed" | "error" | "red" | "1" => Some(BuildEvent::Fail),
+            _ => None,
+        }
+    }
 }
 
 /// Implemented once per OS. The only trait in the project that is allowed to
@@ -326,5 +398,24 @@ mod tests {
         assert!((thermal_tempo(0.0) - 1.0).abs() < 1e-6);
         assert!((thermal_tempo(1.0) - 1.5).abs() < 1e-6);
         assert!((thermal_tempo(2.0) - 1.5).abs() < 1e-6, "must clamp");
+    }
+
+    #[test]
+    fn foreground_classifies_by_process_stem_only() {
+        assert_eq!(Foreground::classify("Code"), Foreground::Editor);
+        assert_eq!(Foreground::classify("WindowsTerminal"), Foreground::Terminal);
+        assert_eq!(Foreground::classify("msedge"), Foreground::Browser);
+        assert_eq!(Foreground::classify("explorer"), Foreground::Other);
+        assert!(Foreground::Editor.is_work() && Foreground::Terminal.is_work());
+        assert!(!Foreground::Browser.is_work());
+    }
+
+    #[test]
+    fn build_events_parse_leniently_and_reject_junk() {
+        assert_eq!(BuildEvent::parse(" PASS
+"), Some(BuildEvent::Pass));
+        assert_eq!(BuildEvent::parse("fail"), Some(BuildEvent::Fail));
+        assert_eq!(BuildEvent::parse("1"), Some(BuildEvent::Fail));
+        assert_eq!(BuildEvent::parse("rm -rf /"), None);
     }
 }

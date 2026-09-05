@@ -248,6 +248,54 @@ pub fn drosophila() -> RoleManifest {
     }
 }
 
+/// The jumping-spider chimera (SPIDER_PLAN.md §3): the fly's manifest with the
+/// wing module removed and two populations added — FlyWire's **LC11**
+/// small-object detectors (measured), and the **pounce** node (authored, the
+/// one connective no animal has). Built from [`drosophila`] rather than copied,
+/// so a change to a shared module's row cannot silently diverge between the
+/// two creatures.
+pub fn salticid() -> RoleManifest {
+    use Baseline::*;
+    use Membership::*;
+    let mut m = drosophila();
+    m.creature = "salticid";
+    m.populations.retain(|p| p.slug != "escw");
+    let at = m
+        .populations
+        .iter()
+        .position(|p| p.slug == "gf")
+        .unwrap_or(m.populations.len());
+    m.populations.insert(
+        at,
+        Population {
+            slug: "lc11",
+            label: "LC11 - small-object detectors (prey)",
+            membership: Role("lc11"),
+            bilateral: true,
+            // A sensory input population, like LC4: driven by transduction,
+            // resting like the looming detectors do.
+            baseline: Fixed(0.004),
+            color: [0.30, 0.90, 0.85],
+        },
+    );
+    m.populations.insert(
+        at + 1,
+        Population {
+            slug: "pounce",
+            label: "pounce connective - AUTHORED (no such neuron)",
+            membership: Role("pounce"),
+            bilateral: false,
+            // Silent unless the LC11 population drives it: the same discipline
+            // as the giant fiber, and deterministic like every command node.
+            baseline: Fixed(0.002),
+            // Cool, and unlike any measured population's colour: the brain
+            // window's provenance colouring must be legible without a legend.
+            color: [0.60, 0.70, 1.00],
+        },
+    );
+    m
+}
+
 /// *Caenorhabditis elegans*, hermaphrodite.
 ///
 /// 302 neurons, 279 of them with synapses — the only complete, cell-identified

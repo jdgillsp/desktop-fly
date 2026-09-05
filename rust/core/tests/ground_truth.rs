@@ -2,7 +2,7 @@
 //! ground truth. Skipped with a warning if `data/` is not reachable, so the
 //! crate still builds in a checkout without the derived files.
 
-use dfcore::{data, suites};
+use dfcore::{data, suites, Creature};
 
 fn brain() -> Option<data::BrainData> {
     match data::load() {
@@ -171,4 +171,76 @@ fn the_sim_trait_agrees_with_the_concrete_simulation() {
     assert!(Sim::group(&sim, "no-such-population").is_empty());
     assert_eq!(Sim::positions(&sim).len(), sim.n);
     assert_eq!(Sim::manifest(&sim).creature, "drosophila");
+}
+
+// ---------------------------------------------------------------------------
+// Creature #3: the chimera (SPIDER_PLAN.md). Its data ships, so these are not
+// skipped; if data/salticid is missing the ETL was not run and that is a
+// failure worth seeing.
+// ---------------------------------------------------------------------------
+
+fn chimera() -> data::BrainData {
+    data::load_for("salticid").expect("data/salticid - run etl_chimera.py")
+}
+
+#[test]
+fn chimera_populations_match_the_etl_report() {
+    let b = chimera();
+    let sim = dfcore::LifSim::with_params(
+        &b.circuit,
+        dfcore::DEFAULT_SEED,
+        dfcore::LifParams::default(),
+        dfcore::roles::salticid(),
+    );
+    assert_eq!(sim.n, 790, "789 measured + 1 authored");
+    assert_eq!(sim.lc11_l.len() + sim.lc11_r.len(), 127, "LC11");
+    assert_eq!(sim.pounce.len(), 1, "the authored pounce node");
+    assert!(sim.escw.is_empty(), "no wing module");
+    assert_eq!(sim.gf.len(), 2);
+    assert_eq!(sim.loom_left.len() + sim.loom_right.len(), 314, "LC4 + LPLC2, as the fly");
+    // The honesty mechanism, on the real file.
+    let c = dfcore::Connectome::from_circuit(&b.circuit, dfcore::Salticid.provenance());
+    assert_eq!(c.authored_counts(), (1, 127));
+    let authored: Vec<usize> = (0..c.len())
+        .filter(|&i| c.origin_of_neuron(i) == dfcore::Origin::Authored)
+        .collect();
+    assert_eq!(authored.len(), 1);
+    assert_eq!(b.circuit.neurons[authored[0]].role, "pounce");
+    assert_eq!(b.circuit.neurons[authored[0]].id, "authored:pounce");
+    use dfcore::Sim;
+    assert_eq!(sim.origin(authored[0]), dfcore::Origin::Authored);
+    assert_eq!(sim.origin(0), dfcore::Origin::Measured);
+}
+
+#[test]
+fn chimera_invariants_hold() {
+    let b = chimera();
+    let r = suites::chimera_test(&b, dfcore::DEFAULT_SEED);
+    for l in &r.lines {
+        println!("{l}");
+    }
+    assert!(r.passed, "chimera test failed");
+}
+
+#[test]
+fn all_spider_behavior_checks_pass() {
+    let b = chimera();
+    let r = suites::spider_behavior_test(&b, dfcore::DEFAULT_SEED);
+    for l in &r.lines {
+        println!("{l}");
+    }
+    assert_eq!(r.lines.len(), 15, "14 checks plus the summary line");
+    assert!(r.passed, "spider behaviour test failed");
+}
+
+#[test]
+fn chimera_suites_are_not_seed_fragile() {
+    let b = chimera();
+    for seed in [1u64, 2, 7, 42, 1337] {
+        assert!(suites::chimera_test(&b, seed).passed, "chimera test failed on seed {seed}");
+        assert!(
+            suites::spider_behavior_test(&b, seed).passed,
+            "spider behaviour test failed on seed {seed}"
+        );
+    }
 }

@@ -757,6 +757,7 @@ before a single pixel is drawn.
 | **Phase 4** — creature abstraction | ✅ **done** | Pure refactor; suites bit-identical. Roles are one data manifest; `Sim`, `Body`, `Creature` are traits. |
 | **Phase 5** — second creature | 🟨 **engine and shell done, data blocked** | Graded integrator, worm manifest, crawler body and ETL all built and tested. Since 2026-09-05 the shell is generic (`rust/shell/src/runtime.rs`): a tray *Creature* picker, `--creature`, per-creature habituation, and the worm rendered as a glass tube — it crawls on the desktop, **brainless**, because the connectome is still not shipped (redistribution terms unverified, below). The fly's `--snapshot` is byte-identical through the generic path. |
 | **Phase 6** — macOS parity | ⬜ not started | Needs a Mac to verify; cannot be tested from here. |
+| **Creature #3** — the jumping-spider chimera | ✅ **done 2026-09-05** | `SPIDER_PLAN.md` phases 0–5. Per-element provenance, LC11 from the raw dumps, one authored pounce node, a salticid body with a dragline, content-blind coding senses (foreground class, `notify` pipe), glass render. Two new suites (14 + 14 checks) pass across seeds; the fly's suite output and snapshots are byte-identical. |
 
 **104 tests pass, no warnings.** The fly runs at 59 fps on ~13% of one core
 with the brain window open.

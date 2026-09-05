@@ -42,6 +42,17 @@ otherwise.
 - Extras with no Swift counterpart: habituation (persisted), glass-anatomy
   rendering (default; `--literal` for the photoreal fly), and yielding the
   overlay to fullscreen apps.
+- **Creature #3 is a chimera** (`SPIDER_PLAN.md`): a jumping spider running
+  the fly's measured modules plus LC11 (`lc11`, 127 cells, added via
+  `etl_chimera.py` → `data/salticid/`) and **one authored neuron**, the
+  pounce node (`pounce`). Provenance is per neuron/edge (`Origin`); the brain
+  window colours authored elements cool. Its suites:
+  `dfcore --creature salticid --simtest --behaviortest`. The fly's suite
+  output must stay byte-identical — diff it after touching `lif.rs`.
+- Coding senses are content-blind by construction: `Foreground` is an enum
+  from the process name, and build results arrive only via
+  `desktopfly notify pass|fail` over a named pipe. Never add log tailing or
+  title reading.
 
 ## Files
 
@@ -98,6 +109,8 @@ trust the compiler, not single-file diagnostics.
 | `escw` | DNp02/DNp04/DNp11 (6) | wing-beat effort in flight, threat wing-raise | `BrainSignals.wingDrive` |
 | `other`+ascending (27) | strongest ascending partners | body→brain gait proprioception (input target) | `sim.gaitDrive/gaitPhase` |
 | `other`+sensory (16) | strongest sensory partners | wind/tap input; electrically boosted onto GF | `sim.airPuff`, taps |
+| `lc11` *(chimera only)* | LC11 (127) | small-object input → pursuit, head orient (L−R readout, modelled) | `BrainSignals.pursuit`, `prey_bias` |
+| `pounce` *(chimera only, AUTHORED)* | — (1 node, 127 authored edges from LC11) | pounce, if a bug is in range | `BrainSignals.pounce` |
 
 Whole-population rate → `BrainSignals.arousal` (spontaneous-takeoff gate,
 flight effort). Only fly #1 has the brain; extra flies use legacy

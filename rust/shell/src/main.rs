@@ -21,6 +21,8 @@ mod persist;
 mod render;
 mod runtime;
 mod snapshot;
+mod spiderbody;
+mod spiderrt;
 mod tray;
 mod transduction;
 mod wormbody;
@@ -757,6 +759,23 @@ impl App {
 
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
+    // The build hook (SPIDER_PLAN.md §5): `desktopfly notify pass|fail`
+    // delivers one word to the running app and exits. This is the whole
+    // integration; nothing is watched.
+    if argv.get(1).map(|a| a == "notify").unwrap_or(false) {
+        let word = argv.get(2).cloned().unwrap_or_default();
+        if dfcore::env::BuildEvent::parse(&word).is_none() {
+            eprintln!("usage: desktopfly notify pass|fail");
+            std::process::exit(2);
+        }
+        match dfplatform::notify::send(&word) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("no running DesktopFly to notify ({e})");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Some(i) = argv.iter().position(|a| a == "--snapshot") {
         let path = argv.get(i + 1).cloned().unwrap_or_else(|| "fly.png".into());
         let alt = argv
@@ -766,8 +785,14 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.0);
         let glass = !argv.iter().any(|a| a == "--literal");
+        let zoom = argv
+            .iter()
+            .position(|a| a == "--zoom")
+            .and_then(|j| argv.get(j + 1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0);
         let mut rt = runtime::make(&creature_arg(&argv), dfcore::DEFAULT_SEED);
-        snapshot::render_to_png(rt.as_mut(), &path, 320, 320, alt, 20, glass);
+        snapshot::render_to_png(rt.as_mut(), &path, 320, 320, alt, 20, glass, zoom);
         return;
     }
 

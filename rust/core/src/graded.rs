@@ -107,6 +107,8 @@ pub struct GradedSim {
     gap: Csr,
 
     groups: HashMap<&'static str, Vec<usize>>,
+    /// Per-neuron origin, for the brain window's provenance colouring.
+    pub origins: Vec<crate::creature::Origin>,
     /// Per-neuron external drive, written by transduction each frame.
     pub input: Vec<f32>,
     pub activity_scale: f32,
@@ -184,6 +186,7 @@ impl GradedSim {
             chem,
             gap,
             groups,
+            origins: (0..n).map(|i| connectome.origin_of_neuron(i)).collect(),
             input: vec![0.0; n],
             activity_scale: 1.0,
             sensory_gate: 1.0,
@@ -350,6 +353,8 @@ mod tests {
             } else {
                 vec![]
             },
+            neuron_origin: Vec::new(),
+            edge_origin: Vec::new(),
             provenance: Provenance::Authored {
                 note: "test fixture".into(),
             },
@@ -488,6 +493,8 @@ mod tests {
             positions: vec![[0.0; 3]; n],
             chemical,
             electrical,
+            neuron_origin: Vec::new(),
+            edge_origin: Vec::new(),
             provenance: Provenance::Authored {
                 note: "stiff fixture".into(),
             },

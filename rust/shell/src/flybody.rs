@@ -69,6 +69,8 @@ impl GlassPalette {
 pub struct NeuronLayout {
     min: [f32; 3],
     inv_span: [f32; 3],
+    lo: [f32; 3],
+    hi: [f32; 3],
 }
 
 impl NeuronLayout {
@@ -77,6 +79,12 @@ impl NeuronLayout {
     const HI: [f32; 3] = [4.2, 11.5, 8.0];
 
     pub fn fit(positions: &[[f32; 3]]) -> Self {
+        Self::fit_into(positions, Self::LO, Self::HI)
+    }
+
+    /// The same normalisation into a caller's box — another creature's body
+    /// has other extents.
+    pub fn fit_into(positions: &[[f32; 3]], lo: [f32; 3], hi: [f32; 3]) -> Self {
         let mut min = [f32::MAX; 3];
         let mut max = [f32::MIN; 3];
         for p in positions {
@@ -90,14 +98,14 @@ impl NeuronLayout {
             let span = max[k] - min[k];
             inv_span[k] = if span > 1e-4 { 1.0 / span } else { 0.0 };
         }
-        NeuronLayout { min, inv_span }
+        NeuronLayout { min, inv_span, lo, hi }
     }
 
     pub fn map(&self, p: [f32; 3]) -> [f32; 3] {
         let mut out = [0.0f32; 3];
         for k in 0..3 {
             let t = (p[k] - self.min[k]) * self.inv_span[k];
-            out[k] = Self::LO[k] + t * (Self::HI[k] - Self::LO[k]);
+            out[k] = self.lo[k] + t * (self.hi[k] - self.lo[k]);
         }
         out
     }

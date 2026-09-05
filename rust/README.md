@@ -34,12 +34,30 @@ target/release/desktopfly.exe --creature c_elegans   # the worm (see below)
 
 **Creatures.** The tray has a *Creature* submenu; the choice is saved and
 survives a restart, and `--creature ID` overrides it for one run (ids:
-`drosophila`, `c_elegans`). Switching keeps the new animal where the old one
-was and rebuilds the brain window for its data. The worm's connectome is
-**not shipped** (its licence is unverified — `PORT_PLAN.md` §8), so until
-`etl_celegans.py` has been run it crawls *brainless* at a constant drive and
-the tray says so; nothing about it reacts to you. An unknown id falls back to
-the fly with a message rather than a panic.
+`drosophila`, `salticid`, `c_elegans`). Switching keeps the new animal where
+the old one was and rebuilds the brain window for its data. The worm's
+connectome is **not shipped** (its licence is unverified — `PORT_PLAN.md`
+§8), so until `etl_celegans.py` has been run it crawls *brainless* at a
+constant drive and the tray says so; nothing about it reacts to you. An
+unknown id falls back to the fly with a message rather than a panic.
+
+**The spider** (`salticid`) is the chimera described in `../SPIDER_PLAN.md`:
+the fly's measured modules plus LC11, one authored pounce node, a
+jumping-spider body, and two content-blind coding senses. Its data ships in
+`../data/salticid/`. The build hook is the whole integration:
+
+```sh
+target/release/desktopfly.exe notify fail   # bugs appear; the spider hunts them
+target/release/desktopfly.exe notify pass   # the bugs leave
+```
+
+Put one of those at the end of a build script, a test task or a git hook.
+It travels over a local named pipe (`\\.\pipe\desktopfly-notify`), never a
+socket, and carries one word. The other coding sense is the *class* of the
+foreground app (editor / terminal / browser / other), from the process name
+only — never a title — which makes the spider sit tighter and look around
+more while you work. The brain window colours the authored node cool and
+draws it larger; nothing invented is allowed to look measured.
 
 **Frame rate.** The default is 30 fps, not 60. Spike 0 measured ~8% of a core
 just to clear and present a full-screen overlay, so frame rate is a real part
@@ -61,9 +79,17 @@ cargo test --workspace                     # everything, including both suites
 target/release/dfcore.exe --simtest        # circuit invariants
 target/release/dfcore.exe --behaviortest   # 17 end-to-end sim -> body checks
 target/release/dfcore.exe --simtest --seed 1337   # any seed must pass
+target/release/dfcore.exe --creature salticid --simtest       # the chimera's 14 circuit checks
+target/release/dfcore.exe --creature salticid --behaviortest  # 14 sim -> spider body checks
 target/release/winprobe.exe --terrain      # what the fly can walk on right now
 target/release/senses.exe                  # one second of live desktop senses
+target/release/desktopfly.exe --creature salticid --snapshot s.png --zoom 5   # a close look
 ```
+
+The fly's numbers are the oracle and must not move: after any change to the
+simulator, diff `dfcore --simtest --behaviortest` output against the previous
+build (it is byte-identical across every change made for the chimera), and
+diff `--snapshot` PNG hashes. The chimera's suites guard its own claims.
 
 Current results on the reference machine: GF silent over 4 s of rest, GF fires
 **4 ms** after an abrupt loom, walk-drive duty 35–45%, siesta 23–37%, all 17
@@ -83,6 +109,11 @@ behaviour checks pass, across every seed tried.
    It is a modelling choice, not measured data, and is labelled as such.
 4. **The overlay yields to fullscreen apps** (`SHQueryUserNotificationState`).
    macOS's `.fullScreenAuxiliary` made this unnecessary there.
+5. **Provenance is per neuron and per edge** (`Origin`), and `LifSim` carries
+   two populations the fly does not use (LC11, pounce) plus a small-object
+   input. For the fly these are empty and zero; its suite output is
+   byte-identical before and after.
+6. **A third creature, the chimera.** See above.
 
 ## Platform fidelity
 

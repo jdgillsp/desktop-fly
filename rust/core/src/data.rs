@@ -27,6 +27,11 @@ pub struct CircuitNeuron {
     /// left | right | center
     pub side: String,
     pub pos: Vec<f32>,
+    /// `"measured"` or `"authored"`. Absent from single-source files (the
+    /// fly's), where the creature's provenance covers every neuron; written
+    /// per neuron by `etl_chimera.py`.
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,8 +100,18 @@ pub fn load_from_dir(dir: &Path) -> Result<BrainData, String> {
         std::fs::read_to_string(dir.join(name))
             .map_err(|e| format!("{}: {e}", dir.join(name).display()))
     };
+    // A creature whose modules are the fly's (the chimera) shares the fly's
+    // soma cloud rather than shipping a second megabyte of the same points.
+    let points_text = match read("brain_points.json") {
+        Ok(t) => t,
+        Err(e) => match dir.parent().map(|p| p.join("brain_points.json")) {
+            Some(parent) if parent.is_file() => std::fs::read_to_string(&parent)
+                .map_err(|e| format!("{}: {e}", parent.display()))?,
+            _ => return Err(e),
+        },
+    };
     let points: BrainPointsFile =
-        serde_json::from_str(&read("brain_points.json")?).map_err(|e| format!("brain_points.json: {e}"))?;
+        serde_json::from_str(&points_text).map_err(|e| format!("brain_points.json: {e}"))?;
     let circuit: CircuitFile =
         serde_json::from_str(&read("circuit.json")?).map_err(|e| format!("circuit.json: {e}"))?;
     Ok(BrainData { points, circuit })

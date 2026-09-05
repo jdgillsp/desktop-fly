@@ -47,6 +47,34 @@ pub enum Provenance {
     },
     /// Hand-authored. Test fixtures, and nothing that ships as a creature.
     Authored { note: String },
+    /// Real circuit modules, recombined into an animal that does not exist
+    /// (PORT_PLAN.md §6.2 ii, SPIDER_PLAN.md §2). Every measured neuron and
+    /// edge carries the inner provenance; the authored connectives are
+    /// counted, and per-neuron/per-edge [`Origin`] says which is which.
+    Chimera {
+        measured: Box<Provenance>,
+        /// What was authored, in one phrase: "pounce connective".
+        authored: String,
+    },
+}
+
+/// Where one neuron or one edge came from. The connectome-level
+/// [`Provenance`] says what the measured source is; this says whether a given
+/// element is from it at all. A chimera mixes at this granularity, so this is
+/// the level its honesty lives at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Measured,
+    Authored,
+}
+
+impl Origin {
+    pub fn from_tag(tag: Option<&str>) -> Origin {
+        match tag {
+            Some("authored") => Origin::Authored,
+            _ => Origin::Measured,
+        }
+    }
 }
 
 impl Provenance {
@@ -64,6 +92,20 @@ impl Provenance {
                 generator, seed, ..
             } => format!("{generator}, seed 0x{seed:X} (synthetic)"),
             Provenance::Authored { note } => format!("{note} (authored)"),
+            Provenance::Chimera { measured, authored } => format!(
+                "chimera: {} modules + authored {authored}",
+                measured.describe()
+            ),
+        }
+    }
+
+    /// The origin of any element this provenance does not itemise: a measured
+    /// dataset's elements are measured, everything else's are authored. A
+    /// chimera's elements are itemised in the connectome, never defaulted.
+    pub fn default_origin(&self) -> Origin {
+        match self {
+            Provenance::Measured { .. } => Origin::Measured,
+            _ => Origin::Authored,
         }
     }
 
@@ -101,6 +143,11 @@ pub struct Connectome {
     /// *C. elegans*, where electrical coupling is roughly a third of the graph.
     pub electrical: Vec<Edge>,
     pub provenance: Provenance,
+    /// Per-neuron and per-chemical-edge origin. May be empty for a
+    /// single-source connectome, in which case [`Provenance::default_origin`]
+    /// applies to every element; a chimera fills both.
+    pub neuron_origin: Vec<Origin>,
+    pub edge_origin: Vec<Origin>,
 }
 
 impl Connectome {
@@ -109,6 +156,32 @@ impl Connectome {
     }
     pub fn is_empty(&self) -> bool {
         self.roles.is_empty()
+    }
+
+    pub fn origin_of_neuron(&self, i: usize) -> Origin {
+        self.neuron_origin
+            .get(i)
+            .copied()
+            .unwrap_or_else(|| self.provenance.default_origin())
+    }
+
+    pub fn origin_of_edge(&self, k: usize) -> Origin {
+        self.edge_origin
+            .get(k)
+            .copied()
+            .unwrap_or_else(|| self.provenance.default_origin())
+    }
+
+    /// How many neurons and chemical edges are authored — the number the
+    /// README's measured-vs-modelled table has to print.
+    pub fn authored_counts(&self) -> (usize, usize) {
+        let n = (0..self.len())
+            .filter(|&i| self.origin_of_neuron(i) == Origin::Authored)
+            .count();
+        let e = (0..self.chemical.len())
+            .filter(|&k| self.origin_of_edge(k) == Origin::Authored)
+            .count();
+        (n, e)
     }
 
     /// Build from a shipped `circuit.json`. The fly's [`LifSim`] reads the
@@ -130,7 +203,33 @@ impl Connectome {
                 weight: row[2],
             })
         };
+        // Edge rows are `[pre, post, weight]` or `[pre, post, weight, origin]`
+        // with origin 1 = authored. Keep the origin list aligned with the
+        // edges that survive the range check.
+        let edge_origin = |row: &Vec<f32>| -> Option<Origin> {
+            edge(row)?;
+            Some(if row.get(3).copied().unwrap_or(0.0) >= 0.5 {
+                Origin::Authored
+            } else {
+                Origin::Measured
+            })
+        };
+        let itemised = file.neurons.iter().any(|x| x.origin.is_some())
+            || file.edges.iter().any(|e| e.len() >= 4);
         Connectome {
+            neuron_origin: if itemised {
+                file.neurons
+                    .iter()
+                    .map(|x| Origin::from_tag(x.origin.as_deref()))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            edge_origin: if itemised {
+                file.edges.iter().filter_map(edge_origin).collect()
+            } else {
+                Vec::new()
+            },
             roles: file.neurons.iter().map(|x| x.role.clone()).collect(),
             cell_types: file.neurons.iter().map(|x| x.cell_type.clone()).collect(),
             sides: file.neurons.iter().map(|x| x.side.clone()).collect(),
@@ -155,7 +254,7 @@ impl Connectome {
 
 /// Every creature the engine can run, in menu order. The fly is first because
 /// it is the one with shipped data.
-pub const CREATURE_IDS: [&str; 2] = ["drosophila", "c_elegans"];
+pub const CREATURE_IDS: [&str; 3] = ["drosophila", "salticid", "c_elegans"];
 
 /// Look a creature up by its `id()`. `None` for an id that is not a creature,
 /// so a stale settings file or a typo on the command line degrades to the
@@ -163,8 +262,45 @@ pub const CREATURE_IDS: [&str; 2] = ["drosophila", "c_elegans"];
 pub fn by_id(id: &str) -> Option<Box<dyn Creature>> {
     match id {
         "drosophila" => Some(Box::new(Drosophila)),
+        "salticid" => Some(Box::new(Salticid)),
         "c_elegans" => Some(Box::new(CElegans)),
         _ => None,
+    }
+}
+
+/// Creature #3: a jumping spider that does not exist (SPIDER_PLAN.md).
+///
+/// **No spider connectome exists**, so this is a chimera: the fly's measured
+/// looming, escape, steering, walking, grooming and backing-up circuits, plus
+/// FlyWire's LC11 small-object detectors for prey, all real — joined by one
+/// authored connective, the pounce node, which no animal has. The integrator
+/// is the fly's LIF because the neurons are the fly's; the body is a spider's
+/// because the silhouette is ours to choose. The rules in SPIDER_PLAN.md §2
+/// are enforced by `chimera_labels_are_honest` below: this is never called a
+/// spider brain.
+pub struct Salticid;
+
+impl Creature for Salticid {
+    fn id(&self) -> &'static str {
+        "salticid"
+    }
+    fn display_name(&self) -> &'static str {
+        "Jumping spider (chimera)"
+    }
+    fn manifest(&self) -> RoleManifest {
+        crate::roles::salticid()
+    }
+    fn dynamics(&self) -> DynamicsSpec {
+        DynamicsSpec::Lif(LifParams::default())
+    }
+    fn provenance(&self) -> Provenance {
+        Provenance::Chimera {
+            measured: Box::new(Provenance::flywire_v783()),
+            authored: "pounce connective".into(),
+        }
+    }
+    fn data_dir(&self) -> &'static str {
+        "salticid"
     }
 }
 
@@ -243,6 +379,9 @@ pub trait Sim {
     fn roles(&self) -> &[String];
     /// Members of a named population, for stimulation and readout.
     fn group(&self, slug: &str) -> &[usize];
+    /// Where neuron `i` came from, so the brain window can colour by
+    /// provenance. Measured for everything in a measured dataset.
+    fn origin(&self, i: usize) -> Origin;
 }
 
 impl Sim for LifSim {
@@ -280,6 +419,9 @@ impl Sim for LifSim {
     fn group(&self, slug: &str) -> &[usize] {
         self.groups.get(slug).map(|g| g.as_slice()).unwrap_or(&[])
     }
+    fn origin(&self, i: usize) -> Origin {
+        self.origins.get(i).copied().unwrap_or(Origin::Measured)
+    }
 }
 
 impl Sim for crate::graded::GradedSim {
@@ -312,6 +454,9 @@ impl Sim for crate::graded::GradedSim {
     }
     fn group(&self, slug: &str) -> &[usize] {
         crate::graded::GradedSim::group(self, slug)
+    }
+    fn origin(&self, i: usize) -> Origin {
+        self.origins.get(i).copied().unwrap_or(Origin::Measured)
     }
 }
 
@@ -358,6 +503,9 @@ pub enum Substrate {
     WalkerFlier,
     /// Crawls, tracking surfaces. No flight — so no altitude, no wing beat.
     Crawler,
+    /// Walks on the desktop and on window ledges, and jumps between them
+    /// ballistically on a dragline. No flight.
+    WalkerJumper,
 }
 
 /// The world a body moves through, as the body sees it.
@@ -529,9 +677,67 @@ mod tests {
             provenance: Provenance::Authored {
                 note: "fixture".into(),
             },
+            neuron_origin: Vec::new(),
+            edge_origin: Vec::new(),
         };
         assert_eq!(c.len(), 2);
         assert_eq!(c.electrical.len(), 1);
+        // An authored fixture's elements are authored, without itemising.
+        assert_eq!(c.origin_of_neuron(0), Origin::Authored);
+        assert_eq!(c.authored_counts(), (2, 1));
+    }
+
+    /// SPIDER_PLAN.md §2 rule 4, as a test: the chimera is never presented as
+    /// a spider's brain, and it never passes as measured.
+    #[test]
+    fn chimera_labels_are_honest() {
+        let s = Salticid;
+        let p = s.provenance();
+        assert!(!p.is_measured(), "a chimera must never pass as measured");
+        let d = p.describe().to_lowercase();
+        assert!(d.contains("chimera"), "{d}");
+        assert!(d.contains("flywire"), "the measured source must be named: {d}");
+        assert!(d.contains("authored"), "the invented part must be named: {d}");
+        for forbidden in ["spider connectome", "spider brain"] {
+            assert!(!d.contains(forbidden), "'{forbidden}' in {d}");
+        }
+        assert!(!s.display_name().to_lowercase().contains("connectome"));
+        assert!(s.display_name().to_lowercase().contains("chimera"));
+        assert_eq!(p.default_origin(), Origin::Authored, "un-itemised elements of a chimera are not measured");
+    }
+
+    /// A chimera file itemises origins per neuron and per edge, and the counts
+    /// come out of the data rather than a constant somebody has to remember.
+    #[test]
+    fn a_chimera_circuit_file_itemises_its_authored_parts() {
+        use crate::data::{CircuitFile, CircuitNeuron};
+        let neuron = |role: &str, origin: Option<&str>| CircuitNeuron {
+            id: role.into(),
+            cell_type: role.to_uppercase(),
+            role: role.into(),
+            side: "center".into(),
+            pos: vec![0.0, 0.0, 0.0],
+            origin: origin.map(|s| s.to_string()),
+        };
+        let file = CircuitFile {
+            neurons: vec![
+                neuron("lc11", Some("measured")),
+                neuron("lc11", Some("measured")),
+                neuron("pounce", Some("authored")),
+            ],
+            edges: vec![
+                vec![0.0, 1.0, 3.0, 0.0],
+                vec![0.0, 2.0, 8.0, 1.0],
+                vec![1.0, 2.0, 8.0, 1.0],
+            ],
+            electrical: vec![],
+        };
+        let c = Connectome::from_circuit(&file, Salticid.provenance());
+        assert_eq!(c.origin_of_neuron(2), Origin::Authored);
+        assert_eq!(c.origin_of_neuron(0), Origin::Measured);
+        assert_eq!(c.origin_of_edge(0), Origin::Measured);
+        assert_eq!(c.origin_of_edge(1), Origin::Authored);
+        assert_eq!(c.authored_counts(), (1, 2));
     }
 
     #[test]
@@ -587,6 +793,7 @@ mod tests {
             role: role.into(),
             side: side.into(),
             pos: vec![1.0, 2.0, 3.0],
+            origin: None,
         };
         let file = CircuitFile {
             neurons: vec![neuron("touch", "left"), neuron("forward", "right")],

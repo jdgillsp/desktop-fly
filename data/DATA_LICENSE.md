@@ -3,6 +3,10 @@
 `brain_points.json` and `circuit.json` are derived from the publicly released
 FlyWire connectome data products (FAFB v783), downloaded from
 [FlyWire Codex](https://codex.flywire.ai) and processed by `../etl.py`.
+`salticid/circuit.json` is derived from the same release by
+`../etl_chimera.py`; every element marked `measured` in it is FlyWire data
+under the terms below, and the one neuron and 127 edges marked `authored`
+are invented and carry the code licence (MIT) — see `salticid/PROVENANCE.md`.
 
 FlyWire data is licensed under
 [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)

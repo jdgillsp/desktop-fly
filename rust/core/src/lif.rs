@@ -99,13 +99,26 @@ pub struct LifSim {
     pub escw: Vec<usize>,
     pub ascend: Vec<usize>,
     pub sens: Vec<usize>,
+    /// Chimera populations (SPIDER_PLAN.md §3). Empty for the fly, so every
+    /// loop over them is a no-op and the fly's numbers are untouched.
+    pub lc11_l: Vec<usize>,
+    pub lc11_r: Vec<usize>,
+    pub pounce: Vec<usize>,
     ascend_phase: Vec<f32>,
     /// Per-neuron membership flags, so the hot loop avoids `dnaL.contains(i)`.
     is_dna_left: Vec<bool>,
+    is_lc11_left: Vec<bool>,
+    /// Per-neuron origin, measured or authored. All measured for the fly.
+    pub origins: Vec<crate::creature::Origin>,
 
     // inputs, written each frame by the coordinator
     pub loom_l: f32,
     pub loom_r: f32,
+    /// Small-object drive per eye, onto LC11. The size tuning that makes LC11
+    /// a *small*-object detector lives in the lobula, outside the extract, so
+    /// it is the transduction's job to present only small objects here.
+    pub prey_l: f32,
+    pub prey_r: f32,
     pub gait_drive: f32,
     pub gait_phase: f32,
     pub air_puff: f32,
@@ -121,8 +134,12 @@ pub struct LifSim {
     pub rate_groom: f32,
     pub rate_escw: f32,
     pub rate_pop: f32,
+    pub rate_lc11_l: f32,
+    pub rate_lc11_r: f32,
+    pub rate_pounce: f32,
 
     gf_latch: bool,
+    pounce_latch: bool,
     pub sim_ms: i64,
     pub total_spikes: u64,
 
@@ -212,10 +229,21 @@ impl LifSim {
         let escw = take("escw").0;
         let ascend = take("ascend").0;
         let sens = take("sens").0;
+        let (lc11_l, lc11_r) = take("lc11");
+        let pounce = take("pounce").0;
+        let origins: Vec<crate::creature::Origin> = circuit
+            .neurons
+            .iter()
+            .map(|x| crate::creature::Origin::from_tag(x.origin.as_deref()))
+            .collect();
 
         let mut is_dna_left = vec![false; n];
         for &i in &dna_l {
             is_dna_left[i] = true;
+        }
+        let mut is_lc11_left = vec![false; n];
+        for &i in &lc11_l {
+            is_lc11_left[i] = true;
         }
 
         let ascend_phase: Vec<f32> = ascend
@@ -240,6 +268,8 @@ impl LifSim {
         flat_groups.insert("dna_right", dna_r.clone());
         flat_groups.insert("loom_left", loom_left.clone());
         flat_groups.insert("loom_right", loom_right.clone());
+        flat_groups.insert("lc11_left", lc11_l.clone());
+        flat_groups.insert("lc11_right", lc11_r.clone());
 
         // CSR build.
         let mut counts = vec![0usize; n];
@@ -291,10 +321,17 @@ impl LifSim {
             escw,
             ascend,
             sens,
+            lc11_l,
+            lc11_r,
+            pounce,
             ascend_phase,
             is_dna_left,
+            is_lc11_left,
+            origins,
             loom_l: 0.0,
             loom_r: 0.0,
+            prey_l: 0.0,
+            prey_r: 0.0,
             gait_drive: 0.0,
             gait_phase: 0.0,
             air_puff: 0.0,
@@ -308,7 +345,11 @@ impl LifSim {
             rate_groom: 0.0,
             rate_escw: 0.0,
             rate_pop: 0.0,
+            rate_lc11_l: 0.0,
+            rate_lc11_r: 0.0,
+            rate_pounce: 0.0,
             gf_latch: false,
+            pounce_latch: false,
             sim_ms: 0,
             total_spikes: 0,
             inh_queue: vec![vec![0.0; n]; 5],
@@ -347,6 +388,13 @@ impl LifSim {
     pub fn consume_gf(&mut self) -> bool {
         let s = self.gf_latch;
         self.gf_latch = false;
+        s
+    }
+
+    /// Reads and clears the pounce-node latch. Always false for the fly.
+    pub fn consume_pounce(&mut self) -> bool {
+        let s = self.pounce_latch;
+        self.pounce_latch = false;
         s
     }
 
@@ -413,6 +461,20 @@ impl LifSim {
                     self.v[i] += d;
                 }
             }
+            // Small objects onto LC11, with the same gain as looming objects
+            // onto LC4/LPLC2: one visual-projection input rule, two channels.
+            if self.prey_l > 0.001 {
+                let d = self.prey_l * p.loom_gain * self.sensory_gate;
+                for &i in &self.lc11_l {
+                    self.v[i] += d;
+                }
+            }
+            if self.prey_r > 0.001 {
+                let d = self.prey_r * p.loom_gain * self.sensory_gate;
+                for &i in &self.lc11_r {
+                    self.v[i] += d;
+                }
+            }
             // body -> brain: the gait rhythm drives real ascending
             // (proprioceptive) neurons, in phase with the legs.
             if self.gait_drive > 0.001 {
@@ -476,6 +538,7 @@ impl LifSim {
             // 7. population rates
             let (mut c_loom, mut c_dl, mut c_dr) = (0u32, 0u32, 0u32);
             let (mut c_m, mut c_f, mut c_g, mut c_w) = (0u32, 0u32, 0u32, 0u32);
+            let (mut c_11l, mut c_11r, mut c_p) = (0u32, 0u32, 0u32);
             for &i in &spiked {
                 match self.roles[i].as_str() {
                     "lc4" | "lplc2" => c_loom += 1,
@@ -491,6 +554,17 @@ impl LifSim {
                     "dng11" => c_g += 1,
                     "escw" => c_w += 1,
                     "gf" => self.gf_latch = true,
+                    "lc11" => {
+                        if self.is_lc11_left[i] {
+                            c_11l += 1
+                        } else {
+                            c_11r += 1
+                        }
+                    }
+                    "pounce" => {
+                        c_p += 1;
+                        self.pounce_latch = true;
+                    }
                     _ => {}
                 }
             }
@@ -511,6 +585,20 @@ impl LifSim {
                 (c_w as f32 * 1000.0 / self.escw.len().max(1) as f32 - self.rate_escw) * a;
             self.rate_pop +=
                 (spiked.len() as f32 * 1000.0 / n.max(1) as f32 - self.rate_pop) * a;
+            // Chimera rates. For the fly these populations are empty, so the
+            // EMAs stay at exactly zero.
+            if !self.lc11_l.is_empty() || !self.lc11_r.is_empty() {
+                self.rate_lc11_l += (c_11l as f32 * 1000.0 / self.lc11_l.len().max(1) as f32
+                    - self.rate_lc11_l)
+                    * a;
+                self.rate_lc11_r += (c_11r as f32 * 1000.0 / self.lc11_r.len().max(1) as f32
+                    - self.rate_lc11_r)
+                    * a;
+            }
+            if !self.pounce.is_empty() {
+                self.rate_pounce +=
+                    (c_p as f32 * 1000.0 / self.pounce.len() as f32 - self.rate_pounce) * a;
+            }
 
             if self.collect_spikes && !spiked.is_empty() {
                 // Sample under heavy activity, as the Swift SpikeBus does.

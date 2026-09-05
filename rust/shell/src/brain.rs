@@ -13,6 +13,10 @@ use dfcore::Sim;
 use crate::math::{self, Mat4};
 
 /// FlyWire super-class palette, index order from `etl.py` (BrainView.swift:39).
+/// The colour of anything invented. Deliberately outside every measured
+/// population's hue so the brain window reads honestly without a legend.
+pub const AUTHORED_COLOR: [f32; 4] = [0.60, 0.70, 1.00, 1.0];
+
 const CLASS_COLORS: [[f32; 4]; 9] = [
     [0.16, 0.22, 0.34, 1.0], // optic — dim blue; the majority, kept subtle
     [0.45, 0.33, 0.16, 1.0], // central — amber
@@ -213,15 +217,31 @@ impl BrainView {
 
         // --- the 668-neuron circuit, rebuilt each frame for spike flashes ---
         let circuit_pos: Vec<[f32; 3]> = sim.positions().to_vec();
+        // Colour by provenance first, role second. A measured neuron gets its
+        // population's colour; an authored one gets the cool AUTHORED colour
+        // and a bigger sprite, so an invented element can never hide among
+        // real ones (SPIDER_PLAN.md §2 rule 3). For a measured dataset this
+        // changes nothing.
         let circuit_base: Vec<[f32; 4]> = sim
             .roles()
             .iter()
-            .map(|r| sim.manifest().color_for(r))
+            .enumerate()
+            .map(|(i, r)| match sim.origin(i) {
+                dfcore::Origin::Measured => sim.manifest().color_for(r),
+                dfcore::Origin::Authored => AUTHORED_COLOR,
+            })
             .collect();
         let circuit_seed: Vec<([f32; 3], [f32; 4], f32)> = circuit_pos
             .iter()
+            .enumerate()
             .zip(circuit_base.iter())
-            .map(|(p, c)| (*p, *c, 2.2))
+            .map(|((i, p), c)| {
+                let size = match sim.origin(i) {
+                    dfcore::Origin::Measured => 2.2,
+                    dfcore::Origin::Authored => 4.0,
+                };
+                (*p, *c, size)
+            })
             .collect();
         let (qv, qi) = expand_points(&circuit_seed);
         let circuit_index_count = qi.len() as u32;
