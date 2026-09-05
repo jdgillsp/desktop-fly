@@ -12,6 +12,7 @@
 pub mod body;
 pub mod data;
 pub mod env;
+pub mod habituation;
 pub mod lif;
 pub mod rng;
 pub mod signals;
@@ -21,6 +22,7 @@ pub mod util;
 pub use body::{Fly, Pose, State, FLY_SCALE};
 pub use data::{BrainData, CircuitFile};
 pub use env::{EnvSnapshot, Rect, ScreenSpace, Senses};
+pub use habituation::Habituation;
 pub use lif::{LifParams, LifSim};
 pub use signals::{BrainSignals, SignalBuilder};
 pub use util::{circadian_activity, Ledge, Vec2};

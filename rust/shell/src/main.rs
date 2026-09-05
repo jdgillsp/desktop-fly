@@ -12,6 +12,7 @@
 mod flybody;
 mod math;
 mod mesh;
+mod persist;
 mod render;
 mod snapshot;
 mod tray;
@@ -112,6 +113,8 @@ struct App {
 
     tray: Option<tray::Tray>,
     paused: bool,
+    last_mood: String,
+    last_state_save: Instant,
     /// Monitors, for the "Move to Next Display" command.
     monitors: Vec<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)>,
     monitor_index: usize,
@@ -146,6 +149,8 @@ impl App {
             last_env_cursor: None,
             tray: None,
             paused: false,
+            last_mood: String::new(),
+            last_state_save: Instant::now(),
             monitors: Vec::new(),
             monitor_index: 0,
         }
@@ -243,7 +248,9 @@ impl ApplicationHandler for App {
         // The brain.
         match dfcore::data::load() {
             Ok(brain) => {
-                let sim = LifSim::new(&brain.circuit, dfcore::DEFAULT_SEED);
+                let mut sim = LifSim::new(&brain.circuit, dfcore::DEFAULT_SEED);
+                // What the creature already knows about this user.
+                sim.habituation = persist::load();
                 println!(
                     "FlyWire v783 - {} somas - circuit {}n/{}e",
                     brain.points.points.len(),
@@ -352,6 +359,9 @@ impl App {
         for cmd in commands {
             match cmd {
                 tray::TrayCommand::Quit => {
+                    if let Some(sim) = self.sim.as_ref() {
+                        persist::save(&sim.habituation);
+                    }
                     event_loop.exit();
                     return;
                 }
@@ -368,6 +378,13 @@ impl App {
                 }
                 tray::TrayCommand::ToggleShadows => self.args.shadows = !self.args.shadows,
                 tray::TrayCommand::NextDisplay => self.move_to_next_display(),
+                tray::TrayCommand::ForgetMe => {
+                    if let Some(sim) = self.sim.as_mut() {
+                        sim.habituation.reset();
+                    }
+                    persist::forget();
+                    println!("habituation reset - the creature is naive again");
+                }
             }
         }
         if self.paused {
@@ -456,6 +473,22 @@ impl App {
                 harden_overlay_styles(w);
             }
         }
+        if let Some(sim) = self.sim.as_ref() {
+            let mood = sim.habituation.describe();
+            if mood != self.last_mood {
+                self.last_mood = mood.clone();
+                if let Some(t) = &self.tray {
+                    t.set_mood(&mood);
+                }
+            }
+            // Checkpoint every 60 s so a crash or a kill does not lose days of
+            // accumulated familiarity.
+            if self.last_state_save.elapsed() >= Duration::from_secs(60) {
+                self.last_state_save = Instant::now();
+                persist::save(&sim.habituation);
+            }
+        }
+
         if self.last_report.elapsed() >= Duration::from_secs(10) {
             let fps = self.frames as f32 / self.last_report.elapsed().as_secs_f32();
             println!(
@@ -470,6 +503,9 @@ impl App {
         }
 
         if self.args.seconds > 0 && self.start.elapsed() >= Duration::from_secs(self.args.seconds) {
+            if let Some(sim) = self.sim.as_ref() {
+                persist::save(&sim.habituation);
+            }
             event_loop.exit();
         }
     }

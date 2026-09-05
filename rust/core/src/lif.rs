@@ -18,6 +18,7 @@
 //!   7. update population rate EMAs
 
 use crate::data::CircuitFile;
+use crate::habituation::Habituation;
 use crate::rng::Pcg32;
 
 /// Fixed parameters of the fly's spiking dynamics (Sim.swift:129-140).
@@ -139,6 +140,13 @@ pub struct LifSim {
     /// Spikes observed in the most recent `step`, for the brain window.
     pub collect_spikes: bool,
     pub last_spikes: Vec<SpikeEvent>,
+
+    /// Sensory habituation: the creature getting used to you. Gates the
+    /// looming and mechanosensory inputs *before* they reach the connectome,
+    /// which is where presynaptic depression actually lives.
+    pub habituation: Habituation,
+    /// Set false to run the circuit exactly as the Swift build does.
+    pub habituation_enabled: bool,
 }
 
 impl LifSim {
@@ -306,6 +314,8 @@ impl LifSim {
             active_stims: Vec::new(),
             collect_spikes: false,
             last_spikes: Vec::new(),
+            habituation: Habituation::new(),
+            habituation_enabled: true,
         }
     }
 
@@ -349,6 +359,15 @@ impl LifSim {
             self.last_spikes.clear();
         }
 
+        // Habituation advances once per call, not once per simulated
+        // millisecond: it is a slow process, and a 1 ms increment against a
+        // 30-minute time constant underflows f32 near full sensitivity.
+        if self.habituation_enabled {
+            let loom_drive = self.loom_l.max(self.loom_r);
+            self.habituation
+                .step(ms as f32 / 1000.0, loom_drive, self.air_puff);
+        }
+
         let p = &self.params;
         let n = self.n;
 
@@ -378,15 +397,23 @@ impl LifSim {
                 self.v[i] = vi;
             }
 
-            // 3. sensory injection
+            // 3. sensory injection, gated by habituation
+            let (hab_loom, hab_tap) = if self.habituation_enabled {
+                (
+                    self.habituation.loom_gain_f32(),
+                    self.habituation.tap_gain_f32(),
+                )
+            } else {
+                (1.0, 1.0)
+            };
             if self.loom_l > 0.001 {
-                let d = self.loom_l * p.loom_gain * self.sensory_gate;
+                let d = self.loom_l * p.loom_gain * self.sensory_gate * hab_loom;
                 for &i in &self.loom_left {
                     self.v[i] += d;
                 }
             }
             if self.loom_r > 0.001 {
-                let d = self.loom_r * p.loom_gain * self.sensory_gate;
+                let d = self.loom_r * p.loom_gain * self.sensory_gate * hab_loom;
                 for &i in &self.loom_right {
                     self.v[i] += d;
                 }
@@ -401,7 +428,7 @@ impl LifSim {
                 }
             }
             if self.air_puff > 0.001 {
-                let d = self.air_puff * 0.12 * self.sensory_gate;
+                let d = self.air_puff * 0.12 * self.sensory_gate * hab_tap;
                 for &i in &self.sens {
                     self.v[i] += d;
                 }

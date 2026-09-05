@@ -20,12 +20,15 @@ pub enum TrayCommand {
     Scare,
     NextDisplay,
     ToggleShadows,
+    ForgetMe,
     Quit,
 }
 
 pub struct Tray {
     _icon: TrayIcon,
     pause: MenuItem,
+    /// Shows what the creature currently thinks of you.
+    mood: MenuItem,
     ids: Vec<(tray_icon::menu::MenuId, TrayCommand)>,
 }
 
@@ -112,6 +115,8 @@ impl Tray {
         let scare = MenuItem::new("Scare Fly", true, None);
         let display = MenuItem::new("Move to Next Display", true, None);
         let shadow = MenuItem::new("Toggle Shadow", true, None);
+        let mood = MenuItem::new("getting to know you", false, None);
+        let forget = MenuItem::new("Forget Me (reset habituation)", true, None);
         let quit = MenuItem::new("Quit", true, None);
 
         let ids = vec![
@@ -120,6 +125,7 @@ impl Tray {
             (scare.id().clone(), TrayCommand::Scare),
             (display.id().clone(), TrayCommand::NextDisplay),
             (shadow.id().clone(), TrayCommand::ToggleShadows),
+            (forget.id().clone(), TrayCommand::ForgetMe),
             (quit.id().clone(), TrayCommand::Quit),
         ];
 
@@ -132,6 +138,9 @@ impl Tray {
             &scare,
             &display,
             &shadow,
+            &PredefinedMenuItem::separator(),
+            &mood,
+            &forget,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -148,6 +157,7 @@ impl Tray {
         Some(Tray {
             _icon: tray,
             pause,
+            mood,
             ids,
         })
     }
@@ -165,6 +175,12 @@ impl Tray {
 
     pub fn set_paused(&self, paused: bool) {
         self.pause.set_text(if paused { "Resume" } else { "Pause" });
+    }
+
+    /// Surface the habituation state, so it is legible rather than a hidden
+    /// number the user can only infer from behaviour.
+    pub fn set_mood(&self, text: &str) {
+        self.mood.set_text(text);
     }
 }
 
