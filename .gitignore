@@ -3,3 +3,6 @@ DesktopFly
 *.log
 nohup.out
 /*.png
+
+# Rust port
+rust/target/
