@@ -14,7 +14,7 @@
 //! path it should move to instancing.
 
 use dfcore::body::{Fly, State};
-use dfcore::Pose;
+use dfcore::{LifSim, Pose};
 
 use crate::math::{self, Mat4};
 use crate::mesh::{self, Mesh, Vertex};
@@ -31,6 +31,77 @@ const HEAD_COLOR: [f32; 4] = [0.575, 0.473, 0.337, 1.0];
 const ABDOMEN_LIGHT: [f32; 4] = [0.72, 0.55, 0.32, 1.0];
 const ABDOMEN_DARK: [f32; 4] = [0.22, 0.15, 0.09, 1.0];
 const WING_COLOR: [f32; 4] = [0.82, 0.86, 0.92, 0.30];
+
+/// "Glass anatomy" (PORT_PLAN.md §6.3 #2): a soft translucent shell with the
+/// live connectome visible inside it.
+///
+/// This is the recommended rendering register, and it is not only a look. It
+/// solves the "don't creep me out" constraint permanently for *any* creature —
+/// glass and glow do not trigger a vermin reflex where chitin and compound eyes
+/// do — it fuses the pet and the brain window into one object, which is the
+/// project's actual thesis, and it is the only non-arbitrary rendering for a
+/// synthetic creature that has no real anatomy to be faithful to.
+pub struct GlassPalette;
+
+impl GlassPalette {
+    /// Translucent, but not invisible. Tuned against a white background, which
+    /// is the hard case: at alpha 0.26 the creature simply could not be found
+    /// on a light desktop. A pet you lose is a failed pet.
+    pub const SHELL: [f32; 4] = [0.46, 0.60, 0.78, 0.46];
+    pub const SHELL_DENSE: [f32; 4] = [0.38, 0.54, 0.76, 0.56];
+    pub const LIMB: [f32; 4] = [0.34, 0.46, 0.64, 0.72];
+    pub const WING: [f32; 4] = [0.72, 0.82, 0.94, 0.22];
+}
+
+/// Maps the circuit's positions into the body's own local space.
+///
+/// The ETL normalises the *whole* brain into [-10, 10], and the 668-neuron
+/// circuit occupies only a fraction of that box — so using brain coordinates
+/// directly crams every neuron into one spot, which additively saturates to a
+/// white blob however faint each sprite is. Renormalising to the circuit's own
+/// extent is what spreads it through the creature.
+///
+/// Anatomically loose on purpose: at ~40 px on screen a faithful brain would be
+/// sub-pixel and invisible. This is a visualisation of the wiring, not a claim
+/// about where each soma sits in the animal — the honest reading of a
+/// diagrammatic body.
+#[derive(Debug, Clone, Copy)]
+pub struct NeuronLayout {
+    min: [f32; 3],
+    inv_span: [f32; 3],
+}
+
+impl NeuronLayout {
+    /// Body extents to fill: roughly head-to-abdomen, and inside the shell.
+    const LO: [f32; 3] = [-4.2, -11.0, 4.2];
+    const HI: [f32; 3] = [4.2, 11.5, 8.0];
+
+    pub fn fit(positions: &[[f32; 3]]) -> Self {
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for p in positions {
+            for k in 0..3 {
+                min[k] = min[k].min(p[k]);
+                max[k] = max[k].max(p[k]);
+            }
+        }
+        let mut inv_span = [1.0f32; 3];
+        for k in 0..3 {
+            let span = max[k] - min[k];
+            inv_span[k] = if span > 1e-4 { 1.0 / span } else { 0.0 };
+        }
+        NeuronLayout { min, inv_span }
+    }
+
+    pub fn map(&self, p: [f32; 3]) -> [f32; 3] {
+        let mut out = [0.0f32; 3];
+        for k in 0..3 {
+            let t = (p[k] - self.min[k]) * self.inv_span[k];
+            out[k] = Self::LO[k] + t * (Self::HI[k] - Self::LO[k]);
+        }
+        out
+    }
+}
 
 /// Per-leg segment lengths from the `specs` table (FlyModel.swift:204):
 /// `(attach_x, attach_y, base_yaw_offset, femur, tibia, tarsus)`.
@@ -127,8 +198,73 @@ fn emit_vertex_colored(out: &mut Mesh, src: &Mesh, m: &Mat4) {
     out.indices.extend(src.indices.iter().map(|i| i + off));
 }
 
+/// Screen-facing quads for the circuit's neurons, inside the body.
+///
+/// The camera is orthographic looking down -z, so a screen-facing billboard is
+/// just an xy quad — no view-matrix maths needed.
+pub fn build_neuron_field(
+    out: &mut Mesh,
+    sim: &LifSim,
+    flash: &[f32],
+    fly: &Fly,
+    pose: &Pose,
+) {
+    out.verts.clear();
+    out.indices.clear();
+
+    let root = math::mul(
+        math::translate(pose.pos.x, pose.pos.y, pose.z),
+        math::mul(
+            math::euler(pose.pitch, 0.0, pose.heading - std::f32::consts::FRAC_PI_2),
+            math::scale(pose.scale, pose.scale, pose.scale),
+        ),
+    );
+    // Sleeping creatures dim rather than go dark: the network is still running.
+    let mood = if fly.state == State::Sleeping { 0.45 } else { 1.0 };
+    let layout = NeuronLayout::fit(&sim.positions);
+
+    for (i, p) in sim.positions.iter().enumerate() {
+        let f = flash.get(i).copied().unwrap_or(0.0);
+        let base = sim.manifest.color_for(&sim.roles[i]);
+        // Only *activity* is drawn. A constant per-neuron glow means 668
+        // additive sprites overlapping inside a ~40 px body, which saturates to
+        // a white blob no matter how small each one is — and it says the wrong
+        // thing anyway. The resting look belongs to the glass shell; these
+        // points are neurons firing. You see it think, rather than see a lamp.
+        // Low threshold so the spontaneous crackle of a resting network is
+        // still faintly visible — the creature is never actually "off".
+        if f < 0.012 {
+            continue;
+        }
+        // Even spread out, hundreds of sprites overlap; the per-neuron
+        // contribution has to stay small enough that a whole population firing
+        // reads as a bright region rather than clipping to white.
+        let a = f * 0.055 * mood;
+        let radius = (0.35 + f * 1.0) * pose.scale;
+        let centre = math::transform_point(&root, layout.map(*p));
+        let col = [
+            (base[0] * (0.6 + f * 0.9)).min(1.6),
+            (base[1] * (0.6 + f * 0.9)).min(1.6),
+            (base[2] * (0.6 + f * 0.9)).min(1.6),
+            a,
+        ];
+        let b = out.verts.len() as u32;
+        for (dx, dy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            out.verts.push(Vertex {
+                pos: [centre[0] + dx * radius, centre[1] + dy * radius, centre[2]],
+                // The corner rides in the normal: `fs_neuron` uses it for a
+                // radial falloff, and nothing lights these points.
+                normal: [dx, dy, 0.0],
+                color: col,
+            });
+        }
+        out.indices
+            .extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+    }
+}
+
 /// Walk the fly's hierarchy and write one frame's worth of world-space geometry.
-pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose) {
+pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose, glass: bool) {
     out.verts.clear();
     out.indices.clear();
 
@@ -146,13 +282,52 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose) {
         ),
     );
 
+    let (c_thorax, c_head, c_eye, c_ant, c_prob, c_leg, c_tarsus, c_wing) = if glass {
+        (
+            GlassPalette::SHELL,
+            GlassPalette::SHELL,
+            GlassPalette::SHELL_DENSE,
+            GlassPalette::LIMB,
+            GlassPalette::LIMB,
+            GlassPalette::LIMB,
+            GlassPalette::LIMB,
+            GlassPalette::WING,
+        )
+    } else {
+        (
+            BODY_BROWN,
+            HEAD_COLOR,
+            EYE_COLOR,
+            ANTENNA_COLOR,
+            PROBOSCIS_COLOR,
+            LEG_COLOR,
+            TARSUS_COLOR,
+            WING_COLOR,
+        )
+    };
+
     // --- torso ---
     emit(
         out,
         &meshes.thorax,
         &math::mul(root, math::trs([0.0, 2.5, 6.2], [0.0; 3], [0.95, 1.15, 0.85])),
-        BODY_BROWN,
+        c_thorax,
     );
+    if glass {
+        emit(
+            out,
+            &meshes.abdomen,
+            &math::mul(
+                root,
+                math::trs(
+                    [0.0, -6.5, 5.6],
+                    [0.0; 3],
+                    [0.9, 1.5, 0.75 * pose.abdomen_breathe],
+                ),
+            ),
+            GlassPalette::SHELL,
+        );
+    } else {
     emit_vertex_colored(
         out,
         &meshes.abdomen,
@@ -165,11 +340,12 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose) {
             ),
         ),
     );
+    }
     emit(
         out,
         &meshes.head,
         &math::mul(root, math::trs([0.0, 9.0, 6.0], [0.0; 3], [1.0, 0.85, 0.9])),
-        HEAD_COLOR,
+        c_head,
     );
 
     // --- head furniture ---
@@ -181,7 +357,7 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose) {
                 root,
                 math::trs([side * 2.1, 9.7, 6.4], [0.0; 3], [0.8, 1.0, 1.15]),
             ),
-            EYE_COLOR,
+            c_eye,
         );
         emit(
             out,
@@ -190,14 +366,14 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose) {
                 root,
                 math::trs([side * 0.9, 11.6, 6.3], [-1.15, 0.0, side * 0.35], [1.0; 3]),
             ),
-            ANTENNA_COLOR,
+            c_ant,
         );
     }
     emit(
         out,
         &meshes.proboscis,
         &math::mul(root, math::trs([0.0, 10.4, 4.6], [-0.5, 0.0, 0.0], [1.0; 3])),
-        PROBOSCIS_COLOR,
+        c_prob,
     );
 
     // --- legs: root -> femur, knee -> tibia, ankle -> tarsus ---
@@ -229,7 +405,7 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose) {
                 leg_root,
                 math::mul(math::translate(femur / 2.0, 0.0, 0.0), lie_along_x),
             ),
-            LEG_COLOR,
+            c_leg,
         );
 
         let knee = math::mul(
@@ -247,7 +423,7 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose) {
                 knee,
                 math::mul(math::translate(tibia / 2.0, 0.0, 0.0), lie_along_x),
             ),
-            LEG_COLOR,
+            c_leg,
         );
 
         let ankle = math::mul(
@@ -265,7 +441,7 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose) {
                 ankle,
                 math::mul(math::translate(tarsus / 2.0, 0.0, 0.0), lie_along_x),
             ),
-            TARSUS_COLOR,
+            c_tarsus,
         );
     }
 
@@ -283,7 +459,7 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose) {
                     [1.0; 3],
                 ),
             ),
-            WING_COLOR,
+            c_wing,
         );
     }
 
@@ -309,7 +485,7 @@ mod tests {
         let meshes = FlyMeshes::build();
         let fly = a_fly();
         let mut out = Mesh::default();
-        build_frame(&mut out, &meshes, &fly, &fly.pose());
+        build_frame(&mut out, &meshes, &fly, &fly.pose(), false);
         // 3 body + 2 eyes + 2 antennae + 1 proboscis + 18 leg segments + 2 wings.
         assert!(out.verts.len() > 3000, "only {} verts", out.verts.len());
         assert!(out.indices.len() % 3 == 0);
@@ -322,7 +498,7 @@ mod tests {
         let mut fly = a_fly();
         fly.pos = Vec2::new(120.0, -60.0);
         let mut out = Mesh::default();
-        build_frame(&mut out, &meshes, &fly, &fly.pose());
+        build_frame(&mut out, &meshes, &fly, &fly.pose(), false);
 
         let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
         for v in &out.verts {
@@ -358,11 +534,11 @@ mod tests {
             }
             hi - lo
         };
-        build_frame(&mut out, &meshes, &fly, &fly.pose());
+        build_frame(&mut out, &meshes, &fly, &fly.pose(), false);
         let grounded = span(&out);
 
         fly.alt = 1.0;
-        build_frame(&mut out, &meshes, &fly, &fly.pose());
+        build_frame(&mut out, &meshes, &fly, &fly.pose(), false);
         let airborne = span(&out);
 
         assert!(
@@ -379,11 +555,11 @@ mod tests {
         fly.speed = 60.0;
         let mut a = Mesh::default();
         let mut b = Mesh::default();
-        build_frame(&mut a, &meshes, &fly, &fly.pose());
+        build_frame(&mut a, &meshes, &fly, &fly.pose(), false);
         for _ in 0..12 {
             fly.update(1.0 / 60.0, (1512.0, 982.0), None, None);
         }
-        build_frame(&mut b, &meshes, &fly, &fly.pose());
+        build_frame(&mut b, &meshes, &fly, &fly.pose(), false);
         let moved = a
             .verts
             .iter()

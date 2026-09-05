@@ -86,3 +86,22 @@ fn fs_shadow(in: VsOut) -> @location(0) vec4<f32> {
     let a = u.params.y;
     return vec4<f32>(0.0, 0.0, 0.0, a);
 }
+
+// ---------------------------------------------------------------------------
+// The connectome glowing inside a glass body. Unlit and additive: these are
+// neurons firing, not surfaces catching light.
+// ---------------------------------------------------------------------------
+
+@fragment
+fn fs_neuron(in: VsOut) -> @location(0) vec4<f32> {
+    // The billboard's corner offset rides in the unused normal, so these read
+    // as round points of light rather than a grid of squares.
+    let uv = in.normal.xy;
+    let d = dot(uv, uv);
+    if (d > 1.0) {
+        discard;
+    }
+    let falloff = 1.0 - smoothstep(0.0, 1.0, d);
+    let a = in.color.a * falloff;
+    return vec4<f32>(in.color.rgb * a, a);
+}

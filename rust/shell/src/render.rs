@@ -21,6 +21,10 @@ pub struct Renderer {
     pub config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
+    /// Additive, depth-testing-off: the connectome glowing inside the shell.
+    neuron_pipeline: wgpu::RenderPipeline,
+    nvbuf: wgpu::Buffer,
+    nibuf: wgpu::Buffer,
     vbuf: wgpu::Buffer,
     ibuf: wgpu::Buffer,
     vbuf_cap: usize,
@@ -178,6 +182,55 @@ impl Renderer {
         let pipeline = make_pipeline("vs_main", "fs_main", true, None);
         let shadow_pipeline = make_pipeline("vs_shadow", "fs_shadow", false, None);
 
+        // The neuron field is additive and ignores depth, so the connectome
+        // reads *through* the translucent shell rather than being occluded by it.
+        let neuron_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("neurons"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(vertex_layout.clone())],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_neuron"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let depth = make_depth(&device, &config);
         let vbuf_cap = 1 << 16;
         let ibuf_cap = 1 << 17;
@@ -194,12 +247,28 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        let nvbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("neuron verts"),
+            size: (vbuf_cap * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let nibuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("neuron indices"),
+            size: (ibuf_cap * 4) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Renderer {
             device,
             queue,
             config,
             pipeline,
             shadow_pipeline,
+            neuron_pipeline,
+            nvbuf,
+            nibuf,
             vbuf,
             ibuf,
             vbuf_cap,
@@ -218,7 +287,13 @@ impl Renderer {
         self.depth = make_depth(&self.device, &self.config);
     }
 
-    pub fn render(&mut self, surface: &wgpu::Surface<'static>, mesh: &Mesh, shadows: bool) {
+    pub fn render(
+        &mut self,
+        surface: &wgpu::Surface<'static>,
+        mesh: &Mesh,
+        neurons: Option<&Mesh>,
+        shadows: bool,
+    ) {
         if mesh.indices.is_empty() {
             return;
         }
@@ -232,6 +307,16 @@ impl Renderer {
             .write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&mesh.verts));
         self.queue
             .write_buffer(&self.ibuf, 0, bytemuck::cast_slice(&mesh.indices));
+        let neuron_count = match neurons {
+            Some(n) if !n.indices.is_empty() && n.verts.len() <= self.vbuf_cap => {
+                self.queue
+                    .write_buffer(&self.nvbuf, 0, bytemuck::cast_slice(&n.verts));
+                self.queue
+                    .write_buffer(&self.nibuf, 0, bytemuck::cast_slice(&n.indices));
+                n.indices.len() as u32
+            }
+            _ => 0,
+        };
 
         let half_w = self.config.width as f32 / 2.0;
         let half_h = self.config.height as f32 / 2.0;
@@ -308,6 +393,13 @@ impl Renderer {
             }
             pass.set_pipeline(&self.pipeline);
             pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
+
+            if neuron_count > 0 {
+                pass.set_pipeline(&self.neuron_pipeline);
+                pass.set_vertex_buffer(0, self.nvbuf.slice(..));
+                pass.set_index_buffer(self.nibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..neuron_count, 0, 0..1);
+            }
         }
         self.queue.submit(Some(enc.finish()));
         self.queue.present(frame);

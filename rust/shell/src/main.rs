@@ -67,6 +67,9 @@ struct Args {
     /// Per-stage frame tracing. Earned its keep finding the QUNS_BUSY bug.
     diag: bool,
     no_brain: bool,
+    /// Glass anatomy is the default register (PORT_PLAN.md §6.3 #2);
+    /// --literal restores the photoreal fly.
+    glass: bool,
 }
 
 fn parse_args() -> Args {
@@ -81,6 +84,7 @@ fn parse_args() -> Args {
         shadows: !a.iter().any(|x| x == "--no-shadow"),
         diag: a.iter().any(|x| x == "--diag"),
         no_brain: a.iter().any(|x| x == "--no-brain"),
+        glass: !a.iter().any(|x| x == "--literal"),
     }
 }
 
@@ -92,6 +96,9 @@ struct App {
 
     meshes: flybody::FlyMeshes,
     frame_mesh: mesh::Mesh,
+    neuron_mesh: mesh::Mesh,
+    /// Per-neuron flash brightness for the glass body, decayed each frame.
+    body_flash: Vec<f32>,
 
     sim: Option<LifSim>,
     brain_points: Option<dfcore::data::BrainPointsFile>,
@@ -139,6 +146,8 @@ impl App {
             renderer: None,
             meshes: flybody::FlyMeshes::build(),
             frame_mesh: mesh::Mesh::default(),
+            neuron_mesh: mesh::Mesh::default(),
+            body_flash: Vec::new(),
             sim: None,
             brain_points: None,
             signals: SignalBuilder::new(),
@@ -285,6 +294,7 @@ impl ApplicationHandler for App {
                 sim.habituation = persist::load();
                 // The brain window flashes spikes where they actually happen.
                 sim.collect_spikes = true;
+                let sim_n = sim.n;
                 println!(
                     "FlyWire v783 - {} somas - circuit {}n/{}e",
                     brain.points.points.len(),
@@ -292,6 +302,7 @@ impl ApplicationHandler for App {
                     brain.circuit.edges.len()
                 );
                 self.sim = Some(sim);
+                self.body_flash = vec![0.0; sim_n];
                 self.brain_points = Some(brain.points);
             }
             Err(e) => eprintln!("no brain data ({e}) - falling back to brainless behaviour"),
@@ -619,13 +630,49 @@ impl App {
 
         if self.args.diag && self.frames < 3 { eprintln!("[diag] E: body updated"); }
         let pose = self.fly.pose();
-        flybody::build_frame(&mut self.frame_mesh, &self.meshes, &self.fly, &pose);
+        flybody::build_frame(
+            &mut self.frame_mesh,
+            &self.meshes,
+            &self.fly,
+            &pose,
+            self.args.glass,
+        );
+
+        // The connectome inside the glass shell: decay, then light up whatever
+        // just spiked. Same data the brain window draws, on the creature itself.
+        let mut has_neurons = false;
+        if self.args.glass {
+            if let Some(sim) = self.sim.as_ref() {
+                let decay = (-dt * 7.0).exp();
+                for f in self.body_flash.iter_mut() {
+                    *f *= decay;
+                }
+                for ev in &sim.last_spikes {
+                    if ev.neuron < self.body_flash.len() {
+                        self.body_flash[ev.neuron] = if ev.is_gf { 2.5 } else { 1.0 };
+                    }
+                }
+                flybody::build_neuron_field(
+                    &mut self.neuron_mesh,
+                    sim,
+                    &self.body_flash,
+                    &self.fly,
+                    &pose,
+                );
+                has_neurons = true;
+            }
+        }
         if self.args.diag && self.frames < 3 { eprintln!("[diag] F: geometry built"); }
 
         if let (Some(r), Some(s)) = (self.renderer.as_mut(), self.surface.as_ref()) {
             if !self.hidden_for_fullscreen {
                 let t0 = Instant::now();
-                r.render(s, &self.frame_mesh, self.args.shadows);
+                let neurons = if has_neurons {
+                    Some(&self.neuron_mesh)
+                } else {
+                    None
+                };
+                r.render(s, &self.frame_mesh, neurons, self.args.shadows);
                 if self.args.diag && self.frames < 3 {
                     eprintln!(
                         "[diag] render took {:?}, {} verts, fly at ({:.0},{:.0})",
@@ -695,7 +742,8 @@ fn main() {
             .and_then(|j| argv.get(j + 1))
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.0);
-        snapshot::render_to_png(&path, 320, 320, alt, 20);
+        let glass = !argv.iter().any(|a| a == "--literal");
+        snapshot::render_to_png(&path, 320, 320, alt, 20, glass);
         return;
     }
 

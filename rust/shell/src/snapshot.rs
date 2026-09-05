@@ -23,7 +23,14 @@ struct Uniforms {
 
 /// Renders one frame of the fly into `path`, on a checkerboard so alpha is
 /// visible. `alt` lifts the fly into flight for testing the altitude scale.
-pub fn render_to_png(path: &str, width: u32, height: u32, alt: f32, walking_frames: u32) {
+pub fn render_to_png(
+    path: &str,
+    width: u32,
+    height: u32,
+    alt: f32,
+    walking_frames: u32,
+    glass: bool,
+) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         #[cfg(target_os = "windows")]
         backends: wgpu::Backends::DX12,
@@ -61,7 +68,41 @@ pub fn render_to_png(path: &str, width: u32, height: u32, alt: f32, walking_fram
     fly.pos = Vec2::ZERO;
     fly.alt = alt;
     let mut frame = Mesh::default();
-    flybody::build_frame(&mut frame, &meshes, &fly, &fly.pose());
+    flybody::build_frame(&mut frame, &meshes, &fly, &fly.pose(), glass);
+
+    // Run the real circuit so the glass body shows real activity rather than a
+    // decorative sparkle. Without this the diagnostic would be a lie about the
+    // one thing the rendering is claiming.
+    let mut neuron_mesh = Mesh::default();
+    let mut have_neurons = false;
+    if glass {
+        if let Ok(brain) = dfcore::data::load() {
+            let mut sim = dfcore::LifSim::new(&brain.circuit, dfcore::DEFAULT_SEED);
+            sim.collect_spikes = true;
+            sim.step(1500);
+            // A cursor lunge, so the looming population is visibly hot.
+            sim.loom_l = 1.0;
+            sim.loom_r = 0.6;
+            sim.step(60);
+            let mut flash = vec![0.0f32; sim.n];
+            for ev in &sim.last_spikes {
+                if ev.neuron < flash.len() {
+                    flash[ev.neuron] = if ev.is_gf { 2.5 } else { 1.0 };
+                }
+            }
+            // A few frames of decay so it looks like a moment, not a freeze.
+            for f in flash.iter_mut() {
+                *f *= 0.9;
+            }
+            flybody::build_neuron_field(&mut neuron_mesh, &sim, &flash, &fly, &fly.pose());
+            have_neurons = !neuron_mesh.indices.is_empty();
+            println!(
+                "snapshot: {} neurons lit ({} spiked this step)",
+                neuron_mesh.verts.len() / 4,
+                sim.last_spikes.len()
+            );
+        }
+    }
     println!(
         "snapshot: {} verts, {} indices, scale {:.2}",
         frame.verts.len(),
@@ -178,12 +219,79 @@ pub fn render_to_png(path: &str, width: u32, height: u32, alt: f32, walking_fram
         cache: None,
     });
 
+    let neuron_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("neurons"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4],
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_neuron"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+
     use wgpu::util::DeviceExt;
     let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: None,
         contents: bytemuck::cast_slice(&frame.verts),
         usage: wgpu::BufferUsages::VERTEX,
     });
+    let (nvbuf, nibuf) = if have_neurons {
+        (
+            Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&neuron_mesh.verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            })),
+            Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&neuron_mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            })),
+        )
+    } else {
+        (None, None)
+    };
     let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: None,
         contents: bytemuck::cast_slice(&frame.indices),
@@ -251,6 +359,13 @@ pub fn render_to_png(path: &str, width: u32, height: u32, alt: f32, walking_fram
         pass.set_vertex_buffer(0, vbuf.slice(..));
         pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..frame.indices.len() as u32, 0, 0..1);
+
+        if let (Some(nv), Some(ni)) = (&nvbuf, &nibuf) {
+            pass.set_pipeline(&neuron_pipeline);
+            pass.set_vertex_buffer(0, nv.slice(..));
+            pass.set_index_buffer(ni.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..neuron_mesh.indices.len() as u32, 0, 0..1);
+        }
     }
     enc.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
