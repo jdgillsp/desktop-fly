@@ -123,6 +123,11 @@ pub struct WindowsSenses {
     prev_click_down: (bool, bool),
     prev_cpu: Option<(u64, u64)>,
     cpu_load: f32,
+    /// When the CPU counters were last sampled. Sampling at the 30 Hz poll rate
+    /// gives a 33 ms window, which is barely two ticks of the system timer's
+    /// ~15.6 ms granularity — the resulting "load" is mostly quantisation
+    /// noise, and it drives the creature's tempo.
+    last_cpu_sample: Instant,
 }
 
 impl Default for WindowsSenses {
@@ -143,6 +148,7 @@ impl WindowsSenses {
             prev_click_down: (false, false),
             prev_cpu: None,
             cpu_load: 0.0,
+            last_cpu_sample: Instant::now(),
         }
     }
 
@@ -212,7 +218,14 @@ impl WindowsSenses {
             }
         };
 
-        // CPU load across the whole system, from the delta between polls.
+        // CPU load across the whole system. Sampled over at least half a
+        // second so the window spans enough timer ticks to mean something;
+        // between samples the previous value is held.
+        let sample_due = self.last_cpu_sample.elapsed() >= std::time::Duration::from_millis(500);
+        if sample_due {
+            self.last_cpu_sample = Instant::now();
+        }
+        if sample_due {
         unsafe {
             let (mut idle, mut kernel, mut user) = (
                 Default::default(),
@@ -237,6 +250,7 @@ impl WindowsSenses {
                 }
                 self.prev_cpu = Some((idle_t, total_t));
             }
+        }
         }
 
         // Mostly load, with sustained clock-throttling as a multiplier: a busy

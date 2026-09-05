@@ -13,7 +13,7 @@
 use dfcore::body::Fly;
 use dfcore::env::EnvSnapshot;
 use dfcore::util::{clamp, hypot};
-use dfcore::{circadian_activity, LifSim, Vec2};
+use dfcore::{circadian_activity, Habituation, LifSim, Vec2};
 
 pub struct Transduction {
     prev_cursor: Option<Vec2>,
@@ -23,6 +23,9 @@ pub struct Transduction {
     window_loom_r: f32,
     /// Menu-driven "Escape Test", decaying over ~1 s.
     loom_override: f32,
+    /// What the creature has learned about this user. Lives here, not in the
+    /// simulation: it is gain on the stimulus, and every creature transduces.
+    pub habituation: Habituation,
 }
 
 impl Default for Transduction {
@@ -39,6 +42,7 @@ impl Transduction {
             window_loom_l: 0.0,
             window_loom_r: 0.0,
             loom_override: 0.0,
+            habituation: Habituation::new(),
         }
     }
 
@@ -112,13 +116,16 @@ impl Transduction {
         dt: f32,
     ) -> (f32, bool) {
         // Clicks are taps on the fly's substrate, reaching it through the real
-        // wind/sensory pathway rather than as a scripted scare.
+        // wind/sensory pathway rather than as a scripted scare. Gated by
+        // habituation: repeated clicking is exactly the tap-withdrawal assay,
+        // and a creature that never stops flinching at your mouse is wrong.
+        let tap_gain = self.habituation.tap_gain_f32();
         for c in &env.clicks {
             let d = hypot(c.x - fly.pos.x, c.y - fly.pos.y);
             let strength = clamp(1.0 - d / 520.0, 0.0, 1.0);
             if strength > 0.05 {
                 let sens = sim.sens.clone();
-                sim.stimulate(&sens, 0.15 + strength * 0.35, 130);
+                sim.stimulate(&sens, (0.15 + strength * 0.35) * tap_gain, 130);
             }
         }
 
@@ -135,12 +142,23 @@ impl Transduction {
         let decay = (-4.0 * dt).exp();
         self.window_loom_l *= decay;
         self.window_loom_r *= decay;
-        sim.loom_l = l.max(self.window_loom_l);
-        sim.loom_r = r.max(self.window_loom_r);
+        let raw_loom_l = l.max(self.window_loom_l);
+        let raw_loom_r = r.max(self.window_loom_r);
         // Typing is substrate vibration — the idle-time API knows *when* keys
         // were pressed, never which. On Windows this is an inference; see
         // dfplatform's fidelity notes.
-        sim.air_puff = puff.max(env.typing_level * 0.30);
+        let raw_puff = puff.max(env.typing_level * 0.30);
+
+        // Advance habituation on the stimulus the world actually presented,
+        // then attenuate what reaches the connectome. Driving it with the
+        // already-attenuated value would make it depress ever more slowly as it
+        // depresses — a feedback loop, not an adaptation.
+        self.habituation
+            .step(dt, raw_loom_l.max(raw_loom_r), raw_puff);
+        let loom_gain = self.habituation.loom_gain_f32();
+        sim.loom_l = raw_loom_l * loom_gain;
+        sim.loom_r = raw_loom_r * loom_gain;
+        sim.air_puff = raw_puff * self.habituation.tap_gain_f32();
 
         // Body -> brain: leg proprioception from the current gait.
         sim.gait_drive = fly.walking_intensity();
@@ -168,6 +186,16 @@ mod tests {
 
     fn fly_at_origin() -> Fly {
         Fly::new(Vec2::ZERO, dfcore::DEFAULT_SEED)
+    }
+
+    fn brain() -> Option<dfcore::BrainData> {
+        match dfcore::data::load() {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("skipping: {e}");
+                None
+            }
+        }
     }
 
     #[test]
@@ -256,15 +284,108 @@ mod tests {
         assert_eq!(t.loom_override, 0.0);
     }
 
+    /// Habituation now lives here rather than inside the simulation, so this
+    /// is the test that the wiring actually attenuates what reaches the
+    /// connectome. Asserted by *forcing* a gain rather than by accumulating
+    /// one, so it measures the wiring and not the adaptation rate — those are
+    /// separate claims and conflating them makes both tests weak.
+    #[test]
+    fn habituation_attenuates_the_loom_that_reaches_the_circuit() {
+        let Some(brain) = brain() else { return };
+        let fly = fly_at_origin();
+
+        let peak_with_gain = |gain: f64| -> f32 {
+            let mut sim = LifSim::new(&brain.circuit, dfcore::DEFAULT_SEED);
+            let mut t = Transduction::new();
+            t.habituation.loom_gain = gain;
+            // Freeze it, so this measures attenuation and nothing else.
+            t.habituation.params.depress_tau = f32::MAX;
+            t.habituation.params.recover_tau = f32::MAX;
+
+            let mut peak = 0.0f32;
+            let mut d = 500.0f32;
+            while d > 60.0 {
+                let env = EnvSnapshot {
+                    cursor: Some(Vec2::new(d, 0.0)),
+                    local_hour: 12.0,
+                    ..Default::default()
+                };
+                t.apply(&mut sim, &fly, &env, 1.0 / 30.0);
+                peak = peak.max(sim.loom_l.max(sim.loom_r));
+                d -= 60.0;
+            }
+            peak
+        };
+
+        let naive = peak_with_gain(1.0);
+        let habituated = peak_with_gain(0.5);
+        assert!(naive > 0.1, "a lunge should produce loom, got {naive}");
+        let ratio = habituated / naive;
+        assert!(
+            (0.45..0.55).contains(&ratio),
+            "a gain of 0.5 should halve the loom reaching the circuit, got {ratio:.3}"
+        );
+        // The floor guarantees the pathway is never silenced entirely.
+        assert!(peak_with_gain(Habituation::new().params.floor as f64) > 0.0);
+    }
+
+    /// And that repeated exposure actually moves the gain. Separate from the
+    /// wiring test above: this one is about the adaptation, and it is
+    /// deliberately slow — the effect is meant to be felt over days.
+    #[test]
+    fn repeated_lunges_habituate_the_looming_pathway() {
+        let Some(brain) = brain() else { return };
+        let mut sim = LifSim::new(&brain.circuit, dfcore::DEFAULT_SEED);
+        let mut t = Transduction::new();
+        let fly = fly_at_origin();
+
+        let before = t.habituation.loom_gain;
+        for _ in 0..400 {
+            let mut d = 500.0f32;
+            while d > 60.0 {
+                let env = EnvSnapshot {
+                    cursor: Some(Vec2::new(d, 0.0)),
+                    local_hour: 12.0,
+                    ..Default::default()
+                };
+                t.apply(&mut sim, &fly, &env, 1.0 / 30.0);
+                d -= 60.0;
+            }
+        }
+        assert!(
+            t.habituation.loom_gain < before - 0.02,
+            "400 lunges should habituate: {before} -> {}",
+            t.habituation.loom_gain
+        );
+        assert!(
+            t.habituation.loom_gain >= t.habituation.params.floor as f64,
+            "must never fall below the floor"
+        );
+    }
+
+    /// The simulation itself must be habituation-free, so the circuit stays
+    /// numerically identical to the Swift oracle. Setting the stimulus directly
+    /// bypasses transduction and must therefore be unaffected by how much
+    /// habituation the transduction layer has accumulated.
+    #[test]
+    fn the_circuit_itself_is_unaffected_by_habituation() {
+        let Some(brain) = brain() else { return };
+        let run = || {
+            let mut sim = LifSim::new(&brain.circuit, dfcore::DEFAULT_SEED);
+            sim.step(1000);
+            for _ in 0..400 {
+                sim.loom_l = 1.0;
+                sim.loom_r = 0.5;
+                sim.step(1);
+            }
+            (sim.rate_loom, sim.total_spikes)
+        };
+        assert_eq!(run(), run(), "the circuit must be deterministic");
+    }
+
     #[test]
     fn night_plus_long_idle_makes_the_fly_sleepy_but_not_comatose() {
-        let brain = match dfcore::data::load() {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("skipping: {e}");
-                return;
-            }
-        };
+        let Some(brain) = brain() else { return };
         let mut sim = LifSim::new(&brain.circuit, dfcore::DEFAULT_SEED);
         let mut t = Transduction::new();
         let fly = fly_at_origin();

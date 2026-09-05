@@ -6,6 +6,15 @@
 //! gradually stops, *because you have never actually hurt it*, and that
 //! startles properly again after you leave it alone for a weekend.
 //!
+//! **Where this lives matters.** Habituation is presynaptic gain on the
+//! *stimulus*, not a property of the wiring, so it belongs in the transduction
+//! layer rather than inside an integrator. Keeping it out of the simulation has
+//! two consequences that are the point rather than a side effect: the fly's
+//! circuit stays numerically identical to the Swift oracle, and **any** creature
+//! gets habituation for free — including the worm, for which tap-withdrawal
+//! habituation is the canonical behavioural assay and would be embarrassing to
+//! omit.
+//!
 //! **This is a modelling choice, not measured data** — the connectome gives
 //! wiring, not learning rules — and it belongs in the README's
 //! "What's modeled vs. measured" section alongside the LIF dynamics and the
@@ -131,8 +140,17 @@ impl Habituation {
         // both gains pinned at 1.0 forever, so nothing ever habituated — a real
         // modelling bug, and also the wrong biology: it is novelty that
         // dishabituates, not steady noise.
+        //
+        // It must also be a *separate* event. A cursor lunge produces looming
+        // and an air puff together — one physical thing, two modalities — so
+        // counting the puff as novel let every lunge undo a quarter of the
+        // habituation it had just caused, and the looming pathway could barely
+        // adapt at all. Cross-modal dishabituation therefore only fires when
+        // this pathway is not itself being driven.
         let loom_onset = loom_drive > p.novelty_threshold && self.prev_loom <= p.novelty_threshold;
         let tap_onset = tap_drive > p.novelty_threshold && self.prev_tap <= p.novelty_threshold;
+        let loom_quiet = loom_drive <= p.threshold;
+        let tap_quiet = tap_drive <= p.threshold;
 
         // Computed in f64. With 1 ms steps and a 30-minute recovery constant the
         // per-step increment near gain=1 is smaller than an f32 ULP, so an f32
@@ -163,10 +181,10 @@ impl Habituation {
 
         // Each novel stimulus in the other modality restores a fraction of the
         // sensitivity lost so far.
-        if tap_onset {
+        if tap_onset && loom_quiet {
             self.loom_gain += p.dishabituation as f64 * (1.0 - self.loom_gain);
         }
-        if loom_onset {
+        if loom_onset && tap_quiet {
             self.tap_gain += p.dishabituation as f64 * (1.0 - self.tap_gain);
         }
         self.loom_gain = self.loom_gain.clamp(floor, 1.0);
@@ -287,6 +305,29 @@ mod tests {
             "tap should dishabituate looming: {habituated} -> {}",
             h.loom_gain
         );
+    }
+
+    /// A stimulus that drives *both* pathways is one event, not two, so it must
+    /// not dishabituate either of them. Without this, a cursor lunge — which
+    /// produces looming and an air puff together — undid a quarter of its own
+    /// habituation every time, and the looming pathway never adapted.
+    #[test]
+    fn a_co_occurring_stimulus_does_not_dishabituate() {
+        let mut both = Habituation::new();
+        expose(&mut both, 20.0, 1.0, 1.0);
+
+        let mut loom_only = Habituation::new();
+        expose(&mut loom_only, 20.0, 1.0, 0.0);
+
+        // Driving both together must habituate the looming pathway just as much
+        // as driving looming alone does.
+        assert!(
+            (both.loom_gain - loom_only.loom_gain).abs() < 0.02,
+            "co-occurring tap should not spare the looming pathway:              both {:.3} vs loom-only {:.3}",
+            both.loom_gain,
+            loom_only.loom_gain
+        );
+        assert!(both.loom_gain < 0.6, "should still habituate: {}", both.loom_gain);
     }
 
     #[test]

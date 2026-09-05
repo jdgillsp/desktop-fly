@@ -95,7 +95,12 @@ fn parse_args() -> Args {
             .and_then(|i| a.get(i + 1))
             .and_then(|v| v.parse().ok())
             .unwrap_or(30)
-            .clamp(5, 240),
+            // Floor of 20, not 5: `dt` is clamped to 50 ms as a stall guard
+            // (inherited from the Swift build, which assumed 60 fps), so a frame
+            // budget longer than that would silently run the creature in slow
+            // motion — at --fps 5 it would move at a quarter speed rather than
+            // simply drawing less often.
+            .clamp(20, 240),
     }
 }
 
@@ -308,8 +313,6 @@ impl ApplicationHandler for App {
         match dfcore::data::load() {
             Ok(brain) => {
                 let mut sim = LifSim::new(&brain.circuit, dfcore::DEFAULT_SEED);
-                // What the creature already knows about this user.
-                sim.habituation = persist::load();
                 // The brain window flashes spikes where they actually happen.
                 sim.collect_spikes = true;
                 let sim_n = sim.n;
@@ -339,6 +342,9 @@ impl ApplicationHandler for App {
         if self.tray.is_none() {
             eprintln!("WARNING: no tray icon; quit with Task Manager");
         }
+
+        // What the creature already knows about this user.
+        self.trans.habituation = persist::load();
 
         for note in self.senses.fidelity_notes() {
             println!("note: {note}");
@@ -586,9 +592,7 @@ impl App {
         for cmd in commands {
             match cmd {
                 tray::TrayCommand::Quit => {
-                    if let Some(sim) = self.sim.as_ref() {
-                        persist::save(&sim.habituation);
-                    }
+                    persist::save(&self.trans.habituation);
                     event_loop.exit();
                     return;
                 }
@@ -615,9 +619,7 @@ impl App {
                     }
                 }
                 tray::TrayCommand::ForgetMe => {
-                    if let Some(sim) = self.sim.as_mut() {
-                        sim.habituation.reset();
-                    }
+                    self.trans.habituation.reset();
                     persist::forget();
                     println!("habituation reset - the creature is naive again");
                 }
@@ -629,6 +631,13 @@ impl App {
 
         // Senses at ~30 Hz, as the macOS build's timer does (main.swift:761).
         if now - self.last_sense >= Duration::from_millis(33) {
+            // Transduction must be given the SENSE interval, not the frame
+            // interval. Cursor velocity is (position delta / dt) between
+            // consecutive sense polls, so handing it the frame dt overestimates
+            // speed by the ratio of the two rates — at --fps 60 the fly reads
+            // every cursor movement as twice as fast and flees twice as
+            // readily. Frame rate must not change behaviour.
+            let sense_dt = (now - self.last_sense).as_secs_f32().clamp(1e-4, 0.5);
             self.last_sense = now;
             let t0 = Instant::now();
             let env = self.senses.poll(&self.space);
@@ -652,7 +661,7 @@ impl App {
 
             if self.args.diag && self.frames < 3 { eprintln!("[diag] A: about to transduce"); }
             if let Some(sim) = self.sim.as_mut() {
-                let (tempo, sleepy) = self.trans.apply(sim, &self.fly, &env, dt.max(1e-4));
+                let (tempo, sleepy) = self.trans.apply(sim, &self.fly, &env, sense_dt);
                 if self.args.diag && self.frames < 3 { eprintln!("[diag] B: transduced"); }
                 self.pending_tempo = tempo;
                 self.pending_sleepy = sleepy;
@@ -748,20 +757,18 @@ impl App {
                 harden_overlay_styles(w);
             }
         }
-        if let Some(sim) = self.sim.as_ref() {
-            let mood = sim.habituation.describe();
-            if mood != self.last_mood {
-                self.last_mood = mood.clone();
-                if let Some(t) = &self.tray {
-                    t.set_mood(&mood);
-                }
+        let mood = self.trans.habituation.describe();
+        if mood != self.last_mood {
+            self.last_mood = mood.clone();
+            if let Some(t) = &self.tray {
+                t.set_mood(&mood);
             }
-            // Checkpoint every 60 s so a crash or a kill does not lose days of
-            // accumulated familiarity.
-            if self.last_state_save.elapsed() >= Duration::from_secs(60) {
-                self.last_state_save = Instant::now();
-                persist::save(&sim.habituation);
-            }
+        }
+        // Checkpoint every 60 s so a crash or a kill does not lose days of
+        // accumulated familiarity.
+        if self.last_state_save.elapsed() >= Duration::from_secs(60) {
+            self.last_state_save = Instant::now();
+            persist::save(&self.trans.habituation);
         }
 
         if self.last_report.elapsed() >= Duration::from_secs(10) {
@@ -778,9 +785,7 @@ impl App {
         }
 
         if self.args.seconds > 0 && self.start.elapsed() >= Duration::from_secs(self.args.seconds) {
-            if let Some(sim) = self.sim.as_ref() {
-                persist::save(&sim.habituation);
-            }
+            persist::save(&self.trans.habituation);
             event_loop.exit();
         }
     }

@@ -114,6 +114,9 @@ pub struct GradedSim {
 
     pending: Vec<Stim>,
     active: Vec<Stim>,
+    /// Per-neuron stimulation current for the current millisecond. Scattered
+    /// into once per active stimulus rather than scanned per neuron.
+    stim_current: Vec<f32>,
     pub sim_ms: i64,
 }
 
@@ -186,6 +189,7 @@ impl GradedSim {
             sensory_gate: 1.0,
             pending: Vec::new(),
             active: Vec::new(),
+            stim_current: vec![0.0; n],
             sim_ms: 0,
         }
     }
@@ -257,6 +261,22 @@ impl GradedSim {
                 act[i] = self.activation(self.v[i]);
             }
 
+            // Scatter stimulation into a per-neuron buffer once, instead of
+            // asking every neuron whether it is in every stimulus list. The
+            // old form was O(neurons x stimuli x targets) per millisecond —
+            // 302 x 60 = 18k membership tests per ms for one brain-window
+            // click, a million times a minute. Expiry is checked here too, so
+            // a stimulus ending mid-call stops on the right millisecond
+            // instead of running to the end of the step.
+            self.stim_current.fill(0.0);
+            for st in &self.active {
+                if self.sim_ms < st.until_ms {
+                    for &i in &st.idx {
+                        self.stim_current[i] += st.strength;
+                    }
+                }
+            }
+
             for i in 0..self.n {
                 // Leak.
                 let mut g_tot = p.g_leak;
@@ -283,11 +303,7 @@ impl GradedSim {
                 // active stimulation.
                 let mut i_ext = self.baseline[i] * self.activity_scale
                     + self.input[i] * self.sensory_gate;
-                for s in &self.active {
-                    if s.idx.contains(&i) {
-                        i_ext += s.strength;
-                    }
-                }
+                i_ext += self.stim_current[i];
 
                 let v_inf = (g_e + i_ext) / g_tot;
                 let tau = p.c_m / g_tot;
