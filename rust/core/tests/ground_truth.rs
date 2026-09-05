@@ -123,3 +123,52 @@ fn siesta_slows_the_fly_without_paralysing_it() {
     let pct = 100.0 * on as f32 / samples as f32;
     assert!(pct > 3.0, "siesta walk-drive {pct:.1}% — network went comatose");
 }
+
+/// Phase 4 was specified as a *pure refactor*: moving roles, baselines and
+/// laterality out of three hand-synchronised `match` statements and into one
+/// data manifest must not change the animal. Two sims built the same way must
+/// produce byte-identical dynamics, and the manifest must reproduce exactly the
+/// population counts CLAUDE.md documents.
+#[test]
+fn the_role_manifest_reproduces_the_circuit_exactly() {
+    let Some(b) = brain() else { return };
+
+    let run = || {
+        let mut sim = dfcore::LifSim::new(&b.circuit, dfcore::DEFAULT_SEED);
+        sim.loom_l = 0.0;
+        sim.step(3000);
+        sim.loom_l = 1.0;
+        sim.loom_r = 0.5;
+        sim.step(400);
+        (sim.total_spikes, sim.rate_loom, sim.rate_pop)
+    };
+    let a = run();
+    let c = run();
+    assert_eq!(a.0, c.0, "spike totals must be deterministic");
+    assert_eq!(a.1, c.1, "loom rate must be deterministic");
+    assert_eq!(a.2, c.2, "population rate must be deterministic");
+
+    // And the manifest must resolve the same groups the hardcoded switch did.
+    let sim = dfcore::LifSim::new(&b.circuit, dfcore::DEFAULT_SEED);
+    assert_eq!(sim.loom_left.len(), 162);
+    assert_eq!(sim.loom_right.len(), 152);
+    assert_eq!(sim.dna_l.len(), 2);
+    assert_eq!(sim.dna_r.len(), 2);
+}
+
+/// The `Sim` trait must expose the same populations the concrete type does, or
+/// a second creature would be wired to different neurons than the fly is.
+#[test]
+fn the_sim_trait_agrees_with_the_concrete_simulation() {
+    use dfcore::Sim;
+    let Some(b) = brain() else { return };
+    let sim = dfcore::LifSim::new(&b.circuit, dfcore::DEFAULT_SEED);
+
+    assert_eq!(Sim::n(&sim), sim.n);
+    assert_eq!(Sim::group(&sim, "gf"), sim.gf.as_slice());
+    assert_eq!(Sim::group(&sim, "dnp09"), sim.fwd.as_slice());
+    assert_eq!(Sim::group(&sim, "sens"), sim.sens.as_slice());
+    assert!(Sim::group(&sim, "no-such-population").is_empty());
+    assert_eq!(Sim::positions(&sim).len(), sim.n);
+    assert_eq!(Sim::manifest(&sim).creature, "drosophila");
+}

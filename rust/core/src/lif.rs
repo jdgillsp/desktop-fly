@@ -20,6 +20,7 @@
 use crate::data::CircuitFile;
 use crate::habituation::Habituation;
 use crate::rng::Pcg32;
+use crate::roles::RoleManifest;
 
 /// Fixed parameters of the fly's spiking dynamics (Sim.swift:129-140).
 #[derive(Debug, Clone, Copy)]
@@ -147,14 +148,24 @@ pub struct LifSim {
     pub habituation: Habituation,
     /// Set false to run the circuit exactly as the Swift build does.
     pub habituation_enabled: bool,
+
+    /// The creature's population table. Kept so consumers (the brain window,
+    /// the readout) share one source of truth for colours, labels and
+    /// membership instead of maintaining parallel copies.
+    pub manifest: RoleManifest,
 }
 
 impl LifSim {
     pub fn new(circuit: &CircuitFile, seed: u64) -> Self {
-        Self::with_params(circuit, seed, LifParams::default())
+        Self::with_params(circuit, seed, LifParams::default(), crate::roles::drosophila())
     }
 
-    pub fn with_params(circuit: &CircuitFile, seed: u64, params: LifParams) -> Self {
+    pub fn with_params(
+        circuit: &CircuitFile,
+        seed: u64,
+        params: LifParams,
+        manifest: RoleManifest,
+    ) -> Self {
         let mut rng = Pcg32::new(seed);
         let n = circuit.neurons.len();
 
@@ -172,42 +183,39 @@ impl LifSim {
             })
             .collect();
 
-        let (mut loom_left, mut loom_right) = (Vec::new(), Vec::new());
-        let (mut gf, mut dna_l, mut dna_r) = (Vec::new(), Vec::new(), Vec::new());
-        let (mut mdn, mut fwd, mut groom, mut escw) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let (mut ascend, mut sens) = (Vec::new(), Vec::new());
+        // Populations, laterality and resting drive all come from the role
+        // manifest now, rather than from three parallel `match` statements that
+        // had to be kept in sync by hand.
+        let sides: Vec<String> = circuit.neurons.iter().map(|x| x.side.clone()).collect();
+        let groups = manifest.resolve(&roles, &types, &sides);
+        let take = |slug: &str| -> (Vec<usize>, Vec<usize>) {
+            groups.get(slug).cloned().unwrap_or_default()
+        };
+        let (loom_left_lc, loom_right_lc) = take("lc4");
+        let (loom_left_lp, loom_right_lp) = take("lplc2");
+        let mut loom_left = loom_left_lc;
+        loom_left.extend(loom_left_lp);
+        let mut loom_right = loom_right_lc;
+        loom_right.extend(loom_right_lp);
+        loom_left.sort_unstable();
+        loom_right.sort_unstable();
 
-        for (i, nr) in circuit.neurons.iter().enumerate() {
-            match nr.role.as_str() {
-                "lc4" | "lplc2" => {
-                    if nr.side == "left" {
-                        loom_left.push(i)
-                    } else {
-                        loom_right.push(i)
-                    }
-                }
-                "gf" => gf.push(i),
-                "dna01" | "dna02" => {
-                    if nr.side == "left" {
-                        dna_l.push(i)
-                    } else {
-                        dna_r.push(i)
-                    }
-                }
-                "mdn" => mdn.push(i),
-                "dnp09" => fwd.push(i),
-                "dng11" => groom.push(i),
-                "escw" => escw.push(i),
-                // Partners keep their FlyWire super_class in `type`.
-                "other" => match nr.cell_type.as_str() {
-                    "ascending" => ascend.push(i),
-                    "sensory" => sens.push(i),
-                    _ => {}
-                },
-                _ => {}
-            }
-        }
+        let gf = take("gf").0;
+        let (dna01_l, dna01_r) = take("dna01");
+        let (dna02_l, dna02_r) = take("dna02");
+        let mut dna_l = dna01_l;
+        dna_l.extend(dna02_l);
+        dna_l.sort_unstable();
+        let mut dna_r = dna01_r;
+        dna_r.extend(dna02_r);
+        dna_r.sort_unstable();
+
+        let mdn = take("mdn").0;
+        let fwd = take("dnp09").0;
+        let groom = take("dng11").0;
+        let escw = take("escw").0;
+        let ascend = take("ascend").0;
+        let sens = take("sens").0;
 
         let mut is_dna_left = vec![false; n];
         for &i in &dna_l {
@@ -219,21 +227,7 @@ impl LifSim {
             .map(|_| rng.range(0.0, 2.0 * std::f32::consts::PI))
             .collect();
 
-        // Heterogeneous excitability. Interneurons crackle at a few Hz;
-        // sensory and command neurons stay quiet unless driven. Bilateral
-        // command DNs get a *deterministic* baseline on purpose — their
-        // left/right asymmetry must come from the wiring, never from luck
-        // (Sim.swift:196, and the CLAUDE.md recipe step 4).
-        let mut baseline = vec![0.0f32; n];
-        for (i, nr) in circuit.neurons.iter().enumerate() {
-            baseline[i] = match nr.role.as_str() {
-                "other" => rng.range(0.010, 0.070),
-                "lc4" | "lplc2" => 0.004,
-                "dna01" | "dna02" | "mdn" | "dng11" | "escw" => 0.036,
-                "dnp09" => 0.038,
-                _ => 0.002, // gf: silent unless synaptically driven
-            };
-        }
+        let baseline = manifest.baselines(&roles, &mut rng);
 
         // CSR build.
         let mut counts = vec![0usize; n];
@@ -316,6 +310,7 @@ impl LifSim {
             last_spikes: Vec::new(),
             habituation: Habituation::new(),
             habituation_enabled: true,
+            manifest,
         }
     }
 

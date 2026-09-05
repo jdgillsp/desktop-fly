@@ -10,20 +10,24 @@
 //! they must be run after any change here.
 
 pub mod body;
+pub mod creature;
 pub mod data;
 pub mod env;
 pub mod habituation;
 pub mod lif;
 pub mod rng;
+pub mod roles;
 pub mod signals;
 pub mod suites;
 pub mod util;
 
 pub use body::{Fly, Pose, State, FLY_SCALE};
+pub use creature::{Body, Creature, Drosophila, DynamicsSpec, Provenance, Sim, Substrate};
 pub use data::{BrainData, CircuitFile};
 pub use env::{EnvSnapshot, Rect, ScreenSpace, Senses};
 pub use habituation::Habituation;
 pub use lif::{LifParams, LifSim};
+pub use roles::{RoleManifest, drosophila};
 pub use signals::{BrainSignals, SignalBuilder};
 pub use util::{circadian_activity, Ledge, Vec2};
 

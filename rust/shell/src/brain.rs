@@ -25,21 +25,8 @@ const CLASS_COLORS: [[f32; 4]; 9] = [
     [0.50, 0.25, 0.40, 1.0], // endocrine — pink
 ];
 
-/// Circuit roles get their own colours so the escape pathway reads at a glance.
-fn role_color(role: &str) -> [f32; 4] {
-    match role {
-        "lc4" | "lplc2" => [0.20, 0.70, 0.95, 1.0], // looming detectors
-        "gf" => [1.00, 0.85, 0.25, 1.0],            // the Giant Fibers
-        "dna01" | "dna02" => [0.35, 0.95, 0.55, 1.0], // steering
-        "dnp09" => [0.95, 0.55, 0.20, 1.0],         // forward walking
-        "dng11" => [0.85, 0.45, 0.90, 1.0],         // grooming
-        "mdn" => [0.95, 0.30, 0.40, 1.0],           // backward walking
-        "escw" => [1.00, 0.55, 0.35, 1.0],          // escape manoeuvre
-        _ => [0.55, 0.55, 0.62, 1.0],               // partners
-    }
-}
-
-/// Human-readable name for a picked region (BrainView.swift:300).
+/// Human-readable name for a picked region (BrainView.swift:300), resolved
+/// through the creature's role manifest rather than a table duplicated here.
 fn region_name(sim: &LifSim, picked: &[usize]) -> String {
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for &i in picked {
@@ -52,19 +39,7 @@ fn region_name(sim: &LifSim, picked: &[usize]) -> String {
             best = (k, *v);
         }
     }
-    let label = match best.0 {
-        "lc4" => "LC4 - looming detectors",
-        "lplc2" => "LPLC2 - looming detectors",
-        "gf" => "DNp01 - GIANT FIBER (escape command)",
-        "dna01" => "DNa01 - steering",
-        "dna02" => "DNa02 - steering",
-        "dnp09" => "DNp09 - forward walking",
-        "dng11" => "DNg11 - grooming",
-        "mdn" => "MDN - backward walking (moonwalker)",
-        "escw" => "DNp02/04/11 - escape manoeuvre",
-        _ => "circuit partners",
-    };
-    format!("{label} ({} neurons)", picked.len())
+    format!("{} ({} neurons)", sim.manifest.label_for(best.0), picked.len())
 }
 
 #[repr(C)]
@@ -237,7 +212,11 @@ impl BrainView {
 
         // --- the 668-neuron circuit, rebuilt each frame for spike flashes ---
         let circuit_pos: Vec<[f32; 3]> = sim.positions.clone();
-        let circuit_base: Vec<[f32; 4]> = sim.roles.iter().map(|r| role_color(r)).collect();
+        let circuit_base: Vec<[f32; 4]> = sim
+            .roles
+            .iter()
+            .map(|r| sim.manifest.color_for(r))
+            .collect();
         let circuit_seed: Vec<([f32; 3], [f32; 4], f32)> = circuit_pos
             .iter()
             .zip(circuit_base.iter())
@@ -550,15 +529,15 @@ mod tests {
         assert_eq!(CLASS_COLORS.len(), 9);
     }
 
+    /// Role colours now come from the shared manifest, so this asserts the
+    /// brain window and the sim cannot drift apart.
     #[test]
-    fn the_giant_fiber_is_the_brightest_role() {
-        let gf = role_color("gf");
-        let other = role_color("other");
+    fn roles_a_user_must_distinguish_have_distinct_colours() {
+        let m = dfcore::drosophila();
+        assert_ne!(m.color_for("dnp09"), m.color_for("dng11"));
+        assert_ne!(m.color_for("mdn"), m.color_for("lc4"));
         let lum = |c: [f32; 4]| c[0] + c[1] + c[2];
-        assert!(lum(gf) > lum(other), "the GF must stand out");
-        // Distinct colours for the roles a user is meant to tell apart.
-        assert_ne!(role_color("dnp09"), role_color("dng11"));
-        assert_ne!(role_color("mdn"), role_color("lc4"));
+        assert!(lum(m.color_for("gf")) > lum(m.color_for("other")));
     }
 
     /// Clicking where a neuron is drawn must pick that neuron. A sign flip in
