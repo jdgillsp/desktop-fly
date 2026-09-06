@@ -9,13 +9,19 @@
 //!
 //! What varies per creature and therefore lives behind [`Runtime`]:
 //!
-//! | piece | fly | worm |
-//! |---|---|---|
-//! | integrator | `LifSim` (spiking) | `GradedSim` (graded + gap junctions) |
-//! | senses → stimulus | looming, taps, wind, proprioception | touch only — it is blind |
-//! | rates → commands | `SignalBuilder` | `GradedSignalBuilder` |
-//! | body | `Fly` | `Worm` |
-//! | geometry | `flybody` | `wormbody` |
+//! | piece | fly | worm | koi |
+//! |---|---|---|---|
+//! | integrator | `LifSim` (spiking) | `GradedSim` (graded + gap junctions) | **none** |
+//! | senses → stimulus | looming, taps, wind, proprioception | touch only — it is blind | shadow and knock |
+//! | rates → commands | `SignalBuilder` | `GradedSignalBuilder` | a rule model |
+//! | body | `Fly` | `Worm` | `Koi` |
+//! | geometry | `flybody` | `wormbody` | `koibody` |
+//!
+//! The koi is the case that proves the seam is real rather than decorative: it
+//! has no connectome at all, so `sim()` is `None` for its whole life, and the
+//! app loop — brain window, tray, persistence, snapshot — carries on without
+//! knowing. Anything that assumed a creature must have a simulation would have
+//! broken here.
 //!
 //! What does *not* vary stays in `main.rs`: the overlay, the frame clock, the
 //! tray, the brain window, the sense poll, persistence.
@@ -88,6 +94,7 @@ pub fn make(id: &str, seed: u64) -> Box<dyn Runtime> {
     match id {
         "c_elegans" => Box::new(crate::wormrt::WormRuntime::new(seed)),
         "salticid" => Box::new(crate::spiderrt::SpiderRuntime::new(seed)),
+        "koi" => Box::new(crate::koirt::KoiRuntime::new(seed)),
         _ => Box::new(FlyRuntime::new(seed)),
     }
 }

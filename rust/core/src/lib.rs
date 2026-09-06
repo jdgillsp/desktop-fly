@@ -15,6 +15,7 @@ pub mod data;
 pub mod env;
 pub mod graded;
 pub mod habituation;
+pub mod koi;
 pub mod lif;
 pub mod rng;
 pub mod roles;
@@ -38,6 +39,7 @@ pub use roles::{RoleManifest, drosophila};
 pub use signals::{BrainSignals, GradedSignalBuilder, SignalBuilder};
 pub use util::{circadian_activity, Ledge, Vec2};
 pub use spider::{Bug, Spider, SpiderPose, SpiderState};
+pub use koi::{Koi as KoiBody, KoiState};
 pub use worm::{Worm, WormState};
 
 /// Default seed for the deterministic PRNG. See `rng` for why the port seeds

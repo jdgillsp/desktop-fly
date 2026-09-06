@@ -15,6 +15,8 @@
 
 mod brain;
 mod flybody;
+mod koibody;
+mod koirt;
 mod math;
 mod mesh;
 mod persist;

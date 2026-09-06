@@ -579,3 +579,19 @@ mod tests {
         assert!(lum(m.color_for("gf")) > lum(m.color_for("other")));
     }
 }
+
+/// The manifest for a creature that has no neurons.
+///
+/// Empty on purpose. A procedural creature has no populations to name, colour
+/// or read out, and every consumer already degrades to "nothing here": group
+/// lookups return empty slices, the brain window has no points to draw, and
+/// the readout produces a resting `BrainSignals`. Handing back a plausible
+/// table instead would be inventing anatomy.
+pub fn procedural() -> RoleManifest {
+    RoleManifest {
+        creature: "procedural",
+        default_baseline: Baseline::Fixed(0.0),
+        default_color: [0.55, 0.58, 0.62],
+        populations: Vec::new(),
+    }
+}

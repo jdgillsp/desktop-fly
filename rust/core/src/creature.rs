@@ -47,6 +47,21 @@ pub enum Provenance {
     },
     /// Hand-authored. Test fixtures, and nothing that ships as a creature.
     Authored { note: String },
+    /// **No connectome at all**: behaviour is hand-written rules.
+    ///
+    /// Distinct from [`Provenance::Authored`], which is a connectome someone
+    /// wrote by hand, and from [`Provenance::Grown`], which is one a process
+    /// generated. This says there are no neurons in the loop whatsoever, which
+    /// is a different and stronger claim — and the honest one for an animal
+    /// with no published wiring diagram at this scale. The alternative, faking
+    /// a connectome so the creature set looks uniform, is the single thing
+    /// this project must not do.
+    Procedural {
+        /// What drives it instead, in one phrase.
+        model: String,
+        /// Why there is no connectome, and what would change that.
+        why: String,
+    },
     /// Real circuit modules, recombined into an animal that does not exist
     /// (PORT_PLAN.md §6.2 ii, SPIDER_PLAN.md §2). Every measured neuron and
     /// edge carries the inner provenance; the authored connectives are
@@ -92,6 +107,9 @@ impl Provenance {
                 generator, seed, ..
             } => format!("{generator}, seed 0x{seed:X} (synthetic)"),
             Provenance::Authored { note } => format!("{note} (authored)"),
+            Provenance::Procedural { model, .. } => {
+                format!("{model} - PROCEDURAL, no connectome")
+            }
             Provenance::Chimera { measured, authored } => format!(
                 "chimera: {} modules + authored {authored}",
                 measured.describe()
@@ -254,7 +272,7 @@ impl Connectome {
 
 /// Every creature the engine can run, in menu order. The fly is first because
 /// it is the one with shipped data.
-pub const CREATURE_IDS: [&str; 3] = ["drosophila", "salticid", "c_elegans"];
+pub const CREATURE_IDS: [&str; 4] = ["drosophila", "salticid", "c_elegans", "koi"];
 
 /// Look a creature up by its `id()`. `None` for an id that is not a creature,
 /// so a stale settings file or a typo on the command line degrades to the
@@ -264,6 +282,7 @@ pub fn by_id(id: &str) -> Option<Box<dyn Creature>> {
         "drosophila" => Some(Box::new(Drosophila)),
         "salticid" => Some(Box::new(Salticid)),
         "c_elegans" => Some(Box::new(CElegans)),
+        "koi" => Some(Box::new(Koi)),
         _ => None,
     }
 }
@@ -301,6 +320,60 @@ impl Creature for Salticid {
     }
     fn data_dir(&self) -> &'static str {
         "salticid"
+    }
+}
+
+/// Creature #4: a koi, driven by rules rather than by neurons.
+///
+/// **There is no connectome for this animal.** No fish has a published
+/// synapse-resolution whole-brain wiring diagram at the scale the fly's
+/// FlyWire extract provides, so there is nothing real to run — and a
+/// plausible-looking invented one would be worse than none, because the whole
+/// claim of this app is that the brain data is real. So the koi is explicitly
+/// [`Provenance::Procedural`]: a hand-written behaviour model, labelled as such
+/// in the tray, the console and the brain window, which stays closed because
+/// there is no brain to show.
+///
+/// The nearest honest future path is **zebrafish** (*Danio rerio*): larval
+/// whole-brain activity imaging exists, and EM connectomics is progressing, but
+/// a synapse-resolution whole-brain connectome does not exist yet. If one
+/// lands, this creature can become measured without the body or the behaviour
+/// changing — that is what the `Creature` seam is for. See KOI_PLAN.md.
+///
+/// There is also a nice piece of symmetry worth noting and *not* over-claiming:
+/// a fish's fast escape is driven by the Mauthner cell, a single giant
+/// reticulospinal neuron that is the functional counterpart of the fly's giant
+/// fiber. The C-start this creature performs is modelled on that behaviour. It
+/// is not simulating a Mauthner cell; it is imitating what one produces.
+pub struct Koi;
+
+impl Creature for Koi {
+    fn id(&self) -> &'static str {
+        "koi"
+    }
+    fn display_name(&self) -> &'static str {
+        "Koi (procedural)"
+    }
+    /// An empty manifest: no populations, because there are no neurons. The
+    /// brain window and the readout both resolve to nothing, which is correct.
+    fn manifest(&self) -> RoleManifest {
+        crate::roles::procedural()
+    }
+    /// Nominally LIF, but nothing ever constructs a simulation for this
+    /// creature — `data_dir` has no data and `KoiRuntime` never asks for one.
+    fn dynamics(&self) -> DynamicsSpec {
+        DynamicsSpec::Lif(LifParams::default())
+    }
+    fn provenance(&self) -> Provenance {
+        Provenance::Procedural {
+            model: "koi behaviour model".into(),
+            why: "no fish connectome exists at this scale; zebrafish is the \
+                  nearest future path (see KOI_PLAN.md)"
+                .into(),
+        }
+    }
+    fn data_dir(&self) -> &'static str {
+        "koi"
     }
 }
 
@@ -506,6 +579,9 @@ pub enum Substrate {
     /// Walks on the desktop and on window ledges, and jumps between them
     /// ballistically on a dragline. No flight.
     WalkerJumper,
+    /// Swims. Ignores window ledges entirely — the desktop is water, not
+    /// terrain — and has no gait, no altitude and nothing to stand on.
+    Swimmer,
 }
 
 /// The world a body moves through, as the body sees it.
@@ -704,6 +780,49 @@ mod tests {
         assert!(!s.display_name().to_lowercase().contains("connectome"));
         assert!(s.display_name().to_lowercase().contains("chimera"));
         assert_eq!(p.default_origin(), Origin::Authored, "un-itemised elements of a chimera are not measured");
+    }
+
+    /// The koi's version of the same rule. It is the strongest claim in the
+    /// set — *no neurons at all* — so it has the most to get wrong: it must
+    /// not read as measured, must not borrow another animal's dataset, must
+    /// say "procedural" in the line a user actually sees, and must carry the
+    /// reason there is no connectome rather than leaving it to a commit
+    /// message nobody will read.
+    #[test]
+    fn procedural_labels_are_honest() {
+        let k = Koi;
+        let p = k.provenance();
+        assert!(!p.is_measured(), "a procedural creature must never pass as measured");
+        let d = p.describe();
+        assert!(d.contains("PROCEDURAL"), "the label must be unmissable: {d}");
+        let lower = d.to_lowercase();
+        assert!(lower.contains("no connectome"), "{d}");
+        for forbidden in ["flywire", "measured", "chimera", "connectome-derived"] {
+            assert!(!lower.contains(forbidden), "'{forbidden}' in {d}");
+        }
+        // The display name a user picks from must carry it too.
+        assert!(k.display_name().to_lowercase().contains("procedural"));
+        assert!(!k.display_name().to_lowercase().contains("connectome"));
+
+        match p {
+            Provenance::Procedural { why, .. } => {
+                assert!(
+                    why.to_lowercase().contains("zebrafish"),
+                    "the honest future path belongs in the label: {why}"
+                );
+            }
+            _ => panic!("the koi must be Procedural"),
+        }
+        assert_eq!(k.provenance().default_origin(), Origin::Authored);
+    }
+
+    /// A creature with no neurons must resolve to an empty manifest rather
+    /// than to a plausible-looking table of invented populations.
+    #[test]
+    fn the_procedural_manifest_names_no_populations() {
+        let m = Koi.manifest();
+        assert!(m.populations.is_empty(), "invented anatomy");
+        assert_eq!(m.label_for("anything"), "circuit partners");
     }
 
     /// A chimera file itemises origins per neuron and per edge, and the counts
