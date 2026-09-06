@@ -392,6 +392,60 @@ mod tests {
         );
     }
 
+    /// A still mesh is not an animation. The tail must actually sweep between
+    /// frames, and the body must advance — a fish that renders correctly but
+    /// never changes is a sprite.
+    #[test]
+    fn the_geometry_animates_between_frames() {
+        use dfcore::creature::{Body, World};
+        let world = World {
+            bounds: (1512.0, 982.0),
+            ledges: Vec::new(),
+            cursor: None,
+        };
+        let d = dfcore::BrainSignals::new();
+        let mut k = koi();
+        // Cruising, so it is beating rather than resting.
+        k.state = dfcore::KoiState::Cruise;
+        k.state_timer = 60.0;
+
+        let mut a = Mesh::default();
+        build_frame(&mut a, &k, false);
+        let start = k.pos;
+        let ring = k.spine.len() * 10;
+
+        for _ in 0..18 {
+            k.step(1.0 / 60.0, &d, &world);
+        }
+        let mut b = Mesh::default();
+        build_frame(&mut b, &k, false);
+
+        assert_eq!(a.verts.len(), b.verts.len(), "topology should be stable");
+        // The body advanced.
+        assert!(k.pos.dist(start) > 1.0, "the fish did not move: {:?}", k.pos);
+
+        // And the tail moved further than the head, relative to the body — the
+        // carangiform signature, measured on the rendered mesh rather than on
+        // the parameters that produced it.
+        let head_shift = (0..10)
+            .map(|i| {
+                let (p, q) = (a.verts[i].pos, b.verts[i].pos);
+                ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt()
+            })
+            .fold(0.0f32, f32::max);
+        let tail_shift = (ring - 10..ring)
+            .map(|i| {
+                let (p, q) = (a.verts[i].pos, b.verts[i].pos);
+                ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt()
+            })
+            .fold(0.0f32, f32::max);
+        assert!(tail_shift > 0.5, "the tail is not moving: {tail_shift}");
+        assert!(
+            tail_shift > head_shift,
+            "the tail should sweep more than the head: tail {tail_shift:.2}, head {head_shift:.2}"
+        );
+    }
+
     /// A fin drawn below the back's own surface is swallowed by the body and
     /// simply never appears — which is how the first version shipped a koi
     /// with no dorsal fin. The geometry has to clear the tube.

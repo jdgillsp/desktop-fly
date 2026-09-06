@@ -318,3 +318,72 @@ impl Runtime for FlyRuntime {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dfcore::CREATURE_IDS;
+
+    /// The tray picker's contract, end to end: every listed creature builds a
+    /// runtime, that runtime reports the id it was asked for, and it produces
+    /// geometry. This is the code path `SelectCreature` takes, so a creature
+    /// that is listed but cannot be switched to would fail here rather than in
+    /// front of the user.
+    #[test]
+    fn every_listed_creature_builds_a_runtime_that_renders() {
+        for id in CREATURE_IDS {
+            let mut rt = make(id, 7);
+            assert_eq!(
+                rt.creature().id(),
+                id,
+                "make({id}) built a different creature"
+            );
+
+            // Place it, run a second, and build a frame — the same sequence
+            // `switch_creature` performs.
+            rt.place(dfcore::Vec2::new(40.0, -20.0));
+            for _ in 0..60 {
+                rt.tick(1.0 / 60.0, (1512.0, 982.0), None);
+            }
+            let g = rt.build(false);
+            assert!(
+                !g.body.verts.is_empty() && !g.body.indices.is_empty(),
+                "{id} rendered nothing"
+            );
+            assert!(
+                g.body.indices.iter().all(|&i| (i as usize) < g.body.verts.len()),
+                "{id} produced out-of-range indices"
+            );
+
+            // And the tray line must never be empty, whatever the data status.
+            assert!(!rt.brain_info().is_empty(), "{id} has no data line");
+            assert!(!rt.status().is_empty(), "{id} has no status line");
+        }
+    }
+
+    /// Switching must not hand one creature another's data line — that is how
+    /// a procedural creature would end up claiming a connectome.
+    #[test]
+    fn each_creature_reports_its_own_provenance() {
+        let fly = make("drosophila", 1);
+        let koi = make("koi", 1);
+        assert_ne!(fly.brain_info(), koi.brain_info());
+        assert!(
+            koi.brain_info().to_uppercase().contains("PROCEDURAL"),
+            "koi data line: {}",
+            koi.brain_info()
+        );
+        assert!(
+            !koi.brain_info().to_lowercase().contains("flywire"),
+            "the koi must not borrow the fly's dataset"
+        );
+        assert!(koi.sim().is_none(), "the koi has no simulation");
+    }
+
+    /// An unknown id degrades to the fly rather than panicking, so a stale
+    /// settings file cannot brick the app.
+    #[test]
+    fn an_unknown_creature_id_falls_back_to_the_fly() {
+        assert_eq!(make("nonsense", 1).creature().id(), "drosophila");
+    }
+}
