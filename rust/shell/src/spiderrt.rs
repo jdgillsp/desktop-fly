@@ -13,6 +13,7 @@
 //!   you work, and a reported build failure spawns bugs. Nothing else. Bugs
 //!   do not habituate — prey is not a threat — but a startle still does.
 
+use dfcore::Region;
 use dfcore::data::BrainPointsFile;
 use dfcore::env::{BuildEvent, Foreground};
 use dfcore::util::hypot;
@@ -58,7 +59,7 @@ pub struct SpiderRuntime {
     fails_seen: u32,
     rng_phase: f32,
     /// The display the body last stepped in, for placing bugs on it.
-    bounds: (f32, f32),
+    region: Region,
 }
 
 impl SpiderRuntime {
@@ -83,7 +84,7 @@ impl SpiderRuntime {
             foreground: Foreground::Unknown,
             fails_seen: 0,
             rng_phase: 0.37,
-            bounds: (1920.0, 1080.0),
+            region: Region::centered((1920.0, 1080.0)),
             creature,
         };
         match dfcore::data::load_for(rt.creature.data_dir()) {
@@ -132,14 +133,16 @@ impl SpiderRuntime {
         self.rng_phase
     }
 
-    fn spawn_bugs(&mut self, bounds: (f32, f32)) {
-        let (w, h) = bounds;
+    fn spawn_bugs(&mut self, region: Region) {
         for _ in 0..BUGS_PER_FAIL {
             let ang = self.scatter() * std::f32::consts::TAU;
             let dist = 160.0 + self.scatter() * 220.0;
-            let at = Vec2::new(
-                (self.spider.pos.x + ang.cos() * dist).clamp(-w / 2.0 + 40.0, w / 2.0 - 40.0),
-                (self.spider.pos.y + ang.sin() * dist).clamp(-h / 2.0 + 40.0, h / 2.0 - 40.0),
+            let at = region.clamp_inside(
+                Vec2::new(
+                    self.spider.pos.x + ang.cos() * dist,
+                    self.spider.pos.y + ang.sin() * dist,
+                ),
+                40.0,
             );
             let va = self.scatter() * std::f32::consts::TAU;
             self.spider
@@ -151,6 +154,9 @@ impl SpiderRuntime {
 impl Runtime for SpiderRuntime {
     fn creature(&self) -> &dyn Creature {
         &self.creature
+    }
+    fn substrate(&self) -> dfcore::Substrate {
+        dfcore::creature::Body::substrate(&self.spider)
     }
     fn sim(&self) -> Option<&dyn Sim> {
         self.sim.as_ref().map(|s| s as &dyn Sim)
@@ -201,8 +207,8 @@ impl Runtime for SpiderRuntime {
                 BuildEvent::Fail => {
                     self.fails_seen += 1;
                     println!("build failed - bugs are loose");
-                    let bounds = self.bounds;
-                    self.spawn_bugs(bounds);
+                    let region = self.region;
+                    self.spawn_bugs(region);
                 }
                 BuildEvent::Pass => {
                     if !self.spider.prey.is_empty() {
@@ -232,8 +238,9 @@ impl Runtime for SpiderRuntime {
         }
     }
 
-    fn tick(&mut self, dt: f32, bounds: (f32, f32), cursor: Option<Vec2>) {
-        self.bounds = bounds;
+    fn tick(&mut self, dt: f32, region: Region, cursor: Option<Vec2>, attractor: Option<Vec2>) {
+        self.region = region;
+        self.spider.attractor = attractor;
         let mut signals = None;
         if let Some(sim) = self.sim.as_mut() {
             self.ms_accumulator += dt as f64 * 1000.0;
@@ -245,7 +252,7 @@ impl Runtime for SpiderRuntime {
             s.sleep = self.pending_sleepy;
             signals = Some(s);
         }
-        self.spider.update(dt, bounds, cursor, signals);
+        self.spider.update(dt, region, cursor, signals);
         self.flash_spikes((-dt * 7.0).exp());
     }
 
@@ -275,13 +282,11 @@ impl Runtime for SpiderRuntime {
     fn place(&mut self, at: Vec2) {
         self.spider.pos = at;
     }
-    fn moved_display(&mut self, bounds: (f32, f32)) {
+    fn moved_display(&mut self, region: Region) {
         self.spider.terrain.clear();
         self.spider.ledge = None;
         self.spider.dragline = None;
-        let (w, h) = bounds;
-        self.spider.pos.x = self.spider.pos.x.clamp(-w / 2.0 + 40.0, w / 2.0 - 40.0);
-        self.spider.pos.y = self.spider.pos.y.clamp(-h / 2.0 + 40.0, h / 2.0 - 40.0);
+        self.spider.pos = region.clamp_inside(self.spider.pos, 40.0);
     }
     fn status(&self) -> String {
         format!(
@@ -296,14 +301,14 @@ impl Runtime for SpiderRuntime {
         )
     }
 
-    fn snapshot_pose(&mut self, _alt: f32, walking_frames: u32, bounds: (f32, f32)) {
+    fn snapshot_pose(&mut self, _alt: f32, walking_frames: u32, region: Region) {
         // A few steps of walking so the legs are mid-stride, then a bug just
         // ahead so the head is turned toward something.
         self.spider.state = dfcore::SpiderState::Walking;
         self.spider.speed = 30.0;
         self.spider.heading = 0.4;
         for _ in 0..walking_frames {
-            self.spider.update(1.0 / 60.0, bounds, None, None);
+            self.spider.update(1.0 / 60.0, region, None, None);
         }
         self.spider.pos = Vec2::ZERO;
         self.spider.state = dfcore::SpiderState::Watching;

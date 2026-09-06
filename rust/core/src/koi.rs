@@ -370,11 +370,16 @@ impl Body for Koi {
 
         // Turn away from the edge of the display rather than stopping at it —
         // a fish in a pond turns at the wall.
-        let hw = world.bounds.0 / 2.0 - 40.0;
-        let hh = world.bounds.1 / 2.0 - 40.0;
-        if self.pos.x.abs() > hw || self.pos.y.abs() > hh {
-            let to_center = (-self.pos.y).atan2(-self.pos.x);
+        if world.region.outside(self.pos, 40.0) {
+            let to_center = world.region.bearing_home(self.pos);
             self.heading += angle_diff(self.heading, to_center) * (2.5 * dt).min(1.0);
+        } else if let (Some(a), KoiState::Cruise | KoiState::Hover) = (world.attractor, self.state)
+        {
+            // Only while cruising or hovering. A fish that kept steering toward
+            // a flake mid-dart would turn its escape into a lazy arc, and the
+            // C-start is the one movement that must not be negotiable.
+            let to_a = (a.y - self.pos.y).atan2(a.x - self.pos.x);
+            self.heading += angle_diff(self.heading, to_a) * (crate::body::CURIOSITY * dt).min(1.0);
         }
 
         self.resample_spine();
@@ -399,12 +404,14 @@ impl Body for Koi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::habitat::Region;
 
     fn world() -> World {
         World {
-            bounds: (1512.0, 982.0),
+            region: Region::centered((1512.0, 982.0)),
             ledges: Vec::new(),
             cursor: None,
+            attractor: None,
         }
     }
 

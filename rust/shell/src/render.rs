@@ -297,6 +297,11 @@ impl Renderer {
         mesh: &Mesh,
         neurons: Option<&Mesh>,
         shadows: bool,
+        // Index at which the creature's own geometry starts. In habitat mode
+        // the enclosure is prepended to the same buffer, and a tank that cast a
+        // shadow would paint a black rectangle over the desktop — so the shadow
+        // pass draws only from here on. Zero in free roam.
+        shadow_from: u32,
     ) {
         if mesh.indices.is_empty() {
             return;
@@ -402,7 +407,7 @@ impl Renderer {
 
             if shadows {
                 pass.set_pipeline(&self.shadow_pipeline);
-                pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
+                pass.draw_indexed(shadow_from..mesh.indices.len() as u32, 0, 0..1);
             }
             pass.set_pipeline(&self.pipeline);
             pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);

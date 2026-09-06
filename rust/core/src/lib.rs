@@ -14,6 +14,7 @@ pub mod creature;
 pub mod data;
 pub mod env;
 pub mod graded;
+pub mod habitat;
 pub mod habituation;
 pub mod koi;
 pub mod lif;
@@ -32,6 +33,7 @@ pub use creature::{
 };
 pub use data::{BrainData, CircuitFile};
 pub use env::{EnvSnapshot, Rect, ScreenSpace, Senses};
+pub use habitat::{default_region, Habitat, HabitatKind, Prop, PropKind, Region};
 pub use habituation::Habituation;
 pub use graded::GradedSim;
 pub use lif::{LifParams, LifSim};

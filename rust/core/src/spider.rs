@@ -23,6 +23,7 @@
 //! `suites::spider_behavior_test` with no window involved.
 
 use crate::creature::{Body, Proprioception, Substrate, World};
+use crate::habitat::Region;
 use crate::rng::Pcg32;
 use crate::signals::BrainSignals;
 use crate::util::{angle_diff, clamp, hypot, smoothstep, Ledge, Vec2};
@@ -91,6 +92,8 @@ pub struct SpiderPose {
 
 pub struct Spider {
     pub pos: Vec2,
+    /// See `Fly::attractor`.
+    pub attractor: Option<Vec2>,
     pub heading: f32,
     pub head_yaw: f32,
     pub speed: f32,
@@ -153,6 +156,7 @@ impl Spider {
             lift: 0.0,
         });
         Spider {
+            attractor: None,
             pos: at,
             heading,
             head_yaw: 0.0,
@@ -316,16 +320,24 @@ impl Spider {
         }
     }
 
-    fn escape_target(&mut self, bounds: (f32, f32), away_from: Option<Vec2>) -> Vec2 {
-        let hw = bounds.0 / 2.0 - EDGE_MARGIN;
-        let hh = bounds.1 / 2.0 - EDGE_MARGIN;
+    fn escape_target(&mut self, region: Region, away_from: Option<Vec2>) -> Vec2 {
+        let (hw, hh) = region.half();
+        let (hw, hh) = (hw - EDGE_MARGIN, hh - EDGE_MARGIN);
         let mut target = self.pos;
         for _ in 0..16 {
             let ang = self.rng.range(0.0, std::f32::consts::TAU);
             let dist = self.rng.range(120.0, 220.0);
             let t = Vec2::new(
-                clamp(self.pos.x + ang.cos() * dist, -hw, hw),
-                clamp(self.pos.y + ang.sin() * dist, -hh, hh),
+                clamp(
+                    self.pos.x + ang.cos() * dist,
+                    region.center.x - hw,
+                    region.center.x + hw,
+                ),
+                clamp(
+                    self.pos.y + ang.sin() * dist,
+                    region.center.y - hh,
+                    region.center.y + hh,
+                ),
             );
             if let Some(a) = away_from {
                 let to_t = Vec2::new(t.x - self.pos.x, t.y - self.pos.y);
@@ -378,7 +390,7 @@ impl Spider {
     pub fn update(
         &mut self,
         dt: f32,
-        bounds: (f32, f32),
+        region: Region,
         mouse: Option<Vec2>,
         signals: Option<BrainSignals>,
     ) {
@@ -390,19 +402,19 @@ impl Spider {
         self.feed_timer = (self.feed_timer - dt).max(0.0);
         self.live_nervous = signals.map(|s| s.nervous).unwrap_or(0.0);
 
-        self.update_bugs(dt, bounds);
+        self.update_bugs(dt, region);
 
         match self.state {
             SpiderState::Jumping => self.update_jump(dt, signals.as_ref()),
-            SpiderState::Abseiling => self.update_abseil(dt, bounds, mouse, signals.as_ref()),
+            SpiderState::Abseiling => self.update_abseil(dt, region, mouse, signals.as_ref()),
             _ => {
                 if let Some(s) = signals {
-                    self.brain_behavior(&s, dt, bounds, mouse);
+                    self.brain_behavior(&s, dt, region, mouse);
                 } else {
                     self.brainless(dt);
                 }
                 if matches!(self.state, SpiderState::Walking | SpiderState::Stalking) {
-                    self.update_walk(dt, bounds);
+                    self.update_walk(dt, region);
                 }
             }
         }
@@ -412,9 +424,9 @@ impl Spider {
         self.update_legs(dt);
     }
 
-    fn update_bugs(&mut self, dt: f32, bounds: (f32, f32)) {
-        let hw = bounds.0 / 2.0 - 20.0;
-        let hh = bounds.1 / 2.0 - 20.0;
+    fn update_bugs(&mut self, dt: f32, region: Region) {
+        let (hw, hh) = region.half();
+        let (hw, hh) = (hw - 20.0, hh - 20.0);
         for b in self.prey.iter_mut() {
             b.age += dt;
             // A jittery drift, like a gnat.
@@ -446,10 +458,10 @@ impl Spider {
 
     /// Every decision here reads a real population's rate — or, for the
     /// pounce and the head, the one readout that is honestly modelled.
-    fn brain_behavior(&mut self, s: &BrainSignals, dt: f32, bounds: (f32, f32), mouse: Option<Vec2>) {
+    fn brain_behavior(&mut self, s: &BrainSignals, dt: f32, region: Region, mouse: Option<Vec2>) {
         // Giant fiber spike -> escape jump, from any grounded state, even sleep.
         if s.escape && self.escape_cooldown == 0.0 {
-            let to = self.escape_target(bounds, mouse);
+            let to = self.escape_target(region, mouse);
             self.start_jump(to, true);
             return;
         }
@@ -610,7 +622,7 @@ impl Spider {
         }
     }
 
-    fn update_walk(&mut self, dt: f32, bounds: (f32, f32)) {
+    fn update_walk(&mut self, dt: f32, region: Region) {
         if let Some(l) = self.ledge {
             match self.terrain.iter().find(|c| c.id == l.id && (c.y - l.y).abs() < 40.0) {
                 Some(cur) => self.ledge = Some(*cur),
@@ -643,17 +655,18 @@ impl Spider {
             if self.state == SpiderState::Walking {
                 self.heading += self.rng.range(-1.0, 1.0) * 1.2 * dt;
             }
-            let hw = bounds.0 / 2.0 - EDGE_MARGIN;
-            let hh = bounds.1 / 2.0 - EDGE_MARGIN;
-            if self.pos.x.abs() > hw || self.pos.y.abs() > hh {
-                let to_center = (-self.pos.y).atan2(-self.pos.x);
+            if region.outside(self.pos, EDGE_MARGIN) {
+                let to_center = region.bearing_home(self.pos);
                 self.heading += angle_diff(self.heading, to_center) * (4.0 * dt).min(1.0);
+            } else if let Some(a) = self.attractor {
+                let to_a = (a.y - self.pos.y).atan2(a.x - self.pos.x);
+                self.heading +=
+                    angle_diff(self.heading, to_a) * (crate::body::CURIOSITY * dt).min(1.0);
             }
             let v = self.effective_speed();
             self.pos.x += self.heading.cos() * v * dt;
             self.pos.y += self.heading.sin() * v * dt;
-            self.pos.x = clamp(self.pos.x, -bounds.0 / 2.0 + 20.0, bounds.0 / 2.0 - 20.0);
-            self.pos.y = clamp(self.pos.y, -bounds.1 / 2.0 + 20.0, bounds.1 / 2.0 - 20.0);
+            self.pos = region.clamp_inside(self.pos, 20.0);
             if self.state == SpiderState::Walking {
                 let candidates: Vec<Ledge> = self
                     .terrain
@@ -696,11 +709,11 @@ impl Spider {
         }
     }
 
-    fn update_abseil(&mut self, dt: f32, bounds: (f32, f32), mouse: Option<Vec2>, signals: Option<&BrainSignals>) {
+    fn update_abseil(&mut self, dt: f32, region: Region, mouse: Option<Vec2>, signals: Option<&BrainSignals>) {
         // A startle on the line: let go and drop, then jump clear on landing.
         if let Some(s) = signals {
             if s.escape && self.escape_cooldown == 0.0 {
-                let to = self.escape_target(bounds, mouse);
+                let to = self.escape_target(region, mouse);
                 self.dragline = Some(self.abseil_anchor);
                 self.set_state(SpiderState::Jumping);
                 self.jump_from = self.pos;
@@ -847,7 +860,8 @@ impl Body for Spider {
     }
     fn step(&mut self, dt: f32, drives: &BrainSignals, world: &World) {
         self.terrain = world.ledges.clone();
-        self.update(dt, world.bounds, world.cursor, Some(*drives));
+        self.attractor = world.attractor;
+        self.update(dt, world.region, world.cursor, Some(*drives));
     }
     fn position(&self) -> Vec2 {
         self.pos
@@ -866,8 +880,12 @@ impl Body for Spider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::habitat::Region;
 
-    const BOUNDS: (f32, f32) = (1512.0, 982.0);
+    const BOUNDS: Region = Region {
+        center: Vec2::ZERO,
+        size: (1512.0, 982.0),
+    };
     const DT: f32 = 1.0 / 60.0;
 
     #[test]

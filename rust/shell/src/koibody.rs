@@ -398,10 +398,12 @@ mod tests {
     #[test]
     fn the_geometry_animates_between_frames() {
         use dfcore::creature::{Body, World};
+        use dfcore::Region;
         let world = World {
-            bounds: (1512.0, 982.0),
+            region: Region::centered((1512.0, 982.0)),
             ledges: Vec::new(),
             cursor: None,
+            attractor: None,
         };
         let d = dfcore::BrainSignals::new();
         let mut k = koi();

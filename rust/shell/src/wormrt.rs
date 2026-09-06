@@ -14,6 +14,7 @@
 //! worm runs brainless: a constant forward drive, and no reactions. The tray
 //! says so, and the brain window stays closed.
 
+use dfcore::Region;
 use dfcore::creature::{Body, World};
 use dfcore::data::BrainPointsFile;
 use dfcore::env::thermal_tempo;
@@ -127,6 +128,9 @@ impl Runtime for WormRuntime {
     fn creature(&self) -> &dyn Creature {
         &self.creature
     }
+    fn substrate(&self) -> dfcore::Substrate {
+        dfcore::creature::Body::substrate(&self.worm)
+    }
     fn sim(&self) -> Option<&dyn Sim> {
         self.sim.as_ref().map(|s| s as &dyn Sim)
     }
@@ -208,7 +212,7 @@ impl Runtime for WormRuntime {
         self.pending_sleepy = sleepy;
     }
 
-    fn tick(&mut self, dt: f32, bounds: (f32, f32), cursor: Option<Vec2>) {
+    fn tick(&mut self, dt: f32, region: Region, cursor: Option<Vec2>, attractor: Option<Vec2>) {
         let mut drives = match self.sim.as_mut() {
             Some(sim) => {
                 self.ms_accumulator += dt as f64 * 1000.0;
@@ -228,9 +232,10 @@ impl Runtime for WormRuntime {
         drives.tempo = self.pending_tempo;
         drives.sleep = self.pending_sleepy;
         let world = World {
-            bounds,
+            region,
             ledges: Vec::new(),
             cursor,
+            attractor,
         };
         self.worm.step(dt, &drives, &world);
         if let Some(sim) = self.sim.as_ref() {
@@ -267,13 +272,9 @@ impl Runtime for WormRuntime {
         self.worm = Worm::new(at, dfcore::DEFAULT_SEED);
         self.worm.heading = heading;
     }
-    fn moved_display(&mut self, bounds: (f32, f32)) {
-        let (w, h) = bounds;
+    fn moved_display(&mut self, region: Region) {
         let p = self.worm.pos;
-        let inside = Vec2::new(
-            p.x.clamp(-w / 2.0 + 60.0, w / 2.0 - 60.0),
-            p.y.clamp(-h / 2.0 + 60.0, h / 2.0 - 60.0),
-        );
+        let inside = region.clamp_inside(p, 60.0);
         if inside.x != p.x || inside.y != p.y {
             self.place(inside);
         }
@@ -285,13 +286,14 @@ impl Runtime for WormRuntime {
         )
     }
 
-    fn snapshot_pose(&mut self, _alt: f32, walking_frames: u32, bounds: (f32, f32)) {
+    fn snapshot_pose(&mut self, _alt: f32, walking_frames: u32, region: Region) {
         let mut d = BrainSignals::new();
         d.walk_drive = 0.8;
         let world = World {
-            bounds,
+            region,
             ledges: Vec::new(),
             cursor: None,
+            attractor: None,
         };
         for _ in 0..walking_frames.max(90) {
             self.worm.step(1.0 / 60.0, &d, &world);

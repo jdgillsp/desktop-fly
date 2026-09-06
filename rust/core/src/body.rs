@@ -9,6 +9,7 @@
 //! later (PORT_PLAN.md §5) — a worm has no legs and no flight, but it still
 //! produces a pose.
 
+use crate::habitat::Region;
 use crate::rng::Pcg32;
 use crate::signals::BrainSignals;
 use crate::util::{angle_diff, clamp, hypot, smoothstep, Ledge, Vec2};
@@ -66,8 +67,20 @@ pub struct Pose {
     pub blur_wings_visible: bool,
 }
 
+/// How hard a creature turns toward something interesting in its enclosure,
+/// relative to how hard it turns away from a wall (4.0 for the fly and the
+/// spider). Deliberately weak, and deliberately *weaker than the wall reflex*:
+/// a pet wedged in a corner because it is transfixed by a ball is worse than
+/// one that wanders past the ball. Shared by all four bodies so curiosity does
+/// not need re-tuning per animal.
+pub const CURIOSITY: f32 = 1.0;
+
 pub struct Fly {
     pub pos: Vec2,
+    /// Something in the enclosure worth ambling toward; `None` in free roam.
+    /// Set from `World` on every step rather than threaded through `update`,
+    /// so the ground-truth suites call the same `update` they always did.
+    pub attractor: Option<Vec2>,
     pub heading: f32,
     pub speed: f32,
     pub state: State,
@@ -128,6 +141,7 @@ impl Fly {
             }
         });
         Fly {
+            attractor: None,
             pos: at,
             heading,
             speed: 30.0,
@@ -204,7 +218,7 @@ impl Fly {
 
     pub fn start_flight(
         &mut self,
-        bounds: (f32, f32),
+        region: Region,
         away_from: Option<Vec2>,
         escape: bool,
         effort: Option<f32>,
@@ -218,9 +232,9 @@ impl Fly {
         self.wing_raise = 0.0;
         self.flight_from = self.pos;
 
-        let hw = bounds.0 / 2.0 - EDGE_MARGIN;
-        let hh = bounds.1 / 2.0 - EDGE_MARGIN;
-        let mut target = Vec2::ZERO;
+        let (hw, hh) = region.half();
+        let (hw, hh) = (hw - EDGE_MARGIN, hh - EDGE_MARGIN);
+        let mut target = region.center;
         let mut chosen = false;
 
         // Casual flights often land on a window edge.
@@ -234,7 +248,10 @@ impl Fly {
         }
         if !chosen {
             for _ in 0..16 {
-                target = Vec2::new(self.rng.range(-hw, hw), self.rng.range(-hh, hh));
+                target = Vec2::new(
+                    region.center.x + self.rng.range(-hw, hw),
+                    region.center.y + self.rng.range(-hh, hh),
+                );
                 let far = hypot(target.x - self.pos.x, target.y - self.pos.y)
                     > if escape { 350.0 } else { 260.0 };
                 if !far {
@@ -315,7 +332,7 @@ impl Fly {
     pub fn update(
         &mut self,
         dt: f32,
-        bounds: (f32, f32),
+        region: Region,
         mouse: Option<Vec2>,
         signals: Option<BrainSignals>,
     ) {
@@ -334,9 +351,9 @@ impl Fly {
         if self.state == State::Flying {
             self.update_flight(dt);
         } else if let Some(s) = signals {
-            self.brain_behavior(&s, dt, bounds, mouse);
+            self.brain_behavior(&s, dt, region, mouse);
             if self.state == State::Walking {
-                self.update_walk(dt, bounds);
+                self.update_walk(dt, region);
             }
         } else {
             // Legacy distance-based fear, for the extra brainless flies.
@@ -344,7 +361,7 @@ impl Fly {
                 if let Some(m) = mouse {
                     let d = hypot(m.x - self.pos.x, m.y - self.pos.y);
                     if d < SCARE_RADIUS {
-                        self.start_flight(bounds, Some(m), false, None);
+                        self.start_flight(region, Some(m), false, None);
                     } else if d < NERVOUS_RADIUS && self.state != State::Walking {
                         self.set_state(State::Walking);
                         self.heading = (self.pos.y - m.y).atan2(self.pos.x - m.x)
@@ -359,13 +376,13 @@ impl Fly {
                 self.state_timer -= dt;
                 if self.state_timer <= 0.0 {
                     if self.state == State::Walking && self.rng.f32() < 0.10 {
-                        self.start_flight(bounds, None, false, None);
+                        self.start_flight(region, None, false, None);
                     } else {
                         self.pick_next_state();
                     }
                 }
                 if self.state == State::Walking {
-                    self.update_walk(dt, bounds);
+                    self.update_walk(dt, region);
                 }
             }
         }
@@ -379,12 +396,12 @@ impl Fly {
         &mut self,
         s: &BrainSignals,
         dt: f32,
-        bounds: (f32, f32),
+        region: Region,
         mouse: Option<Vec2>,
     ) {
         // Giant fiber spike -> escape takeoff (even out of sleep).
         if s.escape && self.scare_cooldown == 0.0 {
-            self.start_flight(bounds, mouse, true, None);
+            self.start_flight(region, mouse, true, None);
             return;
         }
         // Circadian sleep: enter, hold, wake into grooming.
@@ -460,7 +477,7 @@ impl Fly {
         // Spontaneous takeoff, gated on whole-population arousal.
         let flight_chance = if s.arousal > 0.5 { 0.6 } else { 0.005 };
         if self.state == State::Walking && self.rng.f32() < flight_chance * dt {
-            self.start_flight(bounds, None, false, Some(0.35 + s.arousal * 0.6));
+            self.start_flight(region, None, false, Some(0.35 + s.arousal * 0.6));
         }
     }
 
@@ -472,7 +489,7 @@ impl Fly {
         }
     }
 
-    fn update_walk(&mut self, dt: f32, bounds: (f32, f32)) {
+    fn update_walk(&mut self, dt: f32, region: Region) {
         // Refresh the attached ledge — windows move and close.
         if let Some(l) = self.ledge {
             match self
@@ -483,7 +500,7 @@ impl Fly {
                 Some(cur) => self.ledge = Some(*cur),
                 None => {
                     self.ledge = None;
-                    self.start_flight(bounds, None, false, None); // ground vanished
+                    self.start_flight(region, None, false, None); // ground vanished
                     return;
                 }
             }
@@ -513,17 +530,17 @@ impl Fly {
             }
         } else {
             self.heading += self.rng.range(-1.0, 1.0) * 1.6 * dt;
-            let hw = bounds.0 / 2.0 - EDGE_MARGIN;
-            let hh = bounds.1 / 2.0 - EDGE_MARGIN;
-            if self.pos.x.abs() > hw || self.pos.y.abs() > hh {
-                let to_center = (-self.pos.y).atan2(-self.pos.x);
+            if region.outside(self.pos, EDGE_MARGIN) {
+                let to_center = region.bearing_home(self.pos);
                 self.heading += angle_diff(self.heading, to_center) * (4.0 * dt).min(1.0);
+            } else if let Some(a) = self.attractor {
+                let to_a = (a.y - self.pos.y).atan2(a.x - self.pos.x);
+                self.heading += angle_diff(self.heading, to_a) * (CURIOSITY * dt).min(1.0);
             }
             let v = self.effective_speed();
             self.pos.x += self.heading.cos() * v * dt;
             self.pos.y += self.heading.sin() * v * dt;
-            self.pos.x = clamp(self.pos.x, -bounds.0 / 2.0 + 20.0, bounds.0 / 2.0 - 20.0);
-            self.pos.y = clamp(self.pos.y, -bounds.1 / 2.0 + 20.0, bounds.1 / 2.0 - 20.0);
+            self.pos = region.clamp_inside(self.pos, 20.0);
             // Walked onto a window edge? Latch on.
             let candidates: Vec<Ledge> = self
                 .terrain

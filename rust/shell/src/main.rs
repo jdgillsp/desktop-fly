@@ -15,6 +15,7 @@
 
 mod brain;
 mod flybody;
+mod habitatmesh;
 mod koibody;
 mod koirt;
 mod math;
@@ -34,7 +35,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dfcore::env::{Rect, ScreenSpace, Senses};
-use dfcore::Vec2;
+use dfcore::{Habitat, HabitatKind, Region, Vec2};
 use dfplatform::HostSenses;
 
 use runtime::Runtime;
@@ -82,6 +83,8 @@ struct Args {
     /// Glass anatomy is the default register (PORT_PLAN.md §6.3 #2);
     /// --literal restores the photoreal fly.
     glass: bool,
+    /// Confine the creature to a rendered enclosure.
+    habitat: bool,
     /// Frame cap. A background pet does not need 60 fps, and Spike 0 measured
     /// ~8% of a core just to clear and present a full-screen overlay -- so the
     /// frame rate is most of the idle cost. See `--fps`.
@@ -133,6 +136,9 @@ fn parse_args() -> Args {
         } else {
             persist::load_glass_choice().unwrap_or(true)
         },
+        // Off unless asked for: free roam stays the default, and an existing
+        // install is unaffected by this feature existing.
+        habitat: a.iter().any(|x| x == "--habitat") || persist::load_habitat_choice().unwrap_or(false),
         fps: a
             .iter()
             .position(|x| x == "--fps")
@@ -170,6 +176,14 @@ struct App {
     /// Carried between the 30 Hz sense poll and the per-frame update.
     last_env_cursor: Option<Vec2>,
 
+    /// The enclosure, when there is one. `None` is free roam, and then every
+    /// region the creature sees is `Region::centered(display)` — bit-identical
+    /// to the arithmetic the bodies did before habitats existed.
+    habitat: Option<Habitat>,
+    /// This frame's composed geometry: the enclosure, then the creature on top
+    /// of it. One mesh, so the renderer needs no third buffer.
+    frame_mesh: mesh::Mesh,
+
     gpu: Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)>,
     brain: Option<brain::BrainView>,
     brain_window: Option<Arc<Window>>,
@@ -204,6 +218,8 @@ impl App {
             last_harden: Instant::now(),
             hidden_for_fullscreen: false,
             last_env_cursor: None,
+            habitat: None,
+            frame_mesh: mesh::Mesh::default(),
             gpu: None,
             brain: None,
             brain_window: None,
@@ -337,7 +353,12 @@ impl ApplicationHandler for App {
             self.open_brain_window(event_loop, pos, size);
         }
 
-        self.tray = tray::Tray::new(&self.rt.brain_info(), self.rt.creature().id(), self.args.glass);
+        self.tray = tray::Tray::new(
+            &self.rt.brain_info(),
+            self.rt.creature().id(),
+            self.args.glass,
+            self.args.habitat,
+        );
         if self.tray.is_none() {
             eprintln!("WARNING: no tray icon; quit with Task Manager");
         }
@@ -349,8 +370,19 @@ impl ApplicationHandler for App {
             println!("note: {note}");
         }
 
+        // The enclosure exists from the first frame if it was asked for, and
+        // the creature starts inside it rather than swimming in from off-stage.
+        self.rebuild_habitat();
         let (w, h) = self.space.size();
-        self.rt.place(Vec2::new(w * 0.2, -h * 0.15));
+        match &self.habitat {
+            Some(h) => {
+                self.rt.place(h.region.center);
+                println!("habitat: {} at ({:.0},{:.0}), {:.0}x{:.0}",
+                    h.kind.label(), h.region.center.x, h.region.center.y,
+                    h.region.size.0, h.region.size.1);
+            }
+            None => self.rt.place(Vec2::new(w * 0.2, -h * 0.15)),
+        }
 
         self.surface = Some(surface);
         self.renderer = Some(renderer);
@@ -543,6 +575,35 @@ impl App {
         }
     }
 
+    /// The world's edge this frame: the enclosure if there is one, otherwise
+    /// the whole display. Every other part of the app asks this rather than
+    /// reaching for `space.size()`, so there is one answer to "where does the
+    /// world end" and not two that can drift apart.
+    fn region(&self) -> Region {
+        match &self.habitat {
+            Some(h) => h.region,
+            None => Region::centered(self.space.size()),
+        }
+    }
+
+    /// Build, move or drop the enclosure to match the current setting, the
+    /// current creature and the current display.
+    fn rebuild_habitat(&mut self) {
+        if !self.args.habitat {
+            self.habitat = None;
+            return;
+        }
+        let kind = HabitatKind::for_substrate(self.rt.substrate());
+        let region = dfcore::default_region(self.space.size());
+        match &mut self.habitat {
+            // Same kind: keep the props where they are and just move the tank,
+            // so switching displays does not reset a ball the user watched the
+            // creature push into a corner.
+            Some(h) if h.kind == kind => h.reshape(region),
+            _ => self.habitat = Some(Habitat::new(kind, region, dfcore::DEFAULT_SEED)),
+        }
+    }
+
     /// Hop the creature to the next monitor, as the macOS build's
     /// "Move to Next Display" does (main.swift:822).
     fn move_to_next_display(&mut self) {
@@ -569,7 +630,8 @@ impl App {
             r.scale = scale as f32;
             r.resize(s, size.width, size.height);
         }
-        self.rt.moved_display(self.space.size());
+        self.rebuild_habitat();
+        self.rt.moved_display(self.region());
         println!("moved to display {} ({}x{})", self.monitor_index, size.width, size.height);
     }
 
@@ -587,6 +649,11 @@ impl App {
         rt.place(at);
         self.rt = rt;
         persist::save_creature_choice(id);
+        // A koi in a terrarium, or a spider in a fish tank, would be the wrong
+        // enclosure for the animal — so the tank is rebuilt from the new
+        // creature's substrate, and the creature is placed inside it.
+        self.rebuild_habitat();
+        self.rt.moved_display(self.region());
 
         let had_brain = self.brain.is_some();
         self.brain = None;
@@ -651,6 +718,26 @@ impl App {
                         if self.args.glass { "glass anatomy on" } else { "literal animal" }
                     );
                 }
+                tray::TrayCommand::ToggleHabitat => {
+                    self.args.habitat = !self.args.habitat;
+                    persist::save_habitat_choice(self.args.habitat);
+                    self.rebuild_habitat();
+                    // Whichever way it went, the creature has to end up inside
+                    // the new world — otherwise switching the tank on around a
+                    // fly at the far corner of the screen leaves it outside its
+                    // own glass, walking home from off-stage.
+                    self.rt.moved_display(self.region());
+                    if let Some(t) = &self.tray {
+                        t.set_habitat(self.args.habitat);
+                    }
+                    println!(
+                        "{}",
+                        match &self.habitat {
+                            Some(h) => format!("habitat on ({})", h.kind.label()),
+                            None => "habitat off - free roam".to_string(),
+                        }
+                    );
+                }
                 tray::TrayCommand::NextDisplay => self.move_to_next_display(),
                 tray::TrayCommand::ToggleBrain => {
                     if self.brain.is_some() {
@@ -701,7 +788,19 @@ impl App {
             }
 
             if self.args.diag && self.frames < 3 { eprintln!("[diag] A: about to transduce"); }
-            self.rt.sense(&env, sense_dt);
+            if self.habitat.is_some() && !env.ledges.is_empty() {
+                // Window edges are terrain for a creature loose on the desktop.
+                // Inside a tank they are not: a fly that latched onto the top of
+                // a browser window would be standing on something that is not in
+                // its enclosure. Everything else about the senses — looms,
+                // clicks, the cursor — still applies, because the user leaning
+                // over the glass is exactly what those channels are for.
+                let mut penned = env.clone();
+                penned.ledges.clear();
+                self.rt.sense(&penned, sense_dt);
+            } else {
+                self.rt.sense(&env, sense_dt);
+            }
             if self.args.diag && self.frames < 3 { eprintln!("[diag] B: transduced"); }
             self.last_env_cursor = env.cursor;
         }
@@ -709,8 +808,18 @@ impl App {
         // The brain at a true 1 kHz, decoupled from the frame rate, then the
         // body once — both inside the runtime, whichever creature it is.
         if self.args.diag && self.frames < 3 { eprintln!("[diag] C: stepping creature"); }
-        let bounds = self.space.size();
-        self.rt.tick(dt, bounds, self.last_env_cursor);
+        let at_last_frame = self.rt.position();
+        let region = self.region();
+        // The enclosure moves first, so the creature reacts to where the props
+        // are now rather than to where they were a frame ago.
+        let attractor = match &mut self.habitat {
+            Some(h) => {
+                h.step(dt, at_last_frame, self.last_env_cursor);
+                h.attractor()
+            }
+            None => None,
+        };
+        self.rt.tick(dt, region, self.last_env_cursor, attractor);
         if self.args.diag && self.frames < 3 { eprintln!("[diag] E: body updated"); }
 
         let diag = self.args.diag && self.frames < 3;
@@ -720,10 +829,28 @@ impl App {
         let geometry = self.rt.build(glass);
         if diag { eprintln!("[diag] F: geometry built"); }
 
+        // The enclosure and the creature share one pipeline and one vertex
+        // format, so they go to the GPU as a single mesh rather than as a third
+        // buffer and a second draw. The tank is written first and sits below the
+        // creature in z, so depth ordering matches drawing order either way.
+        let (body, shadow_from): (&mesh::Mesh, u32) = match &self.habitat {
+            Some(h) => {
+                habitatmesh::build(&mut self.frame_mesh, h);
+                let base = self.frame_mesh.verts.len() as u32;
+                let split = self.frame_mesh.indices.len() as u32;
+                self.frame_mesh.verts.extend_from_slice(&geometry.body.verts);
+                self.frame_mesh
+                    .indices
+                    .extend(geometry.body.indices.iter().map(|i| i + base));
+                (&self.frame_mesh, split)
+            }
+            None => (geometry.body, 0),
+        };
+
         if let (Some(r), Some(s)) = (self.renderer.as_mut(), self.surface.as_ref()) {
             if !hidden {
                 let t0 = Instant::now();
-                r.render(s, geometry.body, geometry.neurons, shadows);
+                r.render(s, body, geometry.neurons, shadows, shadow_from);
                 if diag {
                     eprintln!(
                         "[diag] render took {:?}, {} verts, creature at ({:.0},{:.0})",
@@ -811,7 +938,20 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1.0);
         let mut rt = runtime::make(&creature_arg(&argv), dfcore::DEFAULT_SEED);
-        snapshot::render_to_png(rt.as_mut(), &path, 320, 320, alt, 20, glass, zoom);
+        let habitat = argv.iter().any(|a| a == "--habitat");
+        // Bigger frame with a tank in it: 320 px is barely wider than the fly.
+        let side = if habitat { 560 } else { 320 };
+        snapshot::render_to_png(
+            rt.as_mut(),
+            &path,
+            side,
+            side,
+            alt,
+            20,
+            glass,
+            zoom,
+            habitat,
+        );
         return;
     }
 

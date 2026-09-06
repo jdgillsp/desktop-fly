@@ -289,13 +289,18 @@ impl Body for Worm {
 
         // Stay on screen. A worm has no flight to escape with, so it simply
         // turns away from the edge.
-        let hw = world.bounds.0 / 2.0 - 30.0;
-        let hh = world.bounds.1 / 2.0 - 30.0;
+
         // No flight to escape with, so the worm just turns away from the edge.
         // Steering only: clamping the head would tear it off its own path.
-        if self.pos.x.abs() > hw || self.pos.y.abs() > hh {
-            let to_center = (-self.pos.y).atan2(-self.pos.x);
+        if world.region.outside(self.pos, 30.0) {
+            let to_center = world.region.bearing_home(self.pos);
             self.heading += crate::util::angle_diff(self.heading, to_center) * (3.0 * dt).min(1.0);
+        } else if let Some(a) = world.attractor {
+            // A worm is chemotactic, so drifting up a gradient toward something
+            // is the one enclosure behaviour that is in character for it.
+            let to_a = (a.y - self.pos.y).atan2(a.x - self.pos.x);
+            self.heading += crate::util::angle_diff(self.heading, to_a)
+                * (crate::body::CURIOSITY * dt).min(1.0);
         }
     }
 
@@ -318,13 +323,15 @@ impl Body for Worm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::habitat::Region;
     use crate::creature::World;
 
     fn world() -> World {
         World {
-            bounds: (1512.0, 982.0),
+            region: Region::centered((1512.0, 982.0)),
             ledges: Vec::new(),
             cursor: None,
+            attractor: None,
         }
     }
 

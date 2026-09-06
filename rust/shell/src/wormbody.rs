@@ -168,6 +168,7 @@ pub fn build_neuron_field(out: &mut Mesh, sim: &GradedSim, activity: &[f32], wor
 mod tests {
     use super::*;
     use dfcore::creature::{Body, World};
+        use dfcore::Region;
     use dfcore::{BrainSignals, Vec2};
 
     fn crawled_worm() -> Worm {
@@ -175,9 +176,10 @@ mod tests {
         let mut d = BrainSignals::new();
         d.walk_drive = 0.8;
         let world = World {
-            bounds: (1000.0, 800.0),
+            region: Region::centered((1000.0, 800.0)),
             ledges: Vec::new(),
             cursor: None,
+            attractor: None,
         };
         for _ in 0..120 {
             w.step(1.0 / 60.0, &d, &world);

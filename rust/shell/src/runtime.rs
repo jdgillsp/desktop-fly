@@ -31,7 +31,7 @@ use std::time::Instant;
 use dfcore::body::Fly;
 use dfcore::data::BrainPointsFile;
 use dfcore::{
-    Creature, Drosophila, EnvSnapshot, Habituation, LifSim, SignalBuilder, Sim, Vec2,
+    Creature, Drosophila, EnvSnapshot, Habituation, LifSim, Region, SignalBuilder, Sim, Vec2,
 };
 
 use crate::flybody;
@@ -47,6 +47,10 @@ pub struct Geometry<'a> {
 
 pub trait Runtime {
     fn creature(&self) -> &dyn Creature;
+    /// How this animal meets the world. Read off the *body*, which is where
+    /// `Substrate` is defined, so there is no second answer to drift from it.
+    /// Habitat mode is the first thing to branch on it: a swimmer gets water.
+    fn substrate(&self) -> dfcore::Substrate;
 
     fn sim(&self) -> Option<&dyn Sim>;
     fn sim_mut(&mut self) -> Option<&mut dyn Sim>;
@@ -67,7 +71,16 @@ pub trait Runtime {
     fn sense(&mut self, env: &EnvSnapshot, dt: f32);
 
     /// Step the brain at 1 kHz and the body once. Called per frame.
-    fn tick(&mut self, dt: f32, bounds: (f32, f32), cursor: Option<Vec2>);
+    /// Step the brain at 1 kHz and the body once. `region` is the world's
+    /// edge — the display in free roam, the enclosure in habitat mode — and
+    /// `attractor` is a prop worth going to look at, if there is one.
+    fn tick(
+        &mut self,
+        dt: f32,
+        region: Region,
+        cursor: Option<Vec2>,
+        attractor: Option<Vec2>,
+    );
 
     /// Build this frame's geometry from the current body state.
     fn build(&mut self, glass: bool) -> Geometry<'_>;
@@ -78,14 +91,14 @@ pub trait Runtime {
     fn place(&mut self, at: Vec2);
     /// The display changed under the creature: terrain is stale and it must
     /// land inside the new bounds.
-    fn moved_display(&mut self, bounds: (f32, f32));
+    fn moved_display(&mut self, region: Region);
 
     /// For the 10 s console report.
     fn status(&self) -> String;
 
     /// Put the creature into a representative pose for `--snapshot`, with the
     /// circuit visibly active. `alt` lifts a flier; a crawler ignores it.
-    fn snapshot_pose(&mut self, alt: f32, walking_frames: u32, bounds: (f32, f32));
+    fn snapshot_pose(&mut self, alt: f32, walking_frames: u32, region: Region);
 }
 
 /// Construct the runtime for a creature id. Data is loaded here; a creature
@@ -182,6 +195,9 @@ impl Runtime for FlyRuntime {
     fn creature(&self) -> &dyn Creature {
         &self.creature
     }
+    fn substrate(&self) -> dfcore::Substrate {
+        dfcore::creature::Body::substrate(&self.fly)
+    }
     fn sim(&self) -> Option<&dyn Sim> {
         self.sim.as_ref().map(|s| s as &dyn Sim)
     }
@@ -216,7 +232,7 @@ impl Runtime for FlyRuntime {
         }
     }
 
-    fn tick(&mut self, dt: f32, bounds: (f32, f32), cursor: Option<Vec2>) {
+    fn tick(&mut self, dt: f32, region: Region, cursor: Option<Vec2>, attractor: Option<Vec2>) {
         // Step the brain at a true 1 kHz, decoupled from the frame rate.
         let mut signals = None;
         if let Some(sim) = self.sim.as_mut() {
@@ -229,7 +245,8 @@ impl Runtime for FlyRuntime {
             s.sleep = self.pending_sleepy;
             signals = Some(s);
         }
-        self.fly.update(dt, bounds, cursor, signals);
+        self.fly.attractor = attractor;
+        self.fly.update(dt, region, cursor, signals);
         // The connectome inside the glass shell: decay, then light up whatever
         // just spiked. Same data the brain window draws, on the creature itself.
         self.flash_spikes((-dt * 7.0).exp());
@@ -267,14 +284,13 @@ impl Runtime for FlyRuntime {
     fn place(&mut self, at: Vec2) {
         self.fly.pos = at;
     }
-    fn moved_display(&mut self, bounds: (f32, f32)) {
+    fn moved_display(&mut self, region: Region) {
         // Terrain is stale until the next poll, and the fly must land inside
-        // the new display.
+        // the new world — which is also how it gets into a habitat that has
+        // just been switched on around it.
         self.fly.terrain.clear();
         self.fly.ledge = None;
-        let (w, h) = bounds;
-        self.fly.pos.x = self.fly.pos.x.clamp(-w / 2.0 + 40.0, w / 2.0 - 40.0);
-        self.fly.pos.y = self.fly.pos.y.clamp(-h / 2.0 + 40.0, h / 2.0 - 40.0);
+        self.fly.pos = region.clamp_inside(self.fly.pos, 40.0);
     }
     fn status(&self) -> String {
         format!(
@@ -286,12 +302,12 @@ impl Runtime for FlyRuntime {
         )
     }
 
-    fn snapshot_pose(&mut self, alt: f32, walking_frames: u32, bounds: (f32, f32)) {
+    fn snapshot_pose(&mut self, alt: f32, walking_frames: u32, region: Region) {
         self.fly.state = dfcore::State::Walking;
         self.fly.speed = 60.0;
         self.fly.heading = 0.4;
         for _ in 0..walking_frames {
-            self.fly.update(1.0 / 60.0, bounds, None, None);
+            self.fly.update(1.0 / 60.0, region, None, None);
         }
         self.fly.pos = Vec2::ZERO;
         self.fly.alt = alt;
@@ -343,7 +359,7 @@ mod tests {
             // `switch_creature` performs.
             rt.place(dfcore::Vec2::new(40.0, -20.0));
             for _ in 0..60 {
-                rt.tick(1.0 / 60.0, (1512.0, 982.0), None);
+                rt.tick(1.0 / 60.0, Region::centered((1512.0, 982.0)), None, None);
             }
             let g = rt.build(false);
             assert!(
@@ -385,5 +401,149 @@ mod tests {
     #[test]
     fn an_unknown_creature_id_falls_back_to_the_fly() {
         assert_eq!(make("nonsense", 1).creature().id(), "drosophila");
+    }
+
+    /// The point of the whole feature: an enclosure has to actually hold the
+    /// animal. Run each creature for a simulated minute inside a small tank
+    /// parked *off* the scene origin — which is the case the old `±bounds/2`
+    /// arithmetic could not express — and it must never get out.
+    ///
+    /// The tank is deliberately off-centre and deliberately small: a creature
+    /// that merely drifts toward (0, 0) would pass a centred test by accident.
+    #[test]
+    fn every_creature_stays_inside_its_enclosure() {
+        let region = dfcore::Region::new(dfcore::Vec2::new(420.0, -260.0), (520.0, 360.0));
+        for id in CREATURE_IDS {
+            let mut rt = make(id, 4);
+            rt.place(region.center);
+            let mut worst = 0.0f32;
+            for i in 0..3600 {
+                // A cursor sweeping across the tank, so escapes and darts fire
+                // rather than leaving the creature idling in the middle.
+                let cursor = if i % 400 < 60 {
+                    Some(region.center)
+                } else {
+                    None
+                };
+                rt.tick(1.0 / 60.0, region, cursor, None);
+                let p = rt.position();
+                worst = worst
+                    .max((p.x - region.center.x).abs() - region.size.0 / 2.0)
+                    .max((p.y - region.center.y).abs() - region.size.1 / 2.0);
+            }
+            assert!(
+                worst <= 0.0,
+                "{id} escaped its enclosure by {worst:.1} units"
+            );
+        }
+    }
+
+    /// Free roam has to keep working: the same creature, given the whole
+    /// display, must still use most of it rather than being penned in by the
+    /// refactor.
+    #[test]
+    fn free_roam_still_roams() {
+        let region = dfcore::Region::centered((1512.0, 982.0));
+        let mut rt = make("drosophila", 4);
+        rt.place(dfcore::Vec2::ZERO);
+        let mut reach = 0.0f32;
+        for _ in 0..7200 {
+            rt.tick(1.0 / 60.0, region, None, None);
+            let p = rt.position();
+            reach = reach.max(p.x.abs().max(p.y.abs()));
+        }
+        assert!(
+            reach > 250.0,
+            "the fly stayed within {reach:.0} units of the origin - free roam is penned in"
+        );
+    }
+
+    /// A creature drawn *under* its own gravel would be the obvious way for
+    /// this to look broken, and the clearance is not obvious by inspection: the
+    /// fly's legs and wings reach several units *below* the body's nominal
+    /// plane. So the check measures every creature's true floor rather than
+    /// trusting a guess, and the enclosure has to clear the lowest of them.
+    #[test]
+    fn the_enclosure_is_drawn_behind_every_creature() {
+        let mut lowest_of_all = f32::MAX;
+        let mut report = String::new();
+        for id in CREATURE_IDS {
+            let mut rt = make(id, 4);
+            for _ in 0..60 {
+                rt.tick(
+                    1.0 / 60.0,
+                    dfcore::Region::centered((1512.0, 982.0)),
+                    None,
+                    None,
+                );
+            }
+            let g = rt.build(false);
+            let lowest = g
+                .body
+                .verts
+                .iter()
+                .map(|v| v.pos[2])
+                .fold(f32::MAX, f32::min);
+            report.push_str(&format!(" {id}={lowest:.2}"));
+            lowest_of_all = lowest_of_all.min(lowest);
+        }
+        assert!(
+            crate::habitatmesh::TOP_Z < lowest_of_all,
+            "the enclosure tops out at {:.2}, but the creatures reach down to:{report}",
+            crate::habitatmesh::TOP_Z
+        );
+    }
+
+    /// The swimmer gets water and the rest get soil — through the runtime, not
+    /// through a second table that could disagree with the bodies.
+    #[test]
+    fn each_creature_asks_for_the_right_enclosure() {
+        use dfcore::HabitatKind;
+        for id in CREATURE_IDS {
+            let want = if id == "koi" {
+                HabitatKind::Aquarium
+            } else {
+                HabitatKind::Terrarium
+            };
+            let got = HabitatKind::for_substrate(make(id, 1).substrate());
+            assert_eq!(got, want, "{id} was given a {}", got.label());
+        }
+    }
+
+    /// The creature has to notice a prop, not merely be allowed to bump into
+    /// one. Given a fixed attractor off to one side, it should end up closer to
+    /// it than an otherwise identical creature that was never told about it.
+    #[test]
+    fn an_attractor_pulls_the_creature_toward_it() {
+        let region = dfcore::Region::centered((900.0, 700.0));
+        let target = dfcore::Vec2::new(300.0, 220.0);
+        let mut nearest = (f32::MAX, f32::MAX);
+        for (k, curious) in [(0, false), (1, true)] {
+            let _ = k;
+            let mut rt = make("drosophila", 12);
+            rt.place(dfcore::Vec2::new(-300.0, -220.0));
+            let mut best = f32::MAX;
+            for _ in 0..5400 {
+                rt.tick(
+                    1.0 / 60.0,
+                    region,
+                    None,
+                    if curious { Some(target) } else { None },
+                );
+                let p = rt.position();
+                best = best.min(((p.x - target.x).powi(2) + (p.y - target.y).powi(2)).sqrt());
+            }
+            if curious {
+                nearest.1 = best;
+            } else {
+                nearest.0 = best;
+            }
+        }
+        assert!(
+            nearest.1 < nearest.0,
+            "curiosity made no difference: closest approach {:.0} with an attractor vs {:.0} without",
+            nearest.1,
+            nearest.0
+        );
     }
 }

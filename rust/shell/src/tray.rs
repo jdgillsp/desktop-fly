@@ -28,6 +28,8 @@ pub enum TrayCommand {
     SelectCreature(&'static str),
     /// Glass anatomy on/off: the "cyber" look versus the literal animal.
     ToggleGlass,
+    /// Confine the creature to a rendered enclosure, or let it have the screen.
+    ToggleHabitat,
     Quit,
 }
 
@@ -41,6 +43,7 @@ pub struct Tray {
     /// One check item per creature, in `CREATURE_IDS` order.
     creatures: Vec<(&'static str, CheckMenuItem)>,
     glass: CheckMenuItem,
+    habitat: CheckMenuItem,
     ids: Vec<(tray_icon::menu::MenuId, TrayCommand)>,
 }
 
@@ -118,7 +121,7 @@ fn fly_icon_rgba() -> Vec<u8> {
 
 impl Tray {
     /// `current` is the running creature's id; `data_info` its data line.
-    pub fn new(data_info: &str, current: &str, glass_on: bool) -> Option<Self> {
+    pub fn new(data_info: &str, current: &str, glass_on: bool, habitat_on: bool) -> Option<Self> {
         let menu = Menu::new();
 
         let title = MenuItem::new("DesktopFly", false, None);
@@ -130,6 +133,7 @@ impl Tray {
         let display = MenuItem::new("Move to Next Display", true, None);
         let shadow = MenuItem::new("Toggle Shadow", true, None);
         let glass = CheckMenuItem::new("Glass Anatomy (see the circuit)", true, glass_on, None);
+        let habitat = CheckMenuItem::new("Habitat (confine to a tank)", true, habitat_on, None);
         let mood = MenuItem::new("getting to know you", false, None);
         let forget = MenuItem::new("Forget Me (reset habituation)", true, None);
         let quit = MenuItem::new("Quit", true, None);
@@ -158,6 +162,7 @@ impl Tray {
             (display.id().clone(), TrayCommand::NextDisplay),
             (shadow.id().clone(), TrayCommand::ToggleShadows),
             (glass.id().clone(), TrayCommand::ToggleGlass),
+            (habitat.id().clone(), TrayCommand::ToggleHabitat),
             (forget.id().clone(), TrayCommand::ForgetMe),
             (quit.id().clone(), TrayCommand::Quit),
         ];
@@ -177,6 +182,7 @@ impl Tray {
             &display,
             &shadow,
             &glass,
+            &habitat,
             &PredefinedMenuItem::separator(),
             &mood,
             &forget,
@@ -200,12 +206,17 @@ impl Tray {
             mood,
             creatures,
             glass,
+            habitat,
             ids,
         })
     }
 
     pub fn set_glass(&self, on: bool) {
         self.glass.set_checked(on);
+    }
+
+    pub fn set_habitat(&self, on: bool) {
+        self.habitat.set_checked(on);
     }
 
     /// Reflect a creature switch: tick the right item, update the data line.

@@ -565,7 +565,12 @@ mod tests {
         let mut b = Mesh::default();
         build_frame(&mut a, &meshes, &fly, &fly.pose(), false);
         for _ in 0..12 {
-            fly.update(1.0 / 60.0, (1512.0, 982.0), None, None);
+            fly.update(
+                1.0 / 60.0,
+                dfcore::Region::centered((1512.0, 982.0)),
+                None,
+                None,
+            );
         }
         build_frame(&mut b, &meshes, &fly, &fly.pose(), false);
         let moved = a

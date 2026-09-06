@@ -87,6 +87,16 @@ pub fn save_glass_choice(glass: bool) {
     save_setting("glass", serde_json::Value::Bool(glass));
 }
 
+/// Whether the creature is confined to an enclosure. Off unless the user has
+/// turned it on, so an existing install is unchanged by the feature existing.
+pub fn load_habitat_choice() -> Option<bool> {
+    load_settings().get("habitat")?.as_bool()
+}
+
+pub fn save_habitat_choice(on: bool) {
+    save_setting("habitat", serde_json::Value::Bool(on));
+}
+
 pub fn load(creature_id: &str) -> Habituation {
     let Some(p) = state_path_for(creature_id) else {
         return Habituation::new();

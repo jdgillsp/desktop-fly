@@ -27,6 +27,7 @@
 //! startle drive, so the fish that bolted from your cursor on day one only
 //! flicks its tail by the end of the week.
 
+use dfcore::Region;
 use dfcore::creature::{Body, World};
 use dfcore::data::BrainPointsFile;
 use dfcore::env::thermal_tempo;
@@ -117,6 +118,9 @@ impl Runtime for KoiRuntime {
     fn creature(&self) -> &dyn Creature {
         &self.creature
     }
+    fn substrate(&self) -> dfcore::Substrate {
+        dfcore::creature::Body::substrate(&self.koi)
+    }
 
     /// No simulation, ever. The brain window keys off this and stays shut.
     fn sim(&self) -> Option<&dyn Sim> {
@@ -198,14 +202,15 @@ impl Runtime for KoiRuntime {
             || env.idle_secs > 1800.0;
     }
 
-    fn tick(&mut self, dt: f32, bounds: (f32, f32), cursor: Option<Vec2>) {
+    fn tick(&mut self, dt: f32, region: Region, cursor: Option<Vec2>, attractor: Option<Vec2>) {
         let drives = self.drives();
         // The body turns away from whatever startled it, which is not
         // necessarily where the cursor is now.
         let world = World {
-            bounds,
+            region,
             ledges: Vec::new(), // a swimmer has no terrain
             cursor: self.threat_at.or(cursor),
+            attractor,
         };
         self.koi.step(dt, &drives, &world);
     }
@@ -229,13 +234,9 @@ impl Runtime for KoiRuntime {
         self.koi = KoiBody::new(at, seed);
     }
 
-    fn moved_display(&mut self, bounds: (f32, f32)) {
-        let (w, h) = bounds;
+    fn moved_display(&mut self, region: Region) {
         let p = self.koi.pos;
-        let clamped = Vec2::new(
-            clamp(p.x, -w / 2.0 + 60.0, w / 2.0 - 60.0),
-            clamp(p.y, -h / 2.0 + 60.0, h / 2.0 - 60.0),
-        );
+        let clamped = region.clamp_inside(p, 60.0);
         if clamped != p {
             self.place(clamped);
         }
@@ -248,15 +249,16 @@ impl Runtime for KoiRuntime {
         )
     }
 
-    fn snapshot_pose(&mut self, _alt: f32, frames: u32, bounds: (f32, f32)) {
+    fn snapshot_pose(&mut self, _alt: f32, frames: u32, region: Region) {
         // Swim for a moment so the body is mid-beat rather than laid out
         // straight, then startle so the snapshot shows the C-start — the one
         // pose that says "fish" rather than "shape".
         let drives = BrainSignals::new();
         let world = World {
-            bounds,
+            region,
             ledges: Vec::new(),
             cursor: None,
+            attractor: None,
         };
         for _ in 0..frames.max(30) {
             self.koi.step(1.0 / 60.0, &drives, &world);
@@ -311,14 +313,14 @@ mod tests {
     /// A cursor sweeping past should startle it; a still one should not.
     #[test]
     fn a_fast_cursor_startles_it_and_a_still_one_does_not() {
-        let bounds = (1512.0, 982.0);
+        let bounds = Region::centered((1512.0, 982.0));
         let dt = 1.0 / 30.0;
 
         let mut calm = KoiRuntime::new(3);
         calm.place(Vec2::ZERO);
         for _ in 0..30 {
             calm.sense(&env_with_cursor(Vec2::new(60.0, 0.0), 12.0), dt);
-            calm.tick(dt, bounds, None);
+            calm.tick(dt, bounds, None, None);
         }
         assert!(
             calm.koi.state != KoiState::Dart,
@@ -331,7 +333,7 @@ mod tests {
         let mut darted = false;
         for _ in 0..30 {
             spooked.sense(&env_with_cursor(Vec2::new(x, 0.0), 12.0), dt);
-            spooked.tick(dt, bounds, None);
+            spooked.tick(dt, bounds, None, None);
             darted |= spooked.koi.state == KoiState::Dart;
             x -= 26.0;
         }
@@ -349,7 +351,7 @@ mod tests {
         let mut darted = false;
         for _ in 0..30 {
             rt.sense(&env_with_cursor(Vec2::new(x, 0.0), 12.0), dt);
-            rt.tick(dt, (1512.0, 982.0), None);
+            rt.tick(dt, Region::centered((1512.0, 982.0)), None, None);
             darted |= rt.koi.state == KoiState::Dart;
             x -= 26.0;
         }
@@ -361,7 +363,7 @@ mod tests {
         let mut rt = KoiRuntime::new(7);
         rt.place(Vec2::ZERO);
         rt.scare();
-        rt.tick(1.0 / 60.0, (1512.0, 982.0), None);
+        rt.tick(1.0 / 60.0, Region::centered((1512.0, 982.0)), None, None);
         assert_eq!(rt.koi.state, KoiState::Dart);
     }
 
@@ -379,7 +381,7 @@ mod tests {
             id: 1,
         }];
         rt.sense(&env, 1.0 / 30.0);
-        rt.tick(1.0 / 30.0, (1512.0, 982.0), None);
+        rt.tick(1.0 / 30.0, Region::centered((1512.0, 982.0)), None, None);
         // Nothing to assert on the body directly — the check is that `tick`
         // builds its own empty terrain, so the fish keeps swimming freely.
         assert_ne!(rt.koi.state, KoiState::Resting);
@@ -393,7 +395,7 @@ mod tests {
         env.idle_secs = 1200.0;
         for _ in 0..40 {
             rt.sense(&env, 1.0 / 30.0);
-            rt.tick(1.0 / 30.0, (1512.0, 982.0), None);
+            rt.tick(1.0 / 30.0, Region::centered((1512.0, 982.0)), None, None);
         }
         assert_eq!(rt.koi.state, KoiState::Resting);
     }

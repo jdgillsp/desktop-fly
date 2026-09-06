@@ -21,6 +21,7 @@
 use crate::lif::{LifParams, LifSim};
 use crate::roles::RoleManifest;
 use crate::signals::BrainSignals;
+use crate::habitat::Region;
 use crate::util::{Ledge, Vec2};
 
 /// Where a connectome came from, and under what terms.
@@ -587,9 +588,16 @@ pub enum Substrate {
 /// The world a body moves through, as the body sees it.
 #[derive(Debug, Clone)]
 pub struct World {
-    pub bounds: (f32, f32),
+    /// Where the world ends. In free roam this is the whole display, centred on
+    /// the scene origin — which is what every body used to assume outright. In
+    /// habitat mode it is the enclosure, which can sit anywhere.
+    pub region: Region,
     pub ledges: Vec<Ledge>,
     pub cursor: Option<Vec2>,
+    /// Something in the enclosure worth going to look at, if anything is. The
+    /// bodies never learn what it is — a flake, a ball — only that it is there,
+    /// which keeps prop logic out of four separate animals.
+    pub attractor: Option<Vec2>,
 }
 
 /// What the body reports back — including, crucially, proprioception.
@@ -621,7 +629,8 @@ impl Body for crate::body::Fly {
     }
     fn step(&mut self, dt: f32, drives: &BrainSignals, world: &World) {
         self.terrain = world.ledges.clone();
-        self.update(dt, world.bounds, world.cursor, Some(*drives));
+        self.attractor = world.attractor;
+        self.update(dt, world.region, world.cursor, Some(*drives));
     }
     fn position(&self) -> Vec2 {
         self.pos

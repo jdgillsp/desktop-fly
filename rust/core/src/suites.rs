@@ -204,7 +204,13 @@ pub fn sim_test(data: &BrainData, seed: u64) -> Outcome {
 // behaviortest — 17 end-to-end sim -> body checks
 // ---------------------------------------------------------------------------
 
-const BOUNDS: (f32, f32) = (1512.0, 982.0);
+/// The suite runs in free roam — the whole display, centred on the origin.
+/// Spelled out as a `Region` so it is obvious that these ground-truth numbers
+/// are the *unconfined* ones; a habitat is a different, smaller world.
+const BOUNDS: crate::habitat::Region = crate::habitat::Region {
+    center: Vec2::ZERO,
+    size: (1512.0, 982.0),
+};
 const DT: f32 = 1.0 / 60.0;
 
 struct Harness<'a> {

@@ -49,6 +49,15 @@ otherwise.
   window colours authored elements cool. Its suites:
   `dfcore --creature salticid --simtest --behaviortest`. The fly's suite
   output must stay byte-identical — diff it after touching `lif.rs`.
+- **Habitat mode** (`HABITAT_PLAN.md`, off by default; `--habitat` or the tray):
+  an optional rendered enclosure — aquarium for a `Swimmer`, terrarium for
+  everything else — that confines the creature to a `Region` of the screen and
+  gives it props to push around. `World` carries a `Region` (centre **and**
+  size) rather than a bare size, so a body can no longer assume the world is
+  centred on the origin; `Region::centered` is free roam and is asserted to
+  reproduce the old arithmetic exactly. `Substrate`'s first real consumer.
+  Props are never clickable — the overlay's click-through contract is why; they
+  react to the creature and to cursor *proximity* instead.
 - Coding senses are content-blind by construction: `Foreground` is an enum
   from the process name, and build results arrive only via
   `desktopfly notify pass|fail` over a named pipe. Never add log tailing or

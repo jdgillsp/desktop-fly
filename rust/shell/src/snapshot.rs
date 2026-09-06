@@ -32,6 +32,7 @@ pub fn render_to_png(
     walking_frames: u32,
     glass: bool,
     zoom: f32,
+    habitat: bool,
 ) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         #[cfg(target_os = "windows")]
@@ -61,9 +62,39 @@ pub fn render_to_png(
     // Pose the creature and build its geometry through the generic path. The
     // circuit is run for real inside `snapshot_pose`, so the glass body shows
     // real activity rather than a decorative sparkle.
-    rt.snapshot_pose(alt, walking_frames, (width as f32, height as f32));
+    // The enclosure is the world's edge when it exists, so the creature is
+    // posed inside the tank rather than across the whole frame. Building it
+    // here — through the same `habitatmesh::build` the desktop uses — is what
+    // makes habitat mode verifiable without a screen.
+    let enclosure = habitat.then(|| {
+        let kind = dfcore::HabitatKind::for_substrate(rt.substrate());
+        let mut h = dfcore::Habitat::new(
+            kind,
+            dfcore::Region::centered((width as f32 * 0.8, height as f32 * 0.8)),
+            dfcore::DEFAULT_SEED,
+        );
+        // A moment of life, so the props are where a running app would have
+        // them rather than at their spawn points.
+        for _ in 0..120 {
+            h.step(1.0 / 60.0, rt.position(), None);
+        }
+        h
+    });
+    let region = match &enclosure {
+        Some(h) => h.region,
+        None => dfcore::Region::centered((width as f32, height as f32)),
+    };
+    rt.snapshot_pose(alt, walking_frames, region);
     let geometry = rt.build(glass);
-    let frame = geometry.body.clone();
+    let mut frame = crate::mesh::Mesh::default();
+    if let Some(h) = &enclosure {
+        crate::habitatmesh::build(&mut frame, h);
+    }
+    let base = frame.verts.len() as u32;
+    frame.verts.extend_from_slice(&geometry.body.verts);
+    frame
+        .indices
+        .extend(geometry.body.indices.iter().map(|i| i + base));
     let neuron_mesh = geometry
         .neurons
         .filter(|m| !m.indices.is_empty())
