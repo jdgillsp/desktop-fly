@@ -14,6 +14,7 @@
 //! names a species.
 
 mod brain;
+mod camera;
 mod flybody;
 mod habitatmesh;
 mod koibody;
@@ -35,6 +36,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dfcore::env::{Rect, ScreenSpace, Senses};
+use camera::Camera;
 use dfcore::{Habitat, HabitatKind, Region, Vec2};
 use dfplatform::HostSenses;
 
@@ -180,9 +182,15 @@ struct App {
     /// region the creature sees is `Region::centered(display)` — bit-identical
     /// to the arithmetic the bodies did before habitats existed.
     habitat: Option<Habitat>,
-    /// This frame's composed geometry: the enclosure, then the creature on top
-    /// of it. One mesh, so the renderer needs no third buffer.
+    /// This frame's composed geometry: the tank behind, the creature, then the
+    /// front glass. One mesh and one draw, so the renderer needs no extra
+    /// buffers — index order is draw order.
     frame_mesh: mesh::Mesh,
+    /// Scratch for the front pane, built separately because it has to be
+    /// appended *after* the creature.
+    front_mesh: mesh::Mesh,
+    /// The grab chord is down and the user is repositioning the enclosure.
+    grabbing: bool,
 
     gpu: Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)>,
     brain: Option<brain::BrainView>,
@@ -220,6 +228,8 @@ impl App {
             last_env_cursor: None,
             habitat: None,
             frame_mesh: mesh::Mesh::default(),
+            front_mesh: mesh::Mesh::default(),
+            grabbing: false,
             gpu: None,
             brain: None,
             brain_window: None,
@@ -575,6 +585,16 @@ impl App {
         }
     }
 
+    /// Where the camera is. Straight down in free roam, which is what keeps
+    /// the creature registered to real window edges; tilted inside an
+    /// enclosure, where nothing is registered to anything (camera.rs).
+    fn camera(&self) -> Camera {
+        match self.habitat {
+            Some(_) => camera::habitat(),
+            None => Camera::TopDown,
+        }
+    }
+
     /// The world's edge this frame: the enclosure if there is one, otherwise
     /// the whole display. Every other part of the app asks this rather than
     /// reaching for `space.size()`, so there is one answer to "where does the
@@ -594,7 +614,18 @@ impl App {
             return;
         }
         let kind = HabitatKind::for_substrate(self.rt.substrate());
-        let region = dfcore::default_region(self.space.size());
+        // The tank is placed by where it will *appear*, not by its ground
+        // rectangle: under a tilted, yawed camera those are different shapes,
+        // and a ground-space placement would hang a corner off the screen.
+        let c = camera::habitat();
+        let display = self.space.size();
+        let want = (
+            (display.0 * 0.40).clamp(320.0, 720.0),
+            (display.1 * 0.44).clamp(240.0, 520.0),
+        );
+        let (lo, hi) = (habitatmesh::FLOOR_Z, habitatmesh::top_z());
+        let size = c.fit_size(display, want, lo, hi, 24.0);
+        let region = c.place_lower_right(display, size, lo, hi, 24.0);
         match &mut self.habitat {
             // Same kind: keep the props where they are and just move the tank,
             // so switching displays does not reset a ball the user watched the
@@ -788,27 +819,60 @@ impl App {
             }
 
             if self.args.diag && self.frames < 3 { eprintln!("[diag] A: about to transduce"); }
-            if self.habitat.is_some() && !env.ledges.is_empty() {
+            if self.habitat.is_some() {
+                // Two corrections inside a tank.
+                //
                 // Window edges are terrain for a creature loose on the desktop.
-                // Inside a tank they are not: a fly that latched onto the top of
-                // a browser window would be standing on something that is not in
-                // its enclosure. Everything else about the senses — looms,
-                // clicks, the cursor — still applies, because the user leaning
-                // over the glass is exactly what those channels are for.
+                // In an enclosure they are not: a fly that latched onto the top
+                // of a browser window would be standing on something that is not
+                // in its tank.
+                //
+                // And the cursor arrives in *screen* coordinates, which under
+                // the tilted camera are no longer ground coordinates. Without
+                // un-projecting it the creature flees a pointer that is nowhere
+                // near where the user can see it — and wrongly by more the
+                // further up the tank the pointer is. Everything else about the
+                // senses still applies: someone leaning over the glass is
+                // exactly what those channels are for.
+                let cam = self.camera();
                 let mut penned = env.clone();
                 penned.ledges.clear();
+                penned.cursor = penned.cursor.map(|c| cam.unproject_ground(c));
+                for c in penned.clicks.iter_mut() {
+                    *c = cam.unproject_ground(*c);
+                }
                 self.rt.sense(&penned, sense_dt);
+                self.last_env_cursor = penned.cursor;
+                self.grabbing = env.grab_held;
             } else {
                 self.rt.sense(&env, sense_dt);
+                self.last_env_cursor = env.cursor;
+                self.grabbing = false;
             }
             if self.args.diag && self.frames < 3 { eprintln!("[diag] B: transduced"); }
-            self.last_env_cursor = env.cursor;
         }
 
         // The brain at a true 1 kHz, decoupled from the frame rate, then the
         // body once — both inside the runtime, whichever creature it is.
         if self.args.diag && self.frames < 3 { eprintln!("[diag] C: stepping creature"); }
         let at_last_frame = self.rt.position();
+        // Repositioning: while the chord is held the tank follows the pointer.
+        // Deliberately not a click-and-drag — the overlay never takes a click
+        // (HABITAT_PLAN.md §2), and a held modifier gets the same "grab and
+        // move" feel without putting a hole in the desktop.
+        if self.grabbing {
+            if let (Some(at), Some(h)) = (self.last_env_cursor, self.habitat.as_mut()) {
+                let want = Region::new(at, h.region.size);
+                h.reshape(camera::habitat().clamp_on_screen(
+                    want,
+                    self.space.size(),
+                    habitatmesh::FLOOR_Z,
+                    habitatmesh::top_z(),
+                    12.0,
+                ));
+            }
+        }
+
         let region = self.region();
         // The enclosure moves first, so the creature reacts to where the props
         // are now rather than to where they were a frame ago.
@@ -826,6 +890,11 @@ impl App {
         let (glass, shadows) = (self.args.glass, self.args.shadows);
         let hidden = self.hidden_for_fullscreen;
         let at = self.rt.position();
+        // Read everything the composition needs off `self` before `build`
+        // borrows the runtime for the rest of the frame.
+        let cam = self.camera();
+        let lift_hint = self.rt.vertical_hint();
+        let grabbing = self.grabbing;
         let geometry = self.rt.build(glass);
         if diag { eprintln!("[diag] F: geometry built"); }
 
@@ -833,24 +902,62 @@ impl App {
         // format, so they go to the GPU as a single mesh rather than as a third
         // buffer and a second draw. The tank is written first and sits below the
         // creature in z, so depth ordering matches drawing order either way.
-        let (body, shadow_from): (&mesh::Mesh, u32) = match &self.habitat {
+        // Compose the frame. Index order is draw order in a single draw call,
+        // so the tank goes in behind the creature and the front glass after it,
+        // and the pane blends over the animal exactly as glass should. The
+        // creature's own index range is handed to the renderer so the shadow
+        // pass covers the animal and not the furniture.
+        let (body, creature_range, ground_z) = match &self.habitat {
             Some(h) => {
-                habitatmesh::build(&mut self.frame_mesh, h);
+                let view = cam.view_dir();
+                habitatmesh::build_back(&mut self.frame_mesh, h, view);
+                habitatmesh::build_front(&mut self.front_mesh, h, view, grabbing);
+
+                // The creature is lifted into the tank: standing on the
+                // substrate, or — for a swimmer — floating at its own depth,
+                // which the straight-down view could only ever fake with size.
+                let lift = habitatmesh::creature_lift(h.kind, lift_hint);
+                let start = self.frame_mesh.indices.len() as u32;
                 let base = self.frame_mesh.verts.len() as u32;
-                let split = self.frame_mesh.indices.len() as u32;
-                self.frame_mesh.verts.extend_from_slice(&geometry.body.verts);
+                self.frame_mesh
+                    .verts
+                    .extend(geometry.body.verts.iter().map(|v| {
+                        let mut v = *v;
+                        v.pos[2] += lift;
+                        v
+                    }));
                 self.frame_mesh
                     .indices
                     .extend(geometry.body.indices.iter().map(|i| i + base));
-                (&self.frame_mesh, split)
+                let end = self.frame_mesh.indices.len() as u32;
+
+                let fbase = self.frame_mesh.verts.len() as u32;
+                self.frame_mesh.verts.extend_from_slice(&self.front_mesh.verts);
+                self.frame_mesh
+                    .indices
+                    .extend(self.front_mesh.indices.iter().map(|i| i + fbase));
+                (&self.frame_mesh, start..end, habitatmesh::FLOOR_Z + 0.9)
             }
-            None => (geometry.body, 0),
+            None => {
+                let n = geometry.body.indices.len() as u32;
+                (geometry.body, 0..n, -0.5)
+            }
         };
 
         if let (Some(r), Some(s)) = (self.renderer.as_mut(), self.surface.as_ref()) {
             if !hidden {
                 let t0 = Instant::now();
-                r.render(s, body, geometry.neurons, shadows, shadow_from);
+                r.render(
+                    s,
+                    &render::Frame {
+                        mesh: body,
+                        neurons: geometry.neurons,
+                        shadows,
+                        creature: creature_range,
+                        camera: cam,
+                        ground_z,
+                    },
+                );
                 if diag {
                     eprintln!(
                         "[diag] render took {:?}, {} verts, creature at ({:.0},{:.0})",

@@ -1,7 +1,7 @@
 # Habitat mode: an optional enclosure
 
-**Status:** v1 implemented and verified on Windows. Branch `habitat-mode`, not
-pushed, not merged.
+**Status:** v2 (isometric) implemented and verified on Windows. Branch
+`habitat-isometric`, off `habitat-mode`. Not pushed, not merged.
 
 An opt-in rendered container — an aquarium for the koi, a terrarium for the
 arthropods and the worm — that bounds the creature to a region of the screen
@@ -45,15 +45,92 @@ check that:
   `--simtest --behaviortest` for the fly and for the spider, **byte-identical**.
 - `--snapshot --creature koi` is byte-identical to the pre-change binary.
 
+## 1a. The camera, and why it is habitat-only
+
+Jesse's call after seeing v1: the top-down plate should be an isometric tank —
+rectangular, movable, and better looking.
+
+Tilting the camera has one consequence that decides everything else. The app has
+always looked straight down, and that is **not** an aesthetic choice: it is what
+lets the fly stand on the top edge of *your* browser window. `ScreenSpace` maps a
+real window's top edge to a scene y, the fly walks to that y, and it lands on the
+real pixels of the real window because the projection is identity in x and y.
+Tilt the camera and the fly walks along a line that sits on nothing.
+
+Inside an enclosure none of that applies — the tank is not registered to anything
+on the desktop, and window ledges are already suppressed there. So the tilt is
+**habitat-only**, and `camera.rs` is the seam:
+
+| | free roam | habitat |
+|---|---|---|
+| camera | `TopDown` | `Tilted { pitch: 0.90, yaw: 0.60 }` (~52 deg tilt, ~34 deg turn) |
+| ground to screen | identity | a 2x2 rotate-and-squash |
+| height to screen | invisible | rises up the screen |
+| eye distance | 300 (unchanged) | 1500 |
+| far plane | 600 (unchanged) | 4000 |
+
+### Yaw is not decoration
+
+The first attempt tilted without yawing, on the reasoning that a screen-aligned
+tank keeps "right on screen" meaning "right in the tank". It looked wrong, and
+the reason is structural: **a wall at constant x has no extent in screen x when
+the yaw is zero**, so the side panes project to bare lines. The result was a
+backdrop with a floor, not a container. Yaw is what turns one side wall toward
+the viewer and makes the box a box.
+
+The cost is real and worth stating: the ground's axes are no longer the
+screen's, so every ground/screen conversion goes through the matrix rather than
+a scalar, and the cursor correction is a rotation rather than a stretch.
+
+`Camera::TopDown` reproduces the original matrices exactly — same view matrix,
+same view direction, same far plane — and a test asserts each of those, so free
+roam is untouched by the whole feature. Pointing free roam at a tilted camera
+later is a one-line change plus a decision about what to do with ledges.
+
+The projection stays **orthographic**. Perspective would make the creature's
+apparent size depend on where it stood, and constant apparent size across
+displays is a decision the port already made (PORT_PLAN.md section 8).
+
+### Three things the tilt required
+
+- **The view direction is no longer +z.** The shader had it hard-coded, which is
+  right only looking straight down; specular and rim light were wrong the moment
+  the camera moved. It is a uniform now.
+- **The cursor is in screen space, not ground space.** Un-projecting it means
+  inverting the 2x2 ground-to-screen block. Without it the creature flees a
+  pointer that is nowhere near where the user sees it.
+- **Placement is a screen question, not a ground one**, and it moved out of
+  `core` because of that: under a tilted, yawed camera the ground rectangle and
+  its screen footprint are different shapes, and the tank's *walls* occupy
+  screen height the ground rectangle knows nothing about. `Camera` now owns
+  `screen_offsets`, `place_lower_right`, `clamp_on_screen` and `fit_size`, all
+  built from projecting the eight corners of the box — there is no scalar that
+  stands in for the answer once yaw is involved.
+
+The camera's `view_dir` is read straight off the view matrix (its third row)
+rather than re-derived from the angles. The rotation part is orthonormal, so its
+inverse is its transpose, and that is one fewer place for a sign to be wrong.
+
+### What the tilt bought
+
+The koi's `depth` (0 deep, 1 surfaced) has always existed but could only be
+expressed as *apparent size*, because a straight-down camera cannot show a fish
+rising. In a tank it is a real height in the water column, via
+`Runtime::vertical_hint`. The fly's flight altitude needed nothing at all — it
+was already real z in the geometry, and simply becomes visible.
+
 ## 2. What was built
 
 | piece | file |
 |---|---|
-| `Region`, `Habitat`, `Prop`, prop physics, focus | `rust/core/src/habitat.rs` |
+| `Region`, `Habitat`, `Prop`, prop physics, focus, placement | `rust/core/src/habitat.rs` |
+| The camera seam and the ground/screen mapping | `rust/shell/src/camera.rs` |
 | `World.region` / `World.attractor` | `rust/core/src/creature.rs` |
 | Curiosity steering (all four bodies) | `body.rs`, `spider.rs`, `worm.rs`, `koi.rs` |
 | The tank, drawn | `rust/shell/src/habitatmesh.rs` |
-| `Runtime::tick(dt, region, cursor, attractor)`, `Runtime::substrate()` | `rust/shell/src/runtime.rs` |
+| `Runtime::tick(dt, region, cursor, attractor)`, `substrate()`, `vertical_hint()` | `rust/shell/src/runtime.rs` |
+| `Frame`, the camera-aware draw | `rust/shell/src/render.rs` |
+| The grab chord | `rust/platform/src/windows_senses.rs` |
 | Toggle, composition, ledge suppression | `rust/shell/src/main.rs` |
 | Menu item, persisted setting | `tray.rs`, `persist.rs` |
 
@@ -139,12 +216,21 @@ Confirmed live: `ledges 8` in free roam, `ledges 0` in a terrarium.
 ## 3. Using it
 
 ```
-cargo run --release -- --habitat
-cargo run --release -- --habitat --creature koi
+target\release\desktopfly.exe --habitat
+target\release\desktopfly.exe --habitat --creature koi
 ```
 
 Or tick **Habitat (confine to a tank)** in the tray menu, which persists the
-choice. The tank is rebuilt when the creature changes (a koi in a terrarium
+choice.
+
+**To move the tank, hold Ctrl+Shift** — it follows the pointer until you let go,
+and its rim lights up while you hold it. Deliberately not a click-and-drag: the
+overlay never takes a click, and a held chord gets the same grab-and-move feel
+without putting a hole in the desktop. The modifiers are read with the same
+`GetAsyncKeyState` poll the mouse buttons already use, and modifier keys carry no
+typed content, so this stays inside the content-blind rule the other senses
+follow. The tank is clamped in *screen* terms, so its walls cannot climb off the
+top of the display. The tank is rebuilt when the creature changes (a koi in a terrarium
 would be the wrong enclosure) and moves with the creature across displays,
 keeping its props where they were.
 
@@ -154,41 +240,60 @@ screenshot.
 
 ## 4. Verification
 
-- 196 tests pass (`cargo test --workspace`); 20 of them are new and specific to
-  this feature.
+- **201 tests pass** (`cargo test --workspace --exclude dfplatform`); ~30 of them
+  are new and specific to this feature.
+- Both ground-truth suites **byte-identical** to the parent of the habitat work:
+  `--simtest --behaviortest` for the fly and for the spider.
+- `--snapshot --creature koi` **byte-identical** to the pre-habitat binary, so
+  free roam renders exactly as it did.
 - `every_creature_stays_inside_its_enclosure` runs each of the four creatures
-  for a simulated minute in a **small, off-centre** tank with a cursor sweeping
-  through it, and asserts none of them ever crosses a wall. Off-centre matters:
-  a creature that merely drifts toward (0, 0) would pass a centred test by
-  accident.
+  for a simulated minute in a small, **off-centre** tank with a cursor sweeping
+  through it. Off-centre matters: a creature that merely drifts toward (0, 0)
+  would pass a centred test by accident.
 - `free_roam_still_roams` asserts the fly given the whole display still uses it,
   so the refactor cannot pen the creature in by stealth.
-- Both ground-truth suites byte-identical to the parent commit (see §1).
-- Live on Windows, 2560×1440: `habitat: aquarium at (876,-436), 760x520`,
-  koi placed inside it, 29–30 fps, ledges suppressed.
+- Live on Windows, 2560x1440: `habitat: aquarium at (280,-1028), 720x520`, koi
+  cruising inside it at depth 0.31, 29 fps.
+- Offscreen renders of both enclosures through the real camera and the real mesh
+  builders (`--snapshot --habitat`), which is how the look was judged rather
+  than by eyeballing the live overlay.
+
+### Two notes on how this was checked
+
+The `dfplatform` named-pipe test fails while a copy of DesktopFly is running:
+the app owns `\\.\pipe\desktopfly-notify`, so the test's `send()` reaches the
+app instead of the test's own server. Environmental, and unrelated to this work
+— the only platform change here is eleven lines in `windows_senses.rs`.
+
+A running copy also **holds `target/release/desktopfly.exe`**, so `cargo build`
+fails to replace it and silently leaves a stale binary behind. That produced two
+rounds of "the change had no effect" before it was spotted. Builds during this
+work went to `target-iso/` to sidestep it.
 
 ## 5. Open — for Jesse
 
-1. **Free-floating vs window-anchored.** v1 is free-floating and screen-anchored:
-   the tank sits in the lower-right of the display. Anchoring it to a specific
-   *window* (so the tank rides your editor) is the more interesting idea and is
-   a bigger change — it needs a window to track, a policy for when that window
-   is minimised, closed or moved off-screen, and it interacts badly with the
-   ledge sense described above. `Region` is the right seam for it either way;
-   nothing about the design forecloses it.
-2. **Position and size are not user-adjustable.** `default_region` picks 42% ×
-   46% of the display, clamped, in the lower-right corner. Dragging it is the
-   obvious next ask and is blocked on the click-through constraint — it would
-   need a modifier-key grab or a tray-driven "move to corner" cycle rather than
-   a drag.
-3. **Prop set is fixed and unsaved.** Where the ball ends up is lost on restart.
-   Persisting prop positions alongside the habituation state would be a small
-   addition to `persist.rs`.
-4. **The koi renders small and pale**, in a habitat and out of one — verified
+1. **Free roam is still top-down**, deliberately: tilting it would break the
+   fly standing on your real window edges. `Camera` is the seam if that trade
+   ever looks worth making — it is a one-line change plus a decision about what
+   ledges should mean.
+2. **Pitch and yaw are constants** (`DEFAULT_PITCH`, `DEFAULT_YAW` in
+   `camera.rs`). Easy to tune, not exposed in the UI.
+3. **The tank cannot be resized**, only moved. `fit_size` already picks the
+   largest that fits the display, so a size control is a small addition.
+4. **Prop positions are not saved.** Where the ball ends up is lost on restart;
+   persisting them alongside the habituation state is a small change to
+   `persist.rs`.
+5. **The koi renders small and pale**, in a habitat and out of one — verified
    byte-identical to the pre-habitat build, so this is pre-existing on
-   `koi-creature`, not something this branch caused. Worth a look separately;
-   see also KOI_PLAN.md §5 on the dorsal fin.
-5. **No `--behaviortest` scenarios for habitat mode.** Same reason as the koi's:
+   `koi-creature` and not caused by this work. It is more noticeable in a tank,
+   where there is scenery to compare it against. Worth a look separately; see
+   also KOI_PLAN.md section 5 on the dorsal fin.
+6. **No caustics, no refraction, no per-material shader.** The glass is a baked
+   fresnel on a single lit pipeline. Adding a second pipeline for water would
+   buy a lot visually and is the obvious next step if this is worth more effort.
+7. **`snapshot.rs` trips clippy's argument-count lint** (9/7). It was already
+   over at 8 before this work; the habitat flag made it worse rather than
+   causing it. `render.rs` got the same treatment done properly, via `Frame`.
+8. **No `--behaviortest` scenarios for habitat mode.** Same reason as the koi's:
    that harness is built around a circuit driving a body, and confinement is a
-   property of the body-plus-world. The unit tests cover it; extending the
-   harness would cover it in the same place as everything else.
+   property of the body-plus-world. The unit tests cover it.

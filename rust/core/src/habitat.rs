@@ -408,22 +408,10 @@ impl Habitat {
     }
 }
 
-/// Default placement: a tank in the lower-right of the display, big enough to
-/// be a home and small enough to leave the screen usable. Free-floating rather
-/// than anchored to a window — see HABITAT_PLAN.md for why that decision is
-/// still open.
-pub fn default_region(display: (f32, f32)) -> Region {
-    let w = clamp(display.0 * 0.42, 320.0, 760.0);
-    let h = clamp(display.1 * 0.46, 240.0, 520.0);
-    let margin = 24.0;
-    Region::new(
-        Vec2::new(
-            display.0 / 2.0 - w / 2.0 - margin,
-            -(display.1 / 2.0) + h / 2.0 + margin,
-        ),
-        (w, h),
-    )
-}
+// Where a tank goes on the screen is a *camera* question, not a geometry one:
+// under a tilted, yawed view the ground rectangle and its screen footprint are
+// different shapes. That logic lives in the shell's `camera` module, next to the
+// projection it depends on.
 
 #[cfg(test)]
 mod tests {
@@ -614,14 +602,4 @@ mod tests {
         assert_eq!(h.props[i].pos.y, at.y);
     }
 
-    #[test]
-    fn the_default_tank_fits_on_the_display() {
-        for display in [(1512.0, 982.0), (3840.0, 2160.0), (1280.0, 720.0)] {
-            let r = default_region(display);
-            let screen = Region::centered(display);
-            assert!(!screen.outside(r.min(), 0.0), "tank hangs off the display");
-            assert!(!screen.outside(r.max(), 0.0), "tank hangs off the display");
-            assert!(r.size.0 >= 320.0 && r.size.1 >= 240.0);
-        }
-    }
 }

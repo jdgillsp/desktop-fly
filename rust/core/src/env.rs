@@ -174,6 +174,11 @@ pub struct EnvSnapshot {
     /// Whether a fullscreen app or presentation is running; the overlay should
     /// hide rather than fight it. No macOS equivalent is needed.
     pub fullscreen_app_active: bool,
+    /// The "grab" chord (Ctrl+Shift) is held: the user is repositioning the
+    /// enclosure. Modifier keys only — they carry no typed content, which is
+    /// what keeps this on the right side of the content-blind rule the other
+    /// senses follow. Nothing reads it outside habitat mode.
+    pub grab_held: bool,
     /// What kind of application is in front — an enum, never a name or a
     /// title, so nothing about *what* the user is doing can leak downstream
     /// (SPIDER_PLAN.md §5).

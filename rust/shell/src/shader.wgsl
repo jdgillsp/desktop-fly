@@ -7,6 +7,10 @@ struct Uniforms {
     view_proj: mat4x4<f32>,
     light_dir: vec4<f32>,
     params: vec4<f32>,   // x = ambient, y = shadow strength, z = ground z, w = unused
+    // Direction from the scene toward the camera, in world space. Used to be
+    // assumed to be +z, which is only true looking straight down; a tilted
+    // habitat camera makes specular and rim light wrong without it.
+    view_dir: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -38,8 +42,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let l = normalize(u.light_dir.xyz);
     let lambert = max(dot(n, l), 0.0);
 
-    // Half-vector specular with the view along +z (orthographic camera).
-    let view = vec3<f32>(0.0, 0.0, 1.0);
+    // Half-vector specular. The camera is orthographic, so one view vector
+    // does for the whole frame.
+    let view = normalize(u.view_dir.xyz);
     let half_v = normalize(l + view);
     let spec = pow(max(dot(n, half_v), 0.0), 24.0) * 0.35;
 

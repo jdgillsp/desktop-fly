@@ -121,6 +121,11 @@ impl Runtime for KoiRuntime {
     fn substrate(&self) -> dfcore::Substrate {
         dfcore::creature::Body::substrate(&self.koi)
     }
+    /// The koi's `depth` — 0 deep, 1 surfaced — which the top-down view could
+    /// only ever express as apparent size. In a tank it is a real height.
+    fn vertical_hint(&self) -> f32 {
+        self.koi.depth
+    }
 
     /// No simulation, ever. The brain window keys off this and stays shut.
     fn sim(&self) -> Option<&dyn Sim> {

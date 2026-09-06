@@ -16,6 +16,7 @@ struct Uniforms {
     view_proj: math::Mat4,
     light_dir: [f32; 4],
     params: [f32; 4],
+    view_dir: [f32; 4],
 }
 
 /// Renders one frame of the creature into `path`, on a checkerboard so alpha
@@ -63,14 +64,29 @@ pub fn render_to_png(
     // circuit is run for real inside `snapshot_pose`, so the glass body shows
     // real activity rather than a decorative sparkle.
     // The enclosure is the world's edge when it exists, so the creature is
-    // posed inside the tank rather than across the whole frame. Building it
-    // here — through the same `habitatmesh::build` the desktop uses — is what
-    // makes habitat mode verifiable without a screen.
+    // posed inside the tank rather than across the whole frame. Built here
+    // through the same functions and the same camera the desktop uses, which is
+    // what makes habitat mode verifiable without a screen.
+    let cam = if habitat {
+        crate::camera::habitat()
+    } else {
+        crate::camera::Camera::TopDown
+    };
     let enclosure = habitat.then(|| {
         let kind = dfcore::HabitatKind::for_substrate(rt.substrate());
+        let display = (width as f32, height as f32);
+        // The largest tank that fits the frame, centred, through the same
+        // fitting the desktop uses.
+        let size = cam.fit_size(
+            display,
+            (width as f32 * 1.2, height as f32 * 1.2),
+            crate::habitatmesh::FLOOR_Z,
+            crate::habitatmesh::top_z(),
+            10.0,
+        );
         let mut h = dfcore::Habitat::new(
             kind,
-            dfcore::Region::centered((width as f32 * 0.8, height as f32 * 0.8)),
+            dfcore::Region::new(dfcore::Vec2::ZERO, size),
             dfcore::DEFAULT_SEED,
         );
         // A moment of life, so the props are where a running app would have
@@ -85,16 +101,30 @@ pub fn render_to_png(
         None => dfcore::Region::centered((width as f32, height as f32)),
     };
     rt.snapshot_pose(alt, walking_frames, region);
+    let hint = rt.vertical_hint();
     let geometry = rt.build(glass);
     let mut frame = crate::mesh::Mesh::default();
+    let mut front = crate::mesh::Mesh::default();
+    let mut lift = 0.0;
     if let Some(h) = &enclosure {
-        crate::habitatmesh::build(&mut frame, h);
+        crate::habitatmesh::build_back(&mut frame, h, cam.view_dir());
+        crate::habitatmesh::build_front(&mut front, h, cam.view_dir(), false);
+        lift = crate::habitatmesh::creature_lift(h.kind, hint);
     }
     let base = frame.verts.len() as u32;
-    frame.verts.extend_from_slice(&geometry.body.verts);
+    frame.verts.extend(geometry.body.verts.iter().map(|v| {
+        let mut v = *v;
+        v.pos[2] += lift;
+        v
+    }));
     frame
         .indices
         .extend(geometry.body.indices.iter().map(|i| i + base));
+    let fbase = frame.verts.len() as u32;
+    frame.verts.extend_from_slice(&front.verts);
+    frame
+        .indices
+        .extend(front.indices.iter().map(|i| i + fbase));
     let neuron_mesh = geometry
         .neurons
         .filter(|m| !m.indices.is_empty())
@@ -304,12 +334,22 @@ pub fn render_to_png(
         &ubuf,
         0,
         bytemuck::bytes_of(&Uniforms {
-            view_proj: math::mul(
-                math::ortho(half_w, half_h, 1.0, 600.0),
-                math::translate(0.0, 0.0, -300.0),
-            ),
+            view_proj: math::mul(math::ortho(half_w, half_h, 1.0, cam.far()), cam.view()),
             light_dir: [0.30, 0.62, 0.72, 0.0],
-            params: [0.42, 0.22, -0.5, 0.0],
+            params: [
+                0.42,
+                0.22,
+                if habitat {
+                    crate::habitatmesh::FLOOR_Z + 0.9
+                } else {
+                    -0.5
+                },
+                0.0,
+            ],
+            view_dir: {
+                let v = cam.view_dir();
+                [v[0], v[1], v[2], 0.0]
+            },
         }),
     );
 

@@ -51,6 +51,13 @@ pub trait Runtime {
     /// `Substrate` is defined, so there is no second answer to drift from it.
     /// Habitat mode is the first thing to branch on it: a swimmer gets water.
     fn substrate(&self) -> dfcore::Substrate;
+    /// Where in an enclosure's vertical space this creature currently is:
+    /// 0 on the floor, 1 just under the surface. Only a swimmer has an opinion;
+    /// a walker is on the ground and a flier's altitude is already in its own
+    /// geometry. Ignored entirely in free roam.
+    fn vertical_hint(&self) -> f32 {
+        0.0
+    }
 
     fn sim(&self) -> Option<&dyn Sim>;
     fn sim_mut(&mut self) -> Option<&mut dyn Sim>;
@@ -458,15 +465,18 @@ mod tests {
         );
     }
 
-    /// A creature drawn *under* its own gravel would be the obvious way for
-    /// this to look broken, and the clearance is not obvious by inspection: the
-    /// fly's legs and wings reach several units *below* the body's nominal
-    /// plane. So the check measures every creature's true floor rather than
-    /// trusting a guess, and the enclosure has to clear the lowest of them.
+    /// A creature standing in its own gravel, or clipping out through the rim,
+    /// is the obvious way for this to look broken — and the clearance is not
+    /// obvious by inspection, because a body's *nominal* plane is z = 0 but its
+    /// geometry is not: the fly's legs and wings reach several units below it.
+    ///
+    /// So this measures each creature's true extent, applies the same lift the
+    /// frame composition applies, and asserts the result is inside the tank.
     #[test]
-    fn the_enclosure_is_drawn_behind_every_creature() {
-        let mut lowest_of_all = f32::MAX;
-        let mut report = String::new();
+    fn every_creature_fits_between_the_floor_and_the_rim_of_its_tank() {
+        use dfcore::HabitatKind;
+        let floor = crate::habitatmesh::FLOOR_Z;
+        let rim = floor + crate::habitatmesh::WALL_H;
         for id in CREATURE_IDS {
             let mut rt = make(id, 4);
             for _ in 0..60 {
@@ -477,21 +487,54 @@ mod tests {
                     None,
                 );
             }
-            let g = rt.build(false);
-            let lowest = g
-                .body
-                .verts
-                .iter()
-                .map(|v| v.pos[2])
-                .fold(f32::MAX, f32::min);
-            report.push_str(&format!(" {id}={lowest:.2}"));
-            lowest_of_all = lowest_of_all.min(lowest);
+            let kind = HabitatKind::for_substrate(rt.substrate());
+            // Both extremes of the water column for a swimmer; a walker's hint
+            // is a constant.
+            for hint in [0.0f32, 1.0] {
+                let lift = crate::habitatmesh::creature_lift(kind, hint);
+                let g = rt.build(false);
+                let (lo, hi) = g.body.verts.iter().map(|v| v.pos[2] + lift).fold(
+                    (f32::MAX, f32::MIN),
+                    |(a, b), z| (a.min(z), b.max(z)),
+                );
+                assert!(
+                    lo >= floor,
+                    "{id} at hint {hint} sinks to {lo:.1}, below the tank floor {floor:.1}"
+                );
+                assert!(
+                    hi <= rim,
+                    "{id} at hint {hint} reaches {hi:.1}, above the tank rim {rim:.1}"
+                );
+            }
         }
+    }
+
+    /// A swimmer's depth has to actually change its height, or the tilt bought
+    /// nothing: looking straight down, the koi could only express depth as
+    /// apparent size, and that is the fake this replaces.
+    #[test]
+    fn a_swimmers_depth_becomes_real_height_in_the_tank() {
+        use dfcore::HabitatKind;
+        let deep = crate::habitatmesh::creature_lift(HabitatKind::Aquarium, 0.0);
+        let shallow = crate::habitatmesh::creature_lift(HabitatKind::Aquarium, 1.0);
         assert!(
-            crate::habitatmesh::TOP_Z < lowest_of_all,
-            "the enclosure tops out at {:.2}, but the creatures reach down to:{report}",
-            crate::habitatmesh::TOP_Z
+            shallow > deep + 20.0,
+            "surfacing only lifts the fish {:.1} units",
+            shallow - deep
         );
+        // A walker has no such freedom; it is on the ground either way.
+        assert_eq!(
+            crate::habitatmesh::creature_lift(HabitatKind::Terrarium, 0.0),
+            crate::habitatmesh::creature_lift(HabitatKind::Terrarium, 1.0)
+        );
+        // And only the koi ever asks to be lifted.
+        for id in CREATURE_IDS {
+            let hint = make(id, 1).vertical_hint();
+            assert!((0.0..=1.0).contains(&hint), "{id} hint {hint} out of range");
+            if id != "koi" {
+                assert_eq!(hint, 0.0, "{id} claims to float");
+            }
+        }
     }
 
     /// The swimmer gets water and the rest get soil — through the runtime, not

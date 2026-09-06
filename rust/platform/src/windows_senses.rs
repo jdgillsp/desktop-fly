@@ -25,7 +25,8 @@ use windows::Win32::System::Threading::{
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO, VK_LBUTTON, VK_RBUTTON,
+    GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO, VK_CONTROL, VK_LBUTTON, VK_RBUTTON,
+    VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{
     SHQueryUserNotificationState, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
@@ -362,6 +363,15 @@ impl Senses for WindowsSenses {
                 (GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16 & 0x8000) != 0,
             )
         };
+        // The enclosure-grab chord. Modifiers only: Ctrl and Shift say nothing
+        // about what the user is typing, so this stays within the same
+        // content-blind contract as the click poll above, and it is the reason
+        // the tank can be dragged without the overlay ever taking a click.
+        snap.grab_held = unsafe {
+            (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0
+                && (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0
+        };
+
         let pressed = (down.0 && !self.prev_click_down.0) || (down.1 && !self.prev_click_down.1);
         self.prev_click_down = down;
         if pressed {

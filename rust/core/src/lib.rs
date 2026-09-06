@@ -33,7 +33,7 @@ pub use creature::{
 };
 pub use data::{BrainData, CircuitFile};
 pub use env::{EnvSnapshot, Rect, ScreenSpace, Senses};
-pub use habitat::{default_region, Habitat, HabitatKind, Prop, PropKind, Region};
+pub use habitat::{Habitat, HabitatKind, Prop, PropKind, Region};
 pub use habituation::Habituation;
 pub use graded::GradedSim;
 pub use lif::{LifParams, LifSim};

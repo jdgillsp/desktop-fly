@@ -7,12 +7,35 @@
 use crate::math::{self, Mat4};
 use crate::mesh::{Mesh, Vertex};
 
+/// Everything one frame needs drawn. A struct rather than eight parameters:
+/// habitat mode added a camera, a ground plane and a sub-range, and at the call
+/// site `render(s, m, n, true, 0..n, cam, -0.5)` says nothing about which
+/// argument is which.
+pub struct Frame<'a> {
+    /// The whole buffer to draw, in order. In habitat mode this is the tank,
+    /// then the creature, then the front glass — index order is draw order, and
+    /// that is what makes the glass blend over the animal.
+    pub mesh: &'a Mesh,
+    pub neurons: Option<&'a Mesh>,
+    pub shadows: bool,
+    /// The creature's own slice of `mesh`. A tank that cast a shadow would
+    /// paint a large black shape over the desktop, so the shadow pass draws
+    /// only this range. The whole buffer, in free roam.
+    pub creature: std::ops::Range<u32>,
+    /// `TopDown` reproduces the original matrices exactly; habitat mode tilts.
+    pub camera: crate::camera::Camera,
+    /// The plane shadows land on: the desktop in free roam, the tank floor
+    /// inside an enclosure.
+    pub ground_z: f32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     view_proj: Mat4,
     light_dir: [f32; 4],
     params: [f32; 4],
+    view_dir: [f32; 4],
 }
 
 pub struct Renderer {
@@ -291,18 +314,17 @@ impl Renderer {
         self.depth = make_depth(&self.device, &self.config);
     }
 
-    pub fn render(
-        &mut self,
-        surface: &wgpu::Surface<'static>,
-        mesh: &Mesh,
-        neurons: Option<&Mesh>,
-        shadows: bool,
-        // Index at which the creature's own geometry starts. In habitat mode
-        // the enclosure is prepended to the same buffer, and a tank that cast a
-        // shadow would paint a black rectangle over the desktop — so the shadow
-        // pass draws only from here on. Zero in free roam.
-        shadow_from: u32,
-    ) {
+    pub fn render(&mut self, surface: &wgpu::Surface<'static>, frame: &Frame) {
+        let Frame {
+            mesh,
+            neurons,
+            shadows,
+            creature,
+            camera,
+            ground_z,
+        } = frame;
+        let (shadows, camera, ground_z) = (*shadows, *camera, *ground_z);
+        let neurons = *neurons;
         if mesh.indices.is_empty() {
             return;
         }
@@ -338,8 +360,9 @@ impl Renderer {
         // on a scaled display.
         let half_w = self.config.width as f32 / 2.0 / self.scale;
         let half_h = self.config.height as f32 / 2.0 / self.scale;
-        let proj = math::ortho(half_w, half_h, 1.0, 600.0);
-        let view = math::translate(0.0, 0.0, -300.0);
+        let proj = math::ortho(half_w, half_h, 1.0, camera.far());
+        let view = camera.view();
+        let vd = camera.view_dir();
         self.queue.write_buffer(
             &self.ubuf,
             0,
@@ -347,7 +370,8 @@ impl Renderer {
                 view_proj: math::mul(proj, view),
                 // Matches the SceneKit key light's direction.
                 light_dir: [0.30, 0.62, 0.72, 0.0],
-                params: [0.42, 0.22, -0.5, 0.0],
+                params: [0.42, 0.22, ground_z, 0.0],
+                view_dir: [vd[0], vd[1], vd[2], 0.0],
             }),
         );
 
@@ -407,7 +431,7 @@ impl Renderer {
 
             if shadows {
                 pass.set_pipeline(&self.shadow_pipeline);
-                pass.draw_indexed(shadow_from..mesh.indices.len() as u32, 0, 0..1);
+                pass.draw_indexed(creature.clone(), 0, 0..1);
             }
             pass.set_pipeline(&self.pipeline);
             pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);

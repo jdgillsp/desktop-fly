@@ -57,7 +57,10 @@ otherwise.
   centred on the origin; `Region::centered` is free roam and is asserted to
   reproduce the old arithmetic exactly. `Substrate`'s first real consumer.
   Props are never clickable — the overlay's click-through contract is why; they
-  react to the creature and to cursor *proximity* instead.
+  react to the creature and to cursor *proximity* instead. Inside a habitat the
+  camera is **tilted and yawed** (`shell/src/camera.rs`) so the tank is a real
+  glass box; free roam stays straight down, because scene x/y being screen x/y
+  is what lets the fly stand on a real window edge. Ctrl+Shift moves the tank.
 - Coding senses are content-blind by construction: `Foreground` is an enum
   from the process name, and build results arrive only via
   `desktopfly notify pass|fail` over a named pipe. Never add log tailing or
