@@ -61,6 +61,15 @@ otherwise.
   camera is **tilted and yawed** (`shell/src/camera.rs`) so the tank is a real
   glass box; free roam stays straight down, because scene x/y being screen x/y
   is what lets the fly stand on a real window edge. Ctrl+Shift moves the tank.
+- **Silk** (`WEB_PLAN.md`, Phase 0 built): `rust/core/src/silk.rs` is a
+  graph of threads with a *trailing line* — `pay_out` before a jump or a
+  descent, `attach` to close a thread and carry on, `release` to let go. The
+  salticid's dragline is that line and nothing else; the planned web-building
+  species (orb, gumfoot tangle, sheet-and-funnel) lay their webs as the path
+  they walk, through the same three calls. Their construction programs are
+  **procedural and labelled so**; the weavers share one chimera circuit with
+  LC11 dropped and one authored `strike` node. Touching `silk.rs` or
+  `spider.rs` means diffing the salticid suite output byte for byte.
 - Coding senses are content-blind by construction: `Foreground` is an enum
   from the process name, and build results arrive only via
   `desktopfly notify pass|fail` over a named pipe. Never add log tailing or

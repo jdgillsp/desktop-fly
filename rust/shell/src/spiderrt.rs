@@ -285,7 +285,7 @@ impl Runtime for SpiderRuntime {
     fn moved_display(&mut self, region: Region) {
         self.spider.terrain.clear();
         self.spider.ledge = None;
-        self.spider.dragline = None;
+        self.spider.silk.clear();
         self.spider.pos = region.clamp_inside(self.spider.pos, 40.0);
     }
     fn status(&self) -> String {

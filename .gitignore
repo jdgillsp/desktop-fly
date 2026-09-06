@@ -4,8 +4,10 @@ DesktopFly
 nohup.out
 /*.png
 
-# Rust port
+# Rust port (target-* are the side build dirs used while a copy of the app
+# holds target/release/desktopfly.exe - see HABITAT_PLAN.md sec 4)
 rust/target/
+rust/target-*/
 
 # C. elegans connectome: NOT shipped. PORT_PLAN.md sec 8 flags its
 # redistribution terms as unverified. Generate it locally with

@@ -10,7 +10,7 @@
 //! it is not, at forty pixels nobody could tell, and it is the register that
 //! fails the creep filter, so it is deliberately the less finished of the two.
 
-use dfcore::{LifSim, Origin, Spider, SpiderPose, SpiderState};
+use dfcore::{LifSim, Origin, Spider, SpiderPose, SpiderState, ThreadKind};
 
 use crate::brain::AUTHORED_COLOR;
 use crate::flybody::{GlassPalette, NeuronLayout};
@@ -291,18 +291,20 @@ pub fn build_frame(out: &mut Mesh, meshes: &SpiderMeshes, spider: &Spider, pose:
         );
     }
 
-    // --- dragline: world space, from the anchor to the spider ---
-    if let Some(a) = pose.dragline {
-        let dx = pose.pos.x - a.x;
-        let dy = pose.pos.y - a.y;
+    // --- silk: world space. Every thread the spider has out, and the line
+    // in progress from its anchor to the spider. Today that is only the
+    // dragline; a web is the same loop with more segments (WEB_PLAN.md §4).
+    for seg in spider.silk.segments(pose.pos) {
+        let dx = seg.b.x - seg.a.x;
+        let dy = seg.b.y - seg.a.y;
         let len = (dx * dx + dy * dy).sqrt();
         if len > 1.0 {
             let line = mesh::capsule(0.22, len, 2, 5);
             let m = math::mul(
-                math::translate((a.x + pose.pos.x) * 0.5, (a.y + pose.pos.y) * 0.5, 3.0),
+                math::translate((seg.a.x + seg.b.x) * 0.5, (seg.a.y + seg.b.y) * 0.5, 3.0),
                 math::rotate_z(dy.atan2(dx) - std::f32::consts::FRAC_PI_2),
             );
-            emit(out, &line, &m, if glass { LINE_COLOR } else { [0.75, 0.75, 0.72, 0.6] });
+            emit(out, &line, &m, silk_color(seg.kind, glass));
         }
     }
 
@@ -320,6 +322,18 @@ pub fn build_frame(out: &mut Mesh, meshes: &SpiderMeshes, spider: &Spider, pose:
         for v in out.verts.iter_mut() {
             v.pos[2] -= 0.5;
         }
+    }
+}
+
+/// Thread colour by kind. The dragline keeps the colour it always had; the
+/// sticky capture kinds read a touch brighter so a finished orb shows its
+/// spiral. Phase 7 of WEB_PLAN.md replaces capsules with a line pipeline.
+fn silk_color(kind: ThreadKind, glass: bool) -> [f32; 4] {
+    let base = if glass { LINE_COLOR } else { [0.75, 0.75, 0.72, 0.6] };
+    if kind.is_sticky() {
+        [base[0], base[1], base[2], (base[3] * 1.35).min(1.0)]
+    } else {
+        base
     }
 }
 

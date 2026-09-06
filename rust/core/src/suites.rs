@@ -964,8 +964,8 @@ pub fn spider_behavior_test(data: &BrainData, seed: u64) -> Outcome {
         },
         0.5,
         |_| {},
-        |sp| sp.state == SpiderState::Jumping && sp.jump_is_escape && sp.dragline.is_some(),
-        |sp| format!("state={:?} escape={} line={}", sp.state, sp.jump_is_escape, sp.dragline.is_some()),
+        |sp| sp.state == SpiderState::Jumping && sp.jump_is_escape && sp.dragline().is_some(),
+        |sp| format!("state={:?} escape={} line={}", sp.state, sp.jump_is_escape, sp.dragline().is_some()),
     );
 
     h.scenario(
@@ -1074,7 +1074,7 @@ pub fn spider_behavior_test(data: &BrainData, seed: u64) -> Outcome {
         sp.terrain = Vec::new();
         for _ in 0..60 {
             sp.update(DT, BOUNDS, None, Some(walk));
-            if sp.state == SpiderState::Abseiling && sp.dragline.is_some() {
+            if sp.state == SpiderState::Abseiling && sp.dragline().is_some() {
                 return (true, "on the line".to_string());
             }
         }

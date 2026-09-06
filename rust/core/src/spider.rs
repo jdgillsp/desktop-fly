@@ -26,6 +26,7 @@ use crate::creature::{Body, Proprioception, Substrate, World};
 use crate::habitat::Region;
 use crate::rng::Pcg32;
 use crate::signals::BrainSignals;
+use crate::silk::{Silk, ThreadKind};
 use crate::util::{angle_diff, clamp, hypot, smoothstep, Ledge, Vec2};
 
 pub const SPIDER_SCALE: f32 = 1.05;
@@ -122,7 +123,10 @@ pub struct Spider {
     pub jump_height: f32,
     pub jump_is_escape: bool,
     pub z: f32,
-    pub dragline: Option<Vec2>,
+    /// The silk this spider has out. Today that is only ever the dragline,
+    /// paid out before a jump or a descent and released on landing; the
+    /// web builders share the same line (WEB_PLAN.md §4).
+    pub silk: Silk,
 
     // abseil
     abseil_anchor: Vec2,
@@ -181,7 +185,7 @@ impl Spider {
             jump_height: 0.0,
             jump_is_escape: false,
             z: 0.0,
-            dragline: None,
+            silk: Silk::new(),
             abseil_anchor: Vec2::ZERO,
             abseil_len: 0.0,
             abseil_hang: 0.0,
@@ -202,6 +206,11 @@ impl Spider {
         }
     }
 
+    /// Where the dragline is anchored, if one is out.
+    pub fn dragline(&self) -> Option<Vec2> {
+        self.silk.trailing_anchor()
+    }
+
     pub fn scale(&self) -> f32 {
         SPIDER_SCALE * (1.0 + 0.35 * clamp(self.z / 60.0, 0.0, 1.0))
     }
@@ -220,7 +229,7 @@ impl Spider {
             scale: self.scale(),
             crouch: self.crouch,
             legs: std::array::from_fn(|i| (self.legs[i].angle, self.legs[i].lift)),
-            dragline: self.dragline,
+            dragline: self.silk.trailing_anchor(),
             abdomen_breathe: breathe,
         }
     }
@@ -302,7 +311,7 @@ impl Spider {
     pub fn start_jump(&mut self, to: Vec2, escape: bool) {
         self.set_state(SpiderState::Jumping);
         self.ledge = None;
-        self.dragline = Some(self.pos);
+        self.silk.pay_out(self.pos, ThreadKind::Dragline);
         self.jump_from = self.pos;
         self.jump_to = to;
         self.jump_t = 0.0;
@@ -355,7 +364,7 @@ impl Spider {
     fn land(&mut self) {
         self.pos = self.jump_to;
         self.z = 0.0;
-        self.dragline = None;
+        self.silk.release();
         // Did the pounce land on something?
         if !self.jump_is_escape {
             if let Some((i, d)) = self.nearest_bug() {
@@ -381,7 +390,7 @@ impl Spider {
         self.abseil_len = self.rng.range(60.0, 180.0);
         self.abseil_hang = self.rng.range(1.5, 4.0);
         self.abseil_phase = 0;
-        self.dragline = Some(anchor);
+        self.silk.pay_out(anchor, ThreadKind::Dragline);
         self.pos = anchor;
         self.heading = -std::f32::consts::FRAC_PI_2;
         self.speed = 0.0;
@@ -714,7 +723,7 @@ impl Spider {
         if let Some(s) = signals {
             if s.escape && self.escape_cooldown == 0.0 {
                 let to = self.escape_target(region, mouse);
-                self.dragline = Some(self.abseil_anchor);
+                self.silk.pay_out(self.abseil_anchor, ThreadKind::Dragline);
                 self.set_state(SpiderState::Jumping);
                 self.jump_from = self.pos;
                 self.jump_to = to;
@@ -749,7 +758,7 @@ impl Spider {
                 self.pos.x += (self.abseil_anchor.x - self.pos.x) * (4.0 * dt).min(1.0);
                 if self.pos.y >= self.abseil_anchor.y {
                     self.pos = self.abseil_anchor;
-                    self.dragline = None;
+                    self.silk.release();
                     self.set_state(SpiderState::Watching);
                     self.state_timer = self.rng.range(1.0, 3.0);
                     // Back on the ledge, if it is still there.
@@ -906,7 +915,7 @@ mod tests {
     fn a_jump_attaches_a_dragline_and_lands_without_a_snap() {
         let mut s = Spider::new(Vec2::ZERO, 3);
         s.start_jump(Vec2::new(120.0, 40.0), true);
-        assert_eq!(s.dragline, Some(Vec2::ZERO));
+        assert_eq!(s.dragline(), Some(Vec2::ZERO));
         let (mut prev_z, mut max_dz, mut max_z) = (0.0f32, 0.0f32, 0.0f32);
         let mut frames = 0;
         while s.state == SpiderState::Jumping && frames < 200 {
@@ -919,7 +928,7 @@ mod tests {
         assert_eq!(s.state, SpiderState::Watching);
         assert!(max_z > 10.0, "it should actually leave the ground: {max_z}");
         assert!(max_dz < 15.0, "z snapped by {max_dz} in one frame");
-        assert!(s.dragline.is_none(), "the line is retracted on landing");
+        assert!(s.dragline().is_none(), "the line is retracted on landing");
         assert!((s.pos.x - 120.0).abs() < 1e-3);
     }
 
@@ -967,13 +976,13 @@ mod tests {
             s.update(DT, BOUNDS, None, Some(BrainSignals::new()));
             lowest = lowest.min(s.pos.y);
             if s.state == SpiderState::Abseiling {
-                assert!(s.dragline.is_some(), "the line stays attached while hanging");
+                assert!(s.dragline().is_some(), "the line stays attached while hanging");
             }
         }
         assert_eq!(s.state, SpiderState::Watching);
         assert!(lowest < 100.0 - 50.0, "it must actually descend: {lowest}");
         assert!((s.pos.y - 100.0).abs() < 1.0, "and come back: {}", s.pos.y);
-        assert!(s.dragline.is_none());
+        assert!(s.dragline().is_none());
     }
 
     #[test]
