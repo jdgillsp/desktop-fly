@@ -124,7 +124,13 @@ fn parse_args() -> Args {
         shadows: !a.iter().any(|x| x == "--no-shadow"),
         diag: a.iter().any(|x| x == "--diag"),
         no_brain: a.iter().any(|x| x == "--no-brain"),
-        glass: !a.iter().any(|x| x == "--literal"),
+        // --literal wins for one run; otherwise the tray's saved toggle;
+        // otherwise glass, the default register.
+        glass: if a.iter().any(|x| x == "--literal") {
+            false
+        } else {
+            persist::load_glass_choice().unwrap_or(true)
+        },
         fps: a
             .iter()
             .position(|x| x == "--fps")
@@ -329,7 +335,7 @@ impl ApplicationHandler for App {
             self.open_brain_window(event_loop, pos, size);
         }
 
-        self.tray = tray::Tray::new(&self.rt.brain_info(), self.rt.creature().id());
+        self.tray = tray::Tray::new(&self.rt.brain_info(), self.rt.creature().id(), self.args.glass);
         if self.tray.is_none() {
             eprintln!("WARNING: no tray icon; quit with Task Manager");
         }
@@ -632,6 +638,17 @@ impl App {
                     self.rt.scare();
                 }
                 tray::TrayCommand::ToggleShadows => self.args.shadows = !self.args.shadows,
+                tray::TrayCommand::ToggleGlass => {
+                    self.args.glass = !self.args.glass;
+                    persist::save_glass_choice(self.args.glass);
+                    if let Some(t) = &self.tray {
+                        t.set_glass(self.args.glass);
+                    }
+                    println!(
+                        "{}",
+                        if self.args.glass { "glass anatomy on" } else { "literal animal" }
+                    );
+                }
                 tray::TrayCommand::NextDisplay => self.move_to_next_display(),
                 tray::TrayCommand::ToggleBrain => {
                     if self.brain.is_some() {

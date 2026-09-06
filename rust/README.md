@@ -41,6 +41,13 @@ connectome is **not shipped** (its licence is unverified — `PORT_PLAN.md`
 constant drive and the tray says so; nothing about it reacts to you. An
 unknown id falls back to the fly with a message rather than a panic.
 
+**Glass or literal.** The tray's *Glass Anatomy* item toggles between the
+glass register (the circuit visible inside a translucent body) and the
+literal animal, for whichever creature is running; the choice is saved.
+`--literal` forces the literal look for one run. The spider's literal
+register is a bold jumping spider, *Phidippus audax*: black, three white
+abdominal spots, pale leg bands, green chelicerae, big glossy eyes.
+
 **The spider** (`salticid`) is the chimera described in `../SPIDER_PLAN.md`:
 the fly's measured modules plus LC11, one authored pounce node, a
 jumping-spider body, and two content-blind coding senses. Its data ships in
@@ -89,7 +96,9 @@ target/release/desktopfly.exe --creature salticid --snapshot s.png --zoom 5   # 
 The fly's numbers are the oracle and must not move: after any change to the
 simulator, diff `dfcore --simtest --behaviortest` output against the previous
 build (it is byte-identical across every change made for the chimera), and
-diff `--snapshot` PNG hashes. The chimera's suites guard its own claims.
+diff `--snapshot` PNG hashes — with `--creature drosophila` named explicitly,
+because a bare `--snapshot` follows the tray's saved creature choice. The
+chimera's suites guard its own claims.
 
 Current results on the reference machine: GF silent over 4 s of rest, GF fires
 **4 ms** after an abrupt loom, walk-drive duty 35–45%, siesta 23–37%, all 17

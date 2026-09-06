@@ -17,11 +17,20 @@ use crate::flybody::{GlassPalette, NeuronLayout};
 use crate::math::{self, Mat4};
 use crate::mesh::{self, Mesh, Vertex};
 
-const BODY_DARK: [f32; 4] = [0.20, 0.17, 0.16, 1.0];
-const BODY_MID: [f32; 4] = [0.30, 0.25, 0.22, 1.0];
-const LEG_DARK: [f32; 4] = [0.22, 0.18, 0.16, 1.0];
-const EYE_BLACK: [f32; 4] = [0.05, 0.05, 0.07, 1.0];
-const EYE_GLINT: [f32; 4] = [0.35, 0.55, 0.65, 0.9];
+/// The literal register is a **bold jumping spider**, *Phidippus audax*: a
+/// black velvet body, one large white spot and two small ones on the abdomen,
+/// pale bands at the leg joints, iridescent green chelicerae, and big glossy
+/// front eyes with pale tufts above them. Fur does not read at forty pixels;
+/// the markings do, and they are what makes it *that* spider.
+const BODY_DARK: [f32; 4] = [0.10, 0.09, 0.10, 1.0];
+const BODY_MID: [f32; 4] = [0.13, 0.12, 0.13, 1.0];
+const LEG_DARK: [f32; 4] = [0.11, 0.10, 0.11, 1.0];
+const LEG_BAND: [f32; 4] = [0.78, 0.76, 0.70, 1.0];
+const SPOT_WHITE: [f32; 4] = [0.92, 0.90, 0.84, 1.0];
+const TUFT: [f32; 4] = [0.85, 0.80, 0.68, 1.0];
+const CHELICERA_GREEN: [f32; 4] = [0.10, 0.62, 0.42, 1.0];
+const EYE_BLACK: [f32; 4] = [0.04, 0.04, 0.05, 1.0];
+const EYE_GLINT: [f32; 4] = [0.80, 0.88, 0.95, 0.95];
 const BUG_COLOR: [f32; 4] = [0.55, 0.55, 0.50, 0.9];
 const LINE_COLOR: [f32; 4] = [0.80, 0.85, 0.92, 0.55];
 
@@ -43,6 +52,7 @@ pub struct SpiderMeshes {
     abdomen: Mesh,
     eye_big: Mesh,
     eye_small: Mesh,
+    eye_glint: Mesh,
     chelicera: Mesh,
     bug: Mesh,
     /// `[rank][segment]`; both sides share a rank's lengths.
@@ -63,14 +73,40 @@ impl SpiderMeshes {
             .collect();
         SpiderMeshes {
             cephalothorax: mesh::sphere(3.2, 12, 16),
-            abdomen: mesh::sphere(3.3, 12, 16),
+            // Finer than the fly's abdomen: the literal register paints
+            // spots onto it per vertex, and 12x16 cannot hold a spot.
+            abdomen: mesh::sphere(3.3, 24, 32),
             eye_big: mesh::sphere(0.95, 8, 10),
             eye_small: mesh::sphere(0.45, 6, 8),
+            eye_glint: mesh::sphere(0.28, 5, 6),
             chelicera: mesh::capsule(0.45, 2.2, 6, 8),
             bug: mesh::sphere(0.85, 6, 8),
             leg_segments,
         }
     }
+}
+
+/// Appends `src` with a colour chosen per vertex from its *local* position,
+/// which is how the abdomen gets its spots and the legs their bands without
+/// any extra geometry.
+fn emit_painted(out: &mut Mesh, src: &Mesh, m: &Mat4, paint: impl Fn([f32; 3]) -> [f32; 4]) {
+    let base = out.verts.len() as u32;
+    for v in &src.verts {
+        out.verts.push(Vertex {
+            pos: math::transform_point(m, v.pos),
+            normal: math::transform_dir(m, v.normal),
+            color: paint(v.pos),
+        });
+    }
+    out.indices.extend(src.indices.iter().map(|i| i + base));
+}
+
+/// A capsule segment with one pale ring at its distal end: the joint
+/// marking. Distal only — banding both ends merges into long pale stretches
+/// across every joint, and the animal's legs are mostly black.
+fn emit_banded(out: &mut Mesh, src: &Mesh, m: &Mat4, length: f32, base: [f32; 4], band: [f32; 4]) {
+    let edge = length / 2.0 - 0.55;
+    emit_painted(out, src, m, |p| if p[1] > edge { band } else { base });
 }
 
 fn emit(out: &mut Mesh, src: &Mesh, m: &Mat4, color: [f32; 4]) {
@@ -112,7 +148,7 @@ pub fn build_frame(out: &mut Mesh, meshes: &SpiderMeshes, spider: &Spider, pose:
             GlassPalette::LIMB,
         )
     } else {
-        (BODY_DARK, BODY_MID, LEG_DARK, EYE_BLACK, LEG_DARK)
+        (BODY_DARK, BODY_MID, LEG_DARK, EYE_BLACK, CHELICERA_GREEN)
     };
 
     // --- cephalothorax, yawed by the head ---
@@ -138,11 +174,18 @@ pub fn build_frame(out: &mut Mesh, meshes: &SpiderMeshes, spider: &Spider, pose:
             c_eye,
         );
         if !glass {
+            // A highlight on each principal eye, and the pale tuft above it.
+            emit(
+                out,
+                &meshes.eye_glint,
+                &math::mul(head, math::translate(side * 0.85, 3.8, 1.3)),
+                EYE_GLINT,
+            );
             emit(
                 out,
                 &meshes.eye_small,
-                &math::mul(head, math::translate(side * 0.9, 3.75, 1.25)),
-                EYE_GLINT,
+                &math::mul(head, math::translate(side * 1.2, 2.6, 1.9)),
+                TUFT,
             );
         }
         // Anterior lateral eyes, smaller and outboard.
@@ -168,19 +211,34 @@ pub fn build_frame(out: &mut Mesh, meshes: &SpiderMeshes, spider: &Spider, pose:
     }
 
     // --- abdomen ---
-    emit(
-        out,
-        &meshes.abdomen,
-        &math::mul(
-            root,
-            math::trs(
-                [0.0, -4.4, body_z - 0.3],
-                [0.0; 3],
-                [1.0, 1.3, 0.85 * pose.abdomen_breathe],
-            ),
+    let abd_m = math::mul(
+        root,
+        math::trs(
+            [0.0, -4.4, body_z - 0.3],
+            [0.0; 3],
+            [1.0, 1.3, 0.85 * pose.abdomen_breathe],
         ),
-        c_abd,
     );
+    if glass {
+        emit(out, &meshes.abdomen, &abd_m, c_abd);
+    } else {
+        // Phidippus audax: one large dorsal spot forward of centre, two
+        // smaller ones behind it. Painted on the unit sphere, so they ride
+        // the breathing scale.
+        let r = 3.3;
+        emit_painted(out, &meshes.abdomen, &abd_m, |p| {
+            let (x, y, z) = (p[0] / r, p[1] / r, p[2] / r);
+            if z < 0.35 {
+                return c_abd;
+            }
+            let d = |cx: f32, cy: f32| ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+            if d(0.0, 0.15) < 0.40 || d(-0.40, -0.50) < 0.20 || d(0.40, -0.50) < 0.20 {
+                SPOT_WHITE
+            } else {
+                c_abd
+            }
+        });
+    }
 
     // --- legs: cephalothorax -> femur, knee -> tibia, ankle -> tarsus ---
     let lie_along_x = math::euler(0.0, 0.0, -std::f32::consts::FRAC_PI_2);
@@ -204,23 +262,23 @@ pub fn build_frame(out: &mut Mesh, meshes: &SpiderMeshes, spider: &Spider, pose:
             ),
         );
         let segs = &meshes.leg_segments[leg.rank];
-        emit(
-            out,
-            &segs[0],
-            &math::mul(leg_root, math::mul(math::translate(femur / 2.0, 0.0, 0.0), lie_along_x)),
-            c_leg,
-        );
+        let femur_m = math::mul(leg_root, math::mul(math::translate(femur / 2.0, 0.0, 0.0), lie_along_x));
+        if glass {
+            emit(out, &segs[0], &femur_m, c_leg);
+        } else {
+            emit_banded(out, &segs[0], &femur_m, femur, c_leg, LEG_BAND);
+        }
         // Salticid knees sit high: the femur rises, the tibia drops steeply.
         let knee = math::mul(
             leg_root,
             math::trs([femur, 0.0, 0.0], [0.0, 0.95 + 0.25 * pose.crouch, -0.25 * side], [1.0; 3]),
         );
-        emit(
-            out,
-            &segs[1],
-            &math::mul(knee, math::mul(math::translate(tibia / 2.0, 0.0, 0.0), lie_along_x)),
-            c_leg,
-        );
+        let tibia_m = math::mul(knee, math::mul(math::translate(tibia / 2.0, 0.0, 0.0), lie_along_x));
+        if glass {
+            emit(out, &segs[1], &tibia_m, c_leg);
+        } else {
+            emit_banded(out, &segs[1], &tibia_m, tibia, c_leg, LEG_BAND);
+        }
         let ankle = math::mul(
             knee,
             math::trs([tibia, 0.0, 0.0], [0.0, 0.45, -0.12 * side], [1.0; 3]),
@@ -351,6 +409,25 @@ mod tests {
         let mut with = Mesh::default();
         build_frame(&mut with, &meshes, &s, &s.pose(), true);
         assert!(with.verts.len() > bare.verts.len());
+    }
+
+    #[test]
+    fn the_literal_register_is_a_bold_jumping_spider() {
+        let meshes = SpiderMeshes::build();
+        let s = Spider::new(Vec2::ZERO, 1);
+        let mut m = Mesh::default();
+        build_frame(&mut m, &meshes, &s, &s.pose(), false);
+        let count = |c: [f32; 4]| m.verts.iter().filter(|v| v.color == c).count();
+        assert!(count(SPOT_WHITE) > 20, "abdominal spots");
+        assert!(count(LEG_BAND) > 60, "leg bands");
+        assert!(count(LEG_BAND) < count(LEG_DARK), "legs are mostly black");
+        assert!(count(CHELICERA_GREEN) > 20, "green chelicerae");
+        assert!(count(EYE_GLINT) > 10, "eye highlights");
+        assert!(count(BODY_DARK) > count(SPOT_WHITE), "mostly black");
+        let mut g = Mesh::default();
+        build_frame(&mut g, &meshes, &s, &s.pose(), true);
+        let gcount = |c: [f32; 4]| g.verts.iter().filter(|v| v.color == c).count();
+        assert_eq!(gcount(SPOT_WHITE) + gcount(LEG_BAND), 0, "glass has no markings");
     }
 
     #[test]

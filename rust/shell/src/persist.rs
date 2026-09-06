@@ -44,24 +44,47 @@ fn settings_path() -> Option<PathBuf> {
     Some(data_dir()?.join("settings.json"))
 }
 
-/// Which creature was running last time, if a choice was ever saved.
-pub fn load_creature_choice() -> Option<String> {
-    let text = std::fs::read_to_string(settings_path()?).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("creature")?.as_str().map(|s| s.to_string())
+fn load_settings() -> serde_json::Value {
+    settings_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
 }
 
-pub fn save_creature_choice(creature_id: &str) {
+/// Merge one key into the settings file, keeping the others.
+fn save_setting(key: &str, value: serde_json::Value) {
     let Some(p) = settings_path() else { return };
     if let Some(dir) = p.parent() {
         if std::fs::create_dir_all(dir).is_err() {
             return;
         }
     }
-    let v = serde_json::json!({ "creature": creature_id });
-    if let Err(e) = std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap_or_default()) {
-        eprintln!("could not save creature choice: {e}");
+    let mut v = load_settings();
+    if !v.is_object() {
+        v = serde_json::json!({});
     }
+    v[key] = value;
+    if let Err(e) = std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap_or_default()) {
+        eprintln!("could not save setting {key}: {e}");
+    }
+}
+
+/// Which creature was running last time, if a choice was ever saved.
+pub fn load_creature_choice() -> Option<String> {
+    load_settings().get("creature")?.as_str().map(|s| s.to_string())
+}
+
+pub fn save_creature_choice(creature_id: &str) {
+    save_setting("creature", serde_json::Value::String(creature_id.to_string()));
+}
+
+/// Glass anatomy or the literal animal, if the user ever toggled it.
+pub fn load_glass_choice() -> Option<bool> {
+    load_settings().get("glass")?.as_bool()
+}
+
+pub fn save_glass_choice(glass: bool) {
+    save_setting("glass", serde_json::Value::Bool(glass));
 }
 
 pub fn load(creature_id: &str) -> Habituation {
