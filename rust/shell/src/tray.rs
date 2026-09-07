@@ -42,6 +42,8 @@ pub enum TrayCommand {
     AdjustView(ViewStep),
     /// Back to the shipped angles and size.
     ResetView,
+    /// The camera on the animal, close, following it — or the whole tank.
+    ToggleCloseup,
     /// Add or remove one of the prop in this slot of the current enclosure's
     /// catalogue.
     AddProp(usize),
@@ -80,6 +82,7 @@ pub struct Tray {
     /// Greyed out when the view already is the default, so the item never
     /// offers to do nothing.
     reset_view: MenuItem,
+    closeup: CheckMenuItem,
     /// Add/remove pairs, one per catalogue slot. Retargeted when the enclosure
     /// changes; disabled when the slot is unused.
     contents: Vec<(MenuItem, MenuItem)>,
@@ -190,8 +193,11 @@ impl Tray {
             .map(|(label, step)| (MenuItem::new(*label, true, None), *step))
             .collect();
         let reset_view = MenuItem::new("Reset View", true, None);
+        let closeup = CheckMenuItem::new("Close-up (follow the animal)", true, false, None);
         let view_menu = Submenu::new("View", true);
         view_menu.append(&view).ok()?;
+        view_menu.append(&PredefinedMenuItem::separator()).ok()?;
+        view_menu.append(&closeup).ok()?;
         view_menu.append(&PredefinedMenuItem::separator()).ok()?;
         for (item, _) in &step_items {
             view_menu.append(item).ok()?;
@@ -251,6 +257,7 @@ impl Tray {
             ids.push((item.id().clone(), TrayCommand::AdjustView(*step)));
         }
         ids.push((reset_view.id().clone(), TrayCommand::ResetView));
+        ids.push((closeup.id().clone(), TrayCommand::ToggleCloseup));
         ids.push((restock.id().clone(), TrayCommand::Restock));
         for (i, (add, remove)) in contents.iter().enumerate() {
             ids.push((add.id().clone(), TrayCommand::AddProp(i)));
@@ -298,9 +305,14 @@ impl Tray {
             habitat,
             view,
             reset_view,
+            closeup,
             contents,
             ids,
         })
+    }
+
+    pub fn set_closeup(&self, on: bool) {
+        self.closeup.set_checked(on);
     }
 
     pub fn set_glass(&self, on: bool) {

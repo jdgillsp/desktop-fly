@@ -1446,7 +1446,7 @@ fn weaver_body_for(species: crate::creature::Weaver, seed: u64, idle: bool) -> W
     let program: Box<dyn crate::weaver::WebProgram> = if idle {
         Box::new(Idle(species))
     } else {
-        crate::weaver::program_for(species, WEAVER_TANK, &mut rng)
+        crate::weaver::program_for(species, &crate::anchors::Anchors::enclosure(WEAVER_TANK), &mut rng)
     };
     Weaver::new(species, WEAVER_TANK.center, seed, program)
 }

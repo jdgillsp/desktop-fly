@@ -37,6 +37,9 @@ pub fn render_to_png(
     // the view rather than a bare flag is what makes the angle and size
     // controls checkable offscreen, the same way the enclosure itself was.
     habitat: Option<crate::camera::HabitatView>,
+    // Inside the enclosure, look closely at the animal rather than at the
+    // whole tank.
+    closeup: bool,
 ) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         #[cfg(target_os = "windows")]
@@ -105,6 +108,14 @@ pub fn render_to_png(
         None => dfcore::Region::centered((width as f32, height as f32)),
     };
     rt.snapshot_pose(alt, walking_frames, region);
+    // The close-up is decided once the animal is posed, since it is what the
+    // camera centres on. Everything before this — the tank's size and place —
+    // was done against the plain camera, as on the desktop.
+    let cam = if closeup {
+        cam.framed(rt.position(), crate::camera::CLOSEUP_MAGNIFY)
+    } else {
+        cam
+    };
     let hint = rt.vertical_hint();
     let geometry = rt.build(glass);
     let mut frame = crate::mesh::Mesh::default();

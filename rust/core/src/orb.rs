@@ -25,6 +25,7 @@
 use std::collections::VecDeque;
 
 use crate::creature::Weaver as Species;
+use crate::anchors::Anchors;
 use crate::habitat::Region;
 use crate::rng::Pcg32;
 use crate::silk::{Silk, ThreadKind};
@@ -85,9 +86,9 @@ pub struct OrbProgram {
 }
 
 impl OrbProgram {
-    pub fn new(region: Region, rng: &mut Pcg32) -> Self {
+    pub fn new(world: &Anchors, rng: &mut Pcg32) -> Self {
         let mut p = OrbProgram {
-            hub: region.center,
+            hub: world.bounds.center,
             radius: 100.0,
             frame: Vec::new(),
             anchors: Vec::new(),
@@ -102,7 +103,7 @@ impl OrbProgram {
             explore_target: 2,
             capture_full: 0.0,
         };
-        p.reset(region, rng);
+        p.reset(world, rng);
         p
     }
 
@@ -117,37 +118,6 @@ impl OrbProgram {
     }
     pub fn radii_count(&self) -> usize {
         self.radii.len()
-    }
-
-    /// Where a ray from `from` at `angle` meets the region's inset walls.
-    fn wall_point(region: Region, from: Vec2, angle: f32) -> Vec2 {
-        let lo = region.min();
-        let hi = region.max();
-        let (lo, hi) = (
-            Vec2::new(lo.x + WALL_INSET, lo.y + WALL_INSET),
-            Vec2::new(hi.x - WALL_INSET, hi.y - WALL_INSET),
-        );
-        let (dx, dy) = (angle.cos(), angle.sin());
-        let mut t = f32::MAX;
-        if dx.abs() > 1e-6 {
-            let tx = if dx > 0.0 { (hi.x - from.x) / dx } else { (lo.x - from.x) / dx };
-            if tx > 0.0 {
-                t = t.min(tx);
-            }
-        }
-        if dy.abs() > 1e-6 {
-            let ty = if dy > 0.0 { (hi.y - from.y) / dy } else { (lo.y - from.y) / dy };
-            if ty > 0.0 {
-                t = t.min(ty);
-            }
-        }
-        if t == f32::MAX {
-            return from;
-        }
-        Vec2::new(
-            (from.x + dx * t).clamp(lo.x, hi.x),
-            (from.y + dy * t).clamp(lo.y, hi.y),
-        )
     }
 
     /// Where a ray from the hub at `angle` meets the frame polygon.
@@ -248,26 +218,26 @@ impl OrbProgram {
         self.radii.push(angle);
     }
 
-    fn plan(&mut self, region: Region, rng: &mut Pcg32) {
+    fn plan(&mut self, world: &Anchors, rng: &mut Pcg32) {
         use std::f32::consts::{FRAC_PI_2, PI, TAU};
         let hub = self.hub;
         match self.stage {
             Stage::Explore => {
                 if self.explored >= self.explore_target {
                     self.stage = Stage::Bridge;
-                    return self.plan(region, rng);
+                    return self.plan(world, rng);
                 }
                 // A fixed behavioural pattern in a random order: walk to an
                 // anchor trailing a line, walk on, let it go.
-                let a = Self::wall_point(region, hub, rng.range(0.0, TAU));
-                let b = Self::wall_point(region, hub, rng.range(0.0, TAU));
+                let a = world.anchor(hub, rng.range(0.0, TAU), WALL_INSET);
+                let b = world.anchor(hub, rng.range(0.0, TAU), WALL_INSET);
                 self.queue.push_back(Move::new(a, Op::PayOut(ThreadKind::Dragline)));
                 self.queue.push_back(Move::new(b, Op::Release));
                 self.explored += 1;
             }
             Stage::Bridge => {
-                let a = Self::wall_point(region, hub, FRAC_PI_2 + 0.55);
-                let b = Self::wall_point(region, hub, FRAC_PI_2 - 0.55);
+                let a = world.anchor(hub, FRAC_PI_2 + 0.55, WALL_INSET);
+                let b = world.anchor(hub, FRAC_PI_2 - 0.55, WALL_INSET);
                 self.anchors = vec![a, b];
                 self.queue.push_back(Move::new(a, Op::PayOut(ThreadKind::Bridge)));
                 self.queue.push_back(Move {
@@ -281,7 +251,7 @@ impl OrbProgram {
                 let a = self.anchors[0];
                 let b = self.anchors[1];
                 let m = Vec2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
-                let c = Self::wall_point(region, hub, -FRAC_PI_2);
+                let c = world.anchor(hub, -FRAC_PI_2, WALL_INSET);
                 // Drop from the bridge's midpoint through the hub to the
                 // anchor below: the first radius, and the proto-hub.
                 self.queue.push_back(Move::new(
@@ -333,7 +303,7 @@ impl OrbProgram {
                     .map(|k| self.point_at(FRAC_PI_2 + k as f32 * step, self.radius))
                     .collect();
                 self.anchors = (0..n)
-                    .map(|k| Self::wall_point(region, hub, FRAC_PI_2 + k as f32 * step))
+                    .map(|k| world.anchor(hub, FRAC_PI_2 + k as f32 * step, WALL_INSET))
                     .collect();
                 let v0 = self.frame[0];
                 self.queue.push_back(Move::walk(hub));
@@ -372,7 +342,7 @@ impl OrbProgram {
                     self.stage = Stage::Auxiliary;
                     self.spiral_i = 0;
                     self.spiral_n = (AUX_TURNS * self.radii.len() as f32) as usize;
-                    return self.plan(region, rng);
+                    return self.plan(world, rng);
                 }
                 // Into the largest gap, a little off its centre so the
                 // wheel is not a protractor.
@@ -493,9 +463,9 @@ impl WebProgram for OrbProgram {
         Species::Araneus
     }
 
-    fn next(&mut self, _silk: &Silk, region: Region, rng: &mut Pcg32, _pos: Vec2) -> Option<Move> {
+    fn next(&mut self, _silk: &Silk, world: &Anchors, rng: &mut Pcg32, _pos: Vec2) -> Option<Move> {
         if self.queue.is_empty() && self.stage != Stage::Done {
-            self.plan(region, rng);
+            self.plan(world, rng);
         }
         self.queue.pop_front()
     }
@@ -541,7 +511,8 @@ impl WebProgram for OrbProgram {
         self.stage == Stage::Done && self.queue.is_empty()
     }
 
-    fn reset(&mut self, region: Region, rng: &mut Pcg32) {
+    fn reset(&mut self, world: &Anchors, rng: &mut Pcg32) {
+        let region: Region = world.bounds;
         let (w, h) = region.size;
         self.radius = (RADIUS_FRACTION * w.min(h)).clamp(RADIUS_BOUNDS.0, RADIUS_BOUNDS.1);
         let (hw, hh) = region.half();
@@ -638,7 +609,7 @@ mod tests {
 
     fn araneus(seed: u64) -> Weaver {
         let mut rng = Pcg32::new(seed);
-        let program = OrbProgram::new(TANK, &mut rng);
+        let program = OrbProgram::new(&Anchors::enclosure(TANK), &mut rng);
         Weaver::new(Species::Araneus, TANK.center, seed, Box::new(program))
     }
 

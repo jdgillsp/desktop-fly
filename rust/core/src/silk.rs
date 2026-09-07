@@ -79,6 +79,11 @@ pub struct Node {
     pub anchor: Anchor,
     /// Vibration energy at this node, decaying.
     pub excite: f32,
+    /// For a fixed node, *what* it is fixed to: the id of a structure on the
+    /// screen (`anchors::Frame`), so that when that structure moves or goes
+    /// the threads on it can be cut and no others. `None` for a junction,
+    /// and for a fixed end that reached nothing real.
+    pub on: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -136,6 +141,7 @@ impl Silk {
             pos,
             anchor,
             excite: 0.0,
+            on: None,
         });
         self.nodes.len() - 1
     }
@@ -212,6 +218,21 @@ impl Silk {
         let nodes = &self.nodes;
         self.threads
             .retain(|t| segment_distance(nodes[t.a].pos, nodes[t.b].pos, p) >= r);
+        let cut = before - self.threads.len();
+        if cut > 0 {
+            self.prune();
+        }
+        cut
+    }
+
+    /// Sever every thread with an end fixed on structure `id` — the window
+    /// that moved or closed — and drop what no longer holds anything.
+    /// Returns how many threads went.
+    pub fn cut_on(&mut self, id: i64) -> usize {
+        let before = self.threads.len();
+        let nodes = &self.nodes;
+        self.threads
+            .retain(|t| nodes[t.a].on != Some(id) && nodes[t.b].on != Some(id));
         let cut = before - self.threads.len();
         if cut > 0 {
             self.prune();

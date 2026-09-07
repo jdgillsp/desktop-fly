@@ -629,3 +629,112 @@ and §8 Phase 4 gates on fixing that.
   the non-sticky entangling sheet, the speed of the rush.
   https://www.inaturalist.org/taxa/47345-Agelenidae ,
   https://en.wikipedia.org/wiki/Agelena
+
+## 13. Fixes after Phase 7
+
+### 13.1 The droppers were leaving the vivarium (2026-09-06)
+
+Seen live by Jesse: an orb weaver or a house spider getting out of its
+enclosure. Cause: the threat response of both `Drop` species pays out a
+dragline of 50–120 units — more on every re-startle, with no cap — and
+`update_drop` walked the animal "down" the ground plane (toward the front
+wall) by that length with **no region clamp**. In free roam the display is
+big enough that this never showed. A vivarium is about 400 deep; a spider
+sitting on the lower frame of its orb, 40 in from the glass, went straight
+through it on the first GF spike.
+
+Two changes in `weaver.rs`:
+
+- the line is as long as the room there is: the drop's bottom is clamped to
+  `world.min().y + EDGE_MARGIN`, and a re-startle cannot pay out past it;
+- a zero-margin `clamp_inside` on the *world* region at the end of every
+  `update`, as the belt under the braces. Zero, because the programs put
+  anchors as close as `WALL_INSET` (14) to a wall and a walk to one has to
+  be able to arrive — a wider margin would stall construction forever at the
+  first wall anchor.
+
+`a_startled_spider_never_drops_out_of_its_enclosure` reproduces it (the
+araneus left at y −352 against a wall at −350 on frame 18) and pins it for
+both droppers, including four re-startles on the line. All three weaver
+suites are byte-identical before and after; the fly's and salticid's pass.
+
+Still true, and still open: the drop runs along the floor because the web
+does (decision 13). In a tank a real drop is *down*, in z, from a web that
+is up. Lifting the web off the floor would make the drop a descent and is
+the same rendering decision as before.
+
+### 13.2 Webs fixed to real structures, broken per structure (2026-09-06)
+
+Jesse's ask after 13.1: the web should anchor to things on the screen as if
+it were strung through the air between them, and when one of those things
+changes, the web should break *there* — not everywhere, and not nowhere.
+
+What Phase 6 had was one real anchor: the widest window's top edge, with
+the web's box hung under it and the other three sides of the box invisible.
+Breakage was "cut the fixed ends near that edge's y", keyed to that one
+ledge. That is now generalised in `rust/core/src/anchors.rs`:
+
+- **`Frame`** is a window's whole outline in scene coordinates, from the
+  same window rectangles the fly's ledges come from
+  (`ScreenSpace::frame_from_window`, `EnvSnapshot::frames`, capped at 24).
+  The screen is a frame too (`SCREEN`, id 0, never moves), and so are an
+  enclosure's walls (`WALLS`, id −1).
+- **`Anchors`** is what a web is fixed to: the box it is planned in, and the
+  structures around it. `ray(from, angle, inset)` is the first structure a
+  thread reaches in that direction, stopping `inset` short of it, within
+  `MAX_REACH` (1,100 units; an enclosure has no limit). `anchor` and
+  `anchor_toward` fall back to the box's own edge when nothing is in reach:
+  a fixed end on nothing, and `on` says so. From inside a structure the
+  arithmetic is the orb program's old `wall_point` to the bit, and a test
+  holds it there, which is why every enclosure build is unchanged.
+- **Every fixed end remembers its structure** (`silk::Node::on`), resolved by
+  the body at attach time (`ON_TOL` = 17, one unit over the programs'
+  `WALL_INSET`). `Silk::cut_on(id)` severs exactly the threads with an end
+  on that structure.
+- **Windows are solid.** On the desktop the web is planned in the *air*:
+  `Anchors::choose_site` scans the display for spots outside every window
+  with at least `MIN_CLEARANCE` (110) in all eight directions, scores them
+  by how close the surrounding structures are, and draws one of the best
+  three — a gap between two windows, a screen corner, the strip between a
+  window and the taskbar. A web planned over a window would be fixed to
+  that window alone and lost whole when it moved. With no room anywhere it
+  falls back to the old box under a ledge; with no frames known (tests, an
+  older platform layer) likewise.
+- **Breakage per structure.** Each frame, `Weaver::check_structures`
+  compares the anchors' structures to the frames the senses report: a
+  window that moved by more than two units, or closed, has its threads cut
+  — only its own — the anchors are rebuilt from the new frames (a window
+  that appeared becomes something to fix to), and the program's `on_damage`
+  decides between repair and rebuild exactly as for a cursor cut.
+
+The three programs take `&Anchors` instead of a `Region`. The orb's frame
+guys, bridge and Y go to `anchor`; the tangle's upper anchors, sheet ends
+and gumfoot feet, and the funnel's wall and support threads go to
+`anchor_toward` aimed at the point they used to place directly, which in an
+enclosure returns that point. So on the desktop a gumfoot line drops to the
+top of the window below or the bottom of the screen, a funnel is built
+against the nearest window edge, and an orb's frame is guyed to whatever is
+around it.
+
+**Checked:** `a_web_spans_two_windows_and_a_moved_window_cuts_only_its_own_threads`
+builds an orb in the gap between two full-height windows on a 2560 × 1440
+display, asserts fixed ends on both windows and on the screen, moves one
+window and asserts the thread count drops by exactly the number of threads
+that had an end on it while the other window's and the screen's counts are
+untouched, then closes the other and asserts the same. `anchors.rs` tests
+the ray against the old `wall_point` over 500 random rays, the nearer
+window beating the screen, the reach cap, `on`, and site choice (in the
+gap, never over a window, nothing on a full screen, near an edge on an empty
+one). All three weaver suites are **byte-identical** to before; the fly's
+and the salticid's pass. `cargo test -p dfcore`: 168; `-p dfshell`: 128.
+
+**Still open.**
+- The platform caps frames at 24. A window past the cap that was an anchor
+  would vanish from the list without closing and have its threads cut.
+- A fixed end on nothing (`on == None`, the box-edge fallback) is drawn like
+  any other. Honest would be to not lay that thread at all, or to let the
+  program shrink the web to what it can reach.
+- Enclosure props — the vivarium's bark and twig — are not structures yet.
+  They would be one `Frame` each, and the same machinery.
+- The weavers still default to the vivarium; free roam is a tray toggle, and
+  this is only visible there.

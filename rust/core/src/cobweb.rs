@@ -16,6 +16,7 @@
 use std::collections::VecDeque;
 
 use crate::creature::Weaver as Species;
+use crate::anchors::Anchors;
 use crate::habitat::Region;
 use crate::rng::Pcg32;
 use crate::silk::{Anchor, Silk, ThreadKind};
@@ -64,14 +65,14 @@ pub struct CobwebProgram {
     sheet_next: bool,
     /// Where the gumfoot lines were laid, so repairs can tell which are gone.
     feet: Vec<Vec2>,
-    /// The region the web was planned in, for re-laying after damage.
-    region: Region,
+    /// What the web was planned against, for re-laying after damage.
+    world: Anchors,
 }
 
 impl CobwebProgram {
-    pub fn new(region: Region, rng: &mut Pcg32) -> Self {
+    pub fn new(world: &Anchors, rng: &mut Pcg32) -> Self {
         let mut p = CobwebProgram {
-            retreat: region.center,
+            retreat: world.bounds.center,
             half_w: 100.0,
             sheet_y: 0.0,
             floor_y: 0.0,
@@ -83,9 +84,9 @@ impl CobwebProgram {
             gumfoot_target: GUMFOOT_LINES,
             sheet_next: false,
             feet: Vec::new(),
-            region,
+            world: world.clone(),
         };
-        p.reset(region, rng);
+        p.reset(world, rng);
         p
     }
 
@@ -96,35 +97,40 @@ impl CobwebProgram {
         self.stage
     }
 
-    fn top_y(region: Region) -> f32 {
-        region.max().y - WALL_INSET
+    fn top_y(world: &Anchors) -> f32 {
+        world.bounds.max().y - WALL_INSET
     }
 
     /// A point in the tangle volume: under the top, within the web's width.
-    fn tangle_point(&self, region: Region, rng: &mut Pcg32) -> Vec2 {
-        let top = Self::top_y(region);
+    fn tangle_point(&self, world: &Anchors, rng: &mut Pcg32) -> Vec2 {
+        let top = Self::top_y(world);
         Vec2::new(
             self.retreat.x + rng.range(-1.0, 1.0) * self.half_w,
             top - rng.range(0.08, 1.0) * (top - self.sheet_y),
         )
     }
 
-    /// An anchor on a wall in the upper part of the region.
-    fn upper_anchor(&self, region: Region, rng: &mut Pcg32) -> Vec2 {
+    /// An anchor in the upper part of the web: on the structure above or to
+    /// either side, reached from the retreat. In an enclosure that is a point
+    /// on the wall; on the desktop, the window edge or screen edge in that
+    /// direction.
+    fn upper_anchor(&self, world: &Anchors, rng: &mut Pcg32) -> Vec2 {
+        let region = world.bounds;
         let lo = region.min();
         let hi = region.max();
-        let top = Self::top_y(region);
-        match rng.int_range(0, 2) {
+        let top = Self::top_y(world);
+        let target = match rng.int_range(0, 2) {
             0 => Vec2::new(
                 (self.retreat.x + rng.range(-1.4, 1.4) * self.half_w).clamp(lo.x + WALL_INSET, hi.x - WALL_INSET),
                 top,
             ),
             1 => Vec2::new(lo.x + WALL_INSET, top - rng.range(0.0, 0.8) * (top - self.sheet_y)),
             _ => Vec2::new(hi.x - WALL_INSET, top - rng.range(0.0, 0.8) * (top - self.sheet_y)),
-        }
+        };
+        world.anchor_toward(self.retreat, target, WALL_INSET)
     }
 
-    fn queue_tangle_bout(&mut self, region: Region, rng: &mut Pcg32) {
+    fn queue_tangle_bout(&mut self, world: &Anchors, rng: &mut Pcg32) {
         let r = self.retreat;
         self.queue.push_back(Move::new(
             r,
@@ -135,9 +141,9 @@ impl CobwebProgram {
         ));
         for k in 0..LINES_PER_BOUT {
             let to = if k == 0 || rng.f32() < 0.35 {
-                (self.upper_anchor(region, rng), Op::Attach(Anchor::Fixed))
+                (self.upper_anchor(world, rng), Op::Attach(Anchor::Fixed))
             } else {
-                (self.tangle_point(region, rng), Op::AttachOn { kind: None, radius: 10.0 })
+                (self.tangle_point(world, rng), Op::AttachOn { kind: None, radius: 10.0 })
             };
             self.queue.push_back(Move::new(to.0, to.1));
         }
@@ -150,8 +156,9 @@ impl CobwebProgram {
         self.tangle_done += 1;
     }
 
-    fn queue_sheet_bout(&mut self, region: Region, rng: &mut Pcg32) {
+    fn queue_sheet_bout(&mut self, world: &Anchors, rng: &mut Pcg32) {
         let r = self.retreat;
+        let region = world.bounds;
         let lo = region.min();
         let hi = region.max();
         let left = (r.x - self.half_w * 1.1).max(lo.x + WALL_INSET);
@@ -187,7 +194,18 @@ impl CobwebProgram {
             } else {
                 Op::AttachOn { kind: None, radius: 10.0 }
             };
-            self.queue.push_back(Move::new(Vec2::new(x, y), op));
+            // Where the sheet reaches the edge of its box, it is fixed to
+            // whatever is really there in that direction.
+            let toward = if x >= right - 0.5 { 1.0 } else { -1.0 };
+            let at_bound = at_wall
+                && ((toward > 0.0 && right >= hi.x - WALL_INSET - 0.5)
+                    || (toward < 0.0 && left <= lo.x + WALL_INSET + 0.5));
+            let at = if at_bound {
+                world.anchor_toward(Vec2::new(x - toward * 10.0, y), Vec2::new(x, y), WALL_INSET)
+            } else {
+                Vec2::new(x, y)
+            };
+            self.queue.push_back(Move::new(at, op));
         }
         self.queue.push_back(Move {
             to: r,
@@ -197,13 +215,16 @@ impl CobwebProgram {
         self.sheet_done += 1;
     }
 
-    fn queue_gumfoot(&mut self, region: Region, rng: &mut Pcg32) {
+    fn queue_gumfoot(&mut self, world: &Anchors, rng: &mut Pcg32) {
         let r = self.retreat;
+        let region = world.bounds;
         let lo = region.min();
         let hi = region.max();
         let x = (r.x + rng.range(-1.0, 1.0) * self.half_w).clamp(lo.x + WALL_INSET, hi.x - WALL_INSET);
         let top = Vec2::new(x, self.sheet_y + rng.range(-4.0, 12.0));
-        let foot = Vec2::new(x, self.floor_y);
+        // Straight down to whatever the floor is: the enclosure's, or on the
+        // desktop the top of a window below or the bottom of the screen.
+        let foot = world.anchor_toward(top, Vec2::new(x, self.floor_y), 6.0);
         // From a point on the sheet or tangle straight down to the floor,
         // fixed there, then back up to the retreat.
         self.queue.push_back(Move::new(
@@ -228,13 +249,13 @@ impl CobwebProgram {
         self.gumfoot_done += 1;
     }
 
-    fn plan(&mut self, region: Region, rng: &mut Pcg32) {
+    fn plan(&mut self, world: &Anchors, rng: &mut Pcg32) {
         let r = self.retreat;
         match self.stage {
             Stage::Retreat => {
                 // A small tent of dense silk in the top corner of the web.
                 self.queue.push_back(Move::new(r, Op::PayOut(ThreadKind::Retreat)));
-                let top = Self::top_y(region);
+                let top = Self::top_y(world);
                 for k in 0..7 {
                     let a = k as f32 * 0.9;
                     let p = Vec2::new(
@@ -258,29 +279,29 @@ impl CobwebProgram {
             Stage::Tangle => {
                 if self.tangle_done < 2 {
                     // Tangle first, twice, before any sheet.
-                    self.queue_tangle_bout(region, rng);
+                    self.queue_tangle_bout(world, rng);
                 } else if self.tangle_done < TANGLE_BOUTS || self.sheet_done < SHEET_BOUTS {
                     // Then alternate.
                     if self.sheet_next && self.sheet_done < SHEET_BOUTS {
-                        self.queue_sheet_bout(region, rng);
+                        self.queue_sheet_bout(world, rng);
                     } else if self.tangle_done < TANGLE_BOUTS {
-                        self.queue_tangle_bout(region, rng);
+                        self.queue_tangle_bout(world, rng);
                     } else {
-                        self.queue_sheet_bout(region, rng);
+                        self.queue_sheet_bout(world, rng);
                     }
                     self.sheet_next = !self.sheet_next;
                 } else {
                     self.stage = Stage::Gumfoot;
-                    return self.plan(region, rng);
+                    return self.plan(world, rng);
                 }
             }
             Stage::Sheet => {
-                self.queue_sheet_bout(region, rng);
+                self.queue_sheet_bout(world, rng);
                 self.stage = Stage::Tangle;
             }
             Stage::Gumfoot => {
                 if self.gumfoot_done < self.gumfoot_target {
-                    self.queue_gumfoot(region, rng);
+                    self.queue_gumfoot(world, rng);
                 } else {
                     self.queue.push_back(Move::walk(r));
                     self.stage = Stage::Done;
@@ -300,9 +321,9 @@ impl WebProgram for CobwebProgram {
         Species::Parasteatoda
     }
 
-    fn next(&mut self, _silk: &Silk, region: Region, rng: &mut Pcg32, _pos: Vec2) -> Option<Move> {
+    fn next(&mut self, _silk: &Silk, world: &Anchors, rng: &mut Pcg32, _pos: Vec2) -> Option<Move> {
         if self.queue.is_empty() && self.stage != Stage::Done {
-            self.plan(region, rng);
+            self.plan(world, rng);
         }
         self.queue.pop_front()
     }
@@ -341,12 +362,13 @@ impl WebProgram for CobwebProgram {
         self.stage == Stage::Done && self.queue.is_empty()
     }
 
-    fn reset(&mut self, region: Region, rng: &mut Pcg32) {
+    fn reset(&mut self, world: &Anchors, rng: &mut Pcg32) {
+        let region: Region = world.bounds;
         let (w, h) = region.size;
         let (hw, _) = region.half();
         self.half_w = (0.30 * w).clamp(80.0, 260.0);
         let jx = (hw - self.half_w - 2.0 * WALL_INSET).max(0.0);
-        let top = Self::top_y(region);
+        let top = Self::top_y(world);
         self.retreat = Vec2::new(region.center.x + rng.range(-0.6, 0.6) * jx, top - 6.0);
         self.sheet_y = top - TANGLE_DEPTH * h;
         self.floor_y = region.min().y + 6.0;
@@ -358,7 +380,7 @@ impl WebProgram for CobwebProgram {
         self.gumfoot_target = GUMFOOT_LINES;
         self.sheet_next = false;
         self.feet.clear();
-        self.region = region;
+        self.world = world.clone();
     }
 
     fn on_damage(&mut self, silk: &Silk) -> bool {
@@ -380,10 +402,10 @@ impl WebProgram for CobwebProgram {
         if !gone.is_empty() {
             self.feet.retain(|f| !gone.contains(f));
             self.gumfoot_done = self.feet.len();
-            let region = self.region;
+            let world = self.world.clone();
             let mut rng = Pcg32::new(0x600d ^ silk.threads.len() as u64);
             for _ in 0..gone.len() {
-                self.queue_gumfoot(region, &mut rng);
+                self.queue_gumfoot(&world, &mut rng);
             }
             self.queue.push_back(Move::walk(self.retreat));
             self.stage = Stage::Adding;
@@ -395,13 +417,13 @@ impl WebProgram for CobwebProgram {
         false
     }
 
-    fn nightly(&mut self, _silk: &Silk, region: Region, rng: &mut Pcg32) {
+    fn nightly(&mut self, _silk: &Silk, world: &Anchors, rng: &mut Pcg32) {
         // Another tangle bout and a couple of gumfoot lines, as the animal
         // does: the web grows.
-        self.queue_tangle_bout(region, rng);
+        self.queue_tangle_bout(world, rng);
         self.gumfoot_target += GUMFOOT_NIGHTLY;
         for _ in 0..GUMFOOT_NIGHTLY {
-            self.queue_gumfoot(region, rng);
+            self.queue_gumfoot(world, rng);
         }
         self.queue.push_back(Move::walk(self.retreat));
         self.stage = Stage::Adding;
@@ -423,7 +445,7 @@ mod tests {
 
     fn house_spider(seed: u64) -> Weaver {
         let mut rng = Pcg32::new(seed);
-        let program = CobwebProgram::new(TANK, &mut rng);
+        let program = CobwebProgram::new(&Anchors::enclosure(TANK), &mut rng);
         Weaver::new(Species::Parasteatoda, TANK.center, seed, Box::new(program))
     }
 

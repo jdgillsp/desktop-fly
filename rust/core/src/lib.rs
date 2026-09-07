@@ -9,6 +9,7 @@
 //! `--simtest` and `--behaviortest` are for the Swift build. Per `CLAUDE.md`
 //! they must be run after any change here.
 
+pub mod anchors;
 pub mod arachnid;
 pub mod body;
 pub mod cobweb;
@@ -19,14 +20,14 @@ pub mod funnel;
 pub mod graded;
 pub mod habitat;
 pub mod habituation;
-pub mod koi;
 pub mod hognose;
+pub mod koi;
 pub mod lif;
 pub mod orb;
 pub mod rng;
 pub mod roles;
-pub mod signals;
 pub mod sandworm;
+pub mod signals;
 pub mod silk;
 pub mod spider;
 pub mod suites;
@@ -48,14 +49,15 @@ pub use lif::{LifParams, LifSim};
 pub use roles::{RoleManifest, drosophila};
 pub use signals::{BrainSignals, GradedSignalBuilder, SignalBuilder};
 pub use util::{circadian_activity, Ledge, Vec2};
+pub use anchors::{Anchors, Frame};
 pub use arachnid::{LegMode, SpiderLeg};
 pub use silk::{Anchor, Segment, Silk, ThreadKind};
 pub use spider::{Bug, Spider, SpiderPose, SpiderState};
 pub use koi::{Koi as KoiBody, KoiState};
-pub use cobweb::CobwebProgram;
-pub use funnel::FunnelProgram;
 pub use hognose::{Hognose as HognoseBody, HognoseState};
 pub use sandworm::{Sandworm as SandwormBody, SandwormState};
+pub use cobweb::CobwebProgram;
+pub use funnel::FunnelProgram;
 pub use orb::OrbProgram;
 pub use weaver::{Move, Op, Weaver as WeaverBody, WeaverPose, WeaverState, WebBug, WebProgram};
 pub use worm::{Worm, WormState};

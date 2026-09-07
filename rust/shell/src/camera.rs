@@ -31,7 +31,18 @@ const EYE: f32 = 300.0;
 /// toward the camera — so 300 puts it *behind* the eye and it silently vanishes.
 /// Orthographic projection makes this free: moving the camera back changes
 /// nothing but which depths are representable.
-const EYE_TILTED: f32 = 1500.0;
+///
+/// 1500 was enough for a tank near the middle of the screen at the default
+/// tilt. It was not enough once the view became the user's: a tank parked in
+/// the lower-right corner at a steep tilt sits two thousand units out on the
+/// ground plane, and at pitch 1.25 that is 1,700 units *toward* the camera —
+/// past the eye, behind the near plane, and gone, creature and all. Sized now
+/// for the worst allowed case on a 5K display, with `far` to match, and
+/// `every_allowed_view_keeps_the_tank_between_the_clip_planes` holds it there.
+const EYE_TILTED: f32 = 8000.0;
+/// The far plane for the tilted camera: the eye distance plus the furthest a
+/// tank corner can swing *away* from the camera.
+const FAR_TILTED: f32 = 16000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Camera {
@@ -50,7 +61,10 @@ pub enum Camera {
     /// The cost is that the ground's axes are no longer the screen's, so
     /// "right on screen" is not "right in the tank" and every ground/screen
     /// conversion has to go through the matrix rather than a scalar.
-    Tilted { pitch: f32, yaw: f32 },
+    ///
+    /// `framing` is the close-up: centred on the animal and magnified, or
+    /// `Framing::NONE` for the whole tank as placed.
+    Tilted { pitch: f32, yaw: f32, framing: Framing },
 }
 
 /// The default tilt: enough that the walls of a tank have real presence and a
@@ -77,6 +91,32 @@ pub const MAX_PITCH: f32 = 1.32;
 /// wall, which is a real choice, not a mistake. Zero is allowed, and looks like
 /// a flat elevation; it is the one setting where the tank reads as a backdrop.
 pub const MAX_YAW: f32 = 1.15;
+
+/// How much closer the close-up view looks: the animal a few times larger,
+/// the tank still mostly in frame around it.
+pub const CLOSEUP_MAGNIFY: f32 = 2.6;
+
+/// A close-up: the view centred on a ground point and magnified about it.
+/// [`Framing::NONE`] is the plain view and produces the plain matrices to
+/// the bit, which is what keeps every placement and every test written
+/// against the tilted camera exactly as it was.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Framing {
+    /// The ground point that lands at the centre of the screen.
+    pub focus: Vec2,
+    pub magnify: f32,
+}
+
+impl Framing {
+    pub const NONE: Framing = Framing {
+        focus: Vec2 { x: 0.0, y: 0.0 },
+        magnify: 1.0,
+    };
+
+    pub fn is_none(&self) -> bool {
+        self.magnify == 1.0 && self.focus.x == 0.0 && self.focus.y == 0.0
+    }
+}
 
 /// The part of the habitat view the user owns: how the camera is angled and how
 /// large the tank is drawn. Split out from [`Camera`] because zoom is not a
@@ -109,6 +149,7 @@ impl HabitatView {
         Camera::Tilted {
             pitch: self.pitch.clamp(MIN_PITCH, MAX_PITCH),
             yaw: self.yaw.clamp(-MAX_YAW, MAX_YAW),
+            framing: Framing::NONE,
         }
     }
 
@@ -161,12 +202,42 @@ impl Camera {
             // Turn first, then tilt. Negative pitch, so that +z (height) rises
             // *up* the screen rather than down it — getting that sign wrong
             // buries a flying fly instead of lifting it.
-            Camera::Tilted { pitch, yaw } => math::mul(
-                math::translate(0.0, 0.0, -EYE_TILTED),
-                math::mul(math::rotate_x(-pitch), math::rotate_z(*yaw)),
-            ),
+            Camera::Tilted { pitch, yaw, framing } => {
+                let base = math::mul(
+                    math::translate(0.0, 0.0, -EYE_TILTED),
+                    math::mul(math::rotate_x(-pitch), math::rotate_z(*yaw)),
+                );
+                if framing.is_none() {
+                    return base;
+                }
+                // Then slide the focus to the screen's centre and magnify
+                // about it. Screen-space operations after the projection of
+                // the ground, so the tilt is untouched: the animal is seen
+                // from the same angle, only closer.
+                let sx = base[0][0] * framing.focus.x + base[1][0] * framing.focus.y;
+                let sy = base[0][1] * framing.focus.x + base[1][1] * framing.focus.y;
+                math::mul(
+                    math::scale(framing.magnify, framing.magnify, 1.0),
+                    math::mul(math::translate(-sx, -sy, 0.0), base),
+                )
+            }
         }
     }
+
+    /// This camera, as a close-up on `focus` at `magnify`. Free roam has no
+    /// close-up — scene x/y being screen x/y is what registers the creature to
+    /// real window edges — so `TopDown` is returned as it is.
+    pub fn framed(&self, focus: Vec2, magnify: f32) -> Camera {
+        match *self {
+            Camera::TopDown => Camera::TopDown,
+            Camera::Tilted { pitch, yaw, .. } => Camera::Tilted {
+                pitch,
+                yaw,
+                framing: Framing { focus, magnify },
+            },
+        }
+    }
+
 
     /// Unit vector from the scene toward the camera, in world space. The shader
     /// needs it for specular and rim light; it used to be hard-coded to +z,
@@ -188,7 +259,7 @@ impl Camera {
     pub fn far(&self) -> f32 {
         match self {
             Camera::TopDown => 600.0,
-            Camera::Tilted { .. } => 4000.0,
+            Camera::Tilted { .. } => FAR_TILTED,
         }
     }
 
@@ -196,9 +267,12 @@ impl Camera {
     /// separate: this is the z = 0 plane the creature walks on.
     pub fn project_ground(&self, p: Vec2) -> Vec2 {
         let m = self.view();
+        // The translation is zero for every camera but a close-up, where it
+        // is what puts the focus at the centre; adding zero changes nothing
+        // for the others, to the bit.
         Vec2::new(
-            m[0][0] * p.x + m[1][0] * p.y,
-            m[0][1] * p.x + m[1][1] * p.y,
+            m[0][0] * p.x + m[1][0] * p.y + m[3][0],
+            m[0][1] * p.x + m[1][1] * p.y + m[3][1],
         )
     }
 
@@ -210,8 +284,10 @@ impl Camera {
     /// it — and with yaw the error is a rotation, not just a stretch.
     pub fn unproject_ground(&self, screen: Vec2) -> Vec2 {
         let m = self.view();
-        // The 2x2 block mapping ground (x, y) to screen (x, y).
+        // The 2x2 block mapping ground (x, y) to screen (x, y), after the
+        // close-up's translation (zero for any other camera) is taken off.
         let (a, b, c, d) = (m[0][0], m[1][0], m[0][1], m[1][1]);
+        let screen = Vec2::new(screen.x - m[3][0], screen.y - m[3][1]);
         let det = a * d - b * c;
         // Edge-on: the ground has no screen area and any answer is as good as
         // another. Guarding beats dividing by zero.
@@ -241,7 +317,7 @@ impl Camera {
                 for &z in &[z_lo, z_hi] {
                     let p = math::transform_point(&m, [sx, sy, z]);
                     // Drop the translation: this is an offset, not a position.
-                    let (x, y) = (p[0], p[1] - m[3][1]);
+                    let (x, y) = (p[0] - m[3][0], p[1] - m[3][1]);
                     lo = Vec2::new(lo.x.min(x), lo.y.min(y));
                     hi = Vec2::new(hi.x.max(x), hi.y.max(y));
                 }
@@ -349,10 +425,50 @@ mod tests {
             v.camera(),
             Camera::Tilted {
                 pitch: DEFAULT_PITCH,
-                yaw: DEFAULT_YAW
+                yaw: DEFAULT_YAW,
+                framing: Framing::NONE,
             }
         );
         assert_eq!(v.camera(), habitat());
+    }
+
+    /// The close-up: the focus lands at the centre of the screen, everything
+    /// around it is `magnify` times further from it than before, the angle
+    /// is untouched, and the cursor still un-projects to the ground point
+    /// under it. Free roam has no close-up at all.
+    #[test]
+    fn a_close_up_centres_the_focus_magnifies_and_keeps_the_angle() {
+        let plain = habitat();
+        let focus = Vec2::new(340.0, -910.0);
+        let close = plain.framed(focus, CLOSEUP_MAGNIFY);
+        assert_ne!(close, plain);
+        assert_eq!(close.far(), plain.far());
+        assert_eq!(close.view_dir(), plain.view_dir(), "the angle changed");
+
+        let at = close.project_ground(focus);
+        assert!(at.x.abs() < 1e-2 && at.y.abs() < 1e-2, "focus lands at {at:?}");
+        for p in [
+            Vec2::new(360.0, -900.0),
+            Vec2::new(200.0, -1000.0),
+            Vec2::new(500.0, -700.0),
+        ] {
+            let d_plain = plain.project_ground(p);
+            let f_plain = plain.project_ground(focus);
+            let d = close.project_ground(p);
+            assert!(
+                (d.x - (d_plain.x - f_plain.x) * CLOSEUP_MAGNIFY).abs() < 1e-2
+                    && (d.y - (d_plain.y - f_plain.y) * CLOSEUP_MAGNIFY).abs() < 1e-2,
+                "{p:?}: close-up puts it at {d:?}"
+            );
+            // And a screen position goes back to the ground point under it.
+            let back = close.unproject_ground(d);
+            assert!((back.x - p.x).abs() < 1e-2 && (back.y - p.y).abs() < 1e-2, "{p:?} -> {back:?}");
+        }
+        // Placement is done against the unframed camera, and a close-up on
+        // the plain camera's own origin with no magnification is the plain
+        // camera to the bit.
+        assert_eq!(plain.framed(Vec2::ZERO, 1.0).view(), plain.view());
+        assert_eq!(Camera::TopDown.framed(focus, CLOSEUP_MAGNIFY), Camera::TopDown);
     }
 
     /// However hard the user leans on a control, the projection has to stay one
@@ -576,5 +692,71 @@ mod tests {
                 c.far()
             );
         }
+    }
+
+    /// The bug behind "the habitat is not on my monitor": the view is the
+    /// user's now, and a tank placed in a screen corner at a steep tilt sits
+    /// thousands of units out on the ground plane. Tilt turns that into
+    /// view-space distance, and at 1,500 units of eye distance the whole tank
+    /// fell behind the near plane and was culled, creature included. So: for
+    /// every allowed pitch, yaw and zoom, on displays up to 5K, a tank placed
+    /// in its corner — or dragged to any other corner — keeps all eight
+    /// corners between the clip planes, with room to spare.
+    #[test]
+    fn every_allowed_view_keeps_the_tank_between_the_clip_planes() {
+        let (lo, hi) = (
+            crate::habitatmesh::FLOOR_Z,
+            crate::habitatmesh::top_z(dfcore::HabitatKind::Vivarium),
+        );
+        let mut worst_near = f32::MAX;
+        let mut worst_far = f32::MIN;
+        for display in [(1280.0f32, 720.0f32), (2560.0, 1440.0), (3840.0, 2160.0), (5120.0, 2880.0)] {
+            for pitch in [MIN_PITCH, DEFAULT_PITCH, MAX_PITCH] {
+                for yaw in [-MAX_YAW, 0.0, DEFAULT_YAW, MAX_YAW] {
+                    for zoom in [MIN_ZOOM, 1.0, MAX_ZOOM] {
+                        let c = HabitatView { pitch, yaw, zoom }.camera();
+                        let want = (
+                            (display.0 * 0.40).clamp(320.0, 720.0) * zoom,
+                            (display.1 * 0.44).clamp(240.0, 520.0) * zoom,
+                        );
+                        let size = c.fit_size(display, want, lo, hi, 24.0);
+                        let corner = c.place_lower_right(display, size, lo, hi, 24.0);
+                        // And every other corner, by dragging it there.
+                        let mut regions = vec![corner];
+                        for &(sx, sy) in &[(-1.0f32, -1.0f32), (-1.0, 1.0), (1.0, 1.0), (1.0, -1.0)] {
+                            let far_off = c.unproject_ground(Vec2::new(sx * 1e5, sy * 1e5));
+                            regions.push(c.clamp_on_screen(
+                                Region::new(far_off, size),
+                                display,
+                                lo,
+                                hi,
+                                12.0,
+                            ));
+                        }
+                        let m = c.view();
+                        for r in regions {
+                            for x in [r.min().x, r.max().x] {
+                                for y in [r.min().y, r.max().y] {
+                                    for z in [lo, hi] {
+                                        let d = -math::transform_point(&m, [x, y, z])[2];
+                                        worst_near = worst_near.min(d);
+                                        worst_far = worst_far.max(d);
+                                        assert!(
+                                            d > 1.0 && d < c.far(),
+                                            "display {display:?} pitch {pitch:.2} yaw {yaw:.2} zoom {zoom:.2}:                                              a tank corner at ({x:.0}, {y:.0}, {z:.0}) is at depth {d:.0}, outside 1..{}",
+                                            c.far()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Not just inside, but with a margin: a display a little larger than
+        // 5K, or a wall a little taller, must not be the next report.
+        assert!(worst_near > 500.0, "nearest corner is only {worst_near:.0} in front of the eye");
+        assert!(worst_far < FAR_TILTED - 500.0, "farthest corner is within 500 of the far plane: {worst_far:.0}");
     }
 }

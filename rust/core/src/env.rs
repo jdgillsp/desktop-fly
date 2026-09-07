@@ -9,6 +9,7 @@
 //! This is also the seam a second creature reads through: a worm and a fly
 //! sense the same desktop, they just transduce it differently.
 
+use crate::anchors::Frame;
 use crate::util::{Ledge, Vec2};
 
 /// A rectangle in physical screen pixels: Win32 convention, top-left origin,
@@ -143,6 +144,25 @@ impl ScreenSpace {
     }
 }
 
+impl ScreenSpace {
+    /// A window's whole outline as a structure a web can be fixed to,
+    /// clipped to this display. Tiny windows are not worth a thread.
+    pub fn frame_from_window(&self, w: &Rect, id: i64) -> Option<Frame> {
+        if !w.intersects(&self.display) {
+            return None;
+        }
+        let (width, height) = self.size();
+        let a = self.to_scene(w.left as f32, w.bottom as f32);
+        let b = self.to_scene(w.right as f32, w.top as f32);
+        let lo = Vec2::new(a.x.max(-width / 2.0), a.y.max(-height / 2.0));
+        let hi = Vec2::new(b.x.min(width / 2.0), b.y.min(height / 2.0));
+        if hi.x - lo.x < 40.0 || hi.y - lo.y < 40.0 {
+            return None;
+        }
+        Some(Frame { lo, hi, id })
+    }
+}
+
 /// A newly-appeared window, as a looming stimulus.
 #[derive(Debug, Clone, Copy)]
 pub struct WindowLoom {
@@ -160,6 +180,10 @@ pub struct EnvSnapshot {
     /// Click positions since the last poll — substrate taps.
     pub clicks: Vec<Vec2>,
     pub ledges: Vec<Ledge>,
+    /// Every window's rectangle, clipped to this display, as a thing a web
+    /// can be fixed to. Same windows as the ledges; the whole outline rather
+    /// than the top edge, because a thread can go to a side as well.
+    pub frames: Vec<Frame>,
     pub new_windows: Vec<WindowLoom>,
     /// Ledge ids that vanished since the last poll.
     pub closed_windows: Vec<i64>,
@@ -372,6 +396,30 @@ mod tests {
         assert!(l.x0 < l.x1);
         // Walking along it must stay inside the display.
         assert!(l.x0 >= -1280.0 && l.x1 <= 1280.0);
+    }
+
+    /// The same window that gives the fly a ledge gives a weaver a frame:
+    /// the whole outline, y flipped into scene space, clipped to the display.
+    #[test]
+    fn a_window_is_also_a_frame_to_fix_silk_to() {
+        let s = ScreenSpace::new(Rect::new(0, 0, 2560, 1440));
+        let f = s
+            .frame_from_window(&Rect::new(200, 480, 1600, 1200), 7)
+            .expect("a frame");
+        assert_eq!(f.id, 7);
+        // Scene y is up: the window's top is the frame's `hi.y`.
+        assert!((f.hi.y - (720.0 - 480.0)).abs() < 1e-3, "{f:?}");
+        assert!((f.lo.y - (720.0 - 1200.0)).abs() < 1e-3, "{f:?}");
+        assert!((f.lo.x - (200.0 - 1280.0)).abs() < 1e-3 && (f.hi.x - (1600.0 - 1280.0)).abs() < 1e-3);
+        // Its top edge is the ledge.
+        let l = s.ledge_from_window(&Rect::new(200, 480, 1600, 1200), 7).unwrap();
+        assert!((l.y - f.hi.y).abs() < 1e-3);
+        // A window half off the screen is clipped to it, not dropped.
+        let f = s.frame_from_window(&Rect::new(-400, 100, 300, 900), 8).unwrap();
+        assert!((f.lo.x + 1280.0).abs() < 1e-3, "{f:?}");
+        // Off this display entirely, or tiny: nothing.
+        assert!(s.frame_from_window(&Rect::new(3000, 300, 4000, 900), 2).is_none());
+        assert!(s.frame_from_window(&Rect::new(0, 300, 30, 400), 1).is_none());
     }
 
     #[test]

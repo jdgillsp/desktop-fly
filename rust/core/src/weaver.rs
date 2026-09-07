@@ -24,6 +24,7 @@
 
 use crate::arachnid::{new_legs, step_legs, LegMode, SpiderLeg};
 use crate::creature::{Body, Proprioception, Substrate, Weaver as Species, World};
+use crate::anchors::{Anchors, Frame, SCREEN};
 use crate::habitat::Region;
 use crate::rng::Pcg32;
 use crate::signals::BrainSignals;
@@ -53,6 +54,9 @@ pub const FREE_ROAM_WEB: (f32, f32) = (560.0, 440.0);
 pub const ENCLOSURE_MAX: f32 = 1000.0;
 /// A ledge must be at least this wide to hang a web from.
 pub const LEDGE_MIN_WIDTH: f32 = 220.0;
+/// How close to a structure's outline a fixed end has to be to count as on
+/// it: the programs stand their anchors `WALL_INSET` (14) short of the thing.
+pub const ON_TOL: f32 = 17.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeaverState {
@@ -190,7 +194,7 @@ impl Move {
 pub trait WebProgram {
     fn species(&self) -> Species;
     /// The next move, or `None` when there is nothing to build right now.
-    fn next(&mut self, silk: &Silk, region: Region, rng: &mut Pcg32, pos: Vec2) -> Option<Move>;
+    fn next(&mut self, silk: &Silk, world: &Anchors, rng: &mut Pcg32, pos: Vec2) -> Option<Move>;
     /// Where the spider waits for prey, once there is somewhere to wait.
     fn sit_point(&self, silk: &Silk) -> Option<Vec2>;
     /// How far along the current web is, 0..1.
@@ -199,22 +203,22 @@ pub trait WebProgram {
     /// Whether the web is finished as far as the program is concerned.
     fn complete(&self) -> bool;
     /// Start over on an empty silk.
-    fn reset(&mut self, region: Region, rng: &mut Pcg32);
+    fn reset(&mut self, world: &Anchors, rng: &mut Pcg32);
     /// Threads were cut. Re-plan repairs; return `true` if the damage is
     /// beyond repair and the web should be taken down and rebuilt.
     fn on_damage(&mut self, silk: &Silk) -> bool;
     /// Whether the species takes its web down at dusk and rebuilds.
     fn rebuilds_daily(&self) -> bool;
     /// Called at each dusk for species that add to a standing web.
-    fn nightly(&mut self, _silk: &Silk, _region: Region, _rng: &mut Pcg32) {}
+    fn nightly(&mut self, _silk: &Silk, _world: &Anchors, _rng: &mut Pcg32) {}
 }
 
 /// Which construction program a species runs (WEB_PLAN.md §5).
-pub fn program_for(species: Species, region: Region, rng: &mut Pcg32) -> Box<dyn WebProgram> {
+pub fn program_for(species: Species, world: &Anchors, rng: &mut Pcg32) -> Box<dyn WebProgram> {
     match species {
-        Species::Araneus => Box::new(crate::orb::OrbProgram::new(region, rng)),
-        Species::Parasteatoda => Box::new(crate::cobweb::CobwebProgram::new(region, rng)),
-        Species::Agelenopsis => Box::new(crate::funnel::FunnelProgram::new(region, rng)),
+        Species::Araneus => Box::new(crate::orb::OrbProgram::new(world, rng)),
+        Species::Parasteatoda => Box::new(crate::cobweb::CobwebProgram::new(world, rng)),
+        Species::Agelenopsis => Box::new(crate::funnel::FunnelProgram::new(world, rng)),
     }
 }
 
@@ -225,7 +229,7 @@ impl WebProgram for Idle {
     fn species(&self) -> Species {
         self.0
     }
-    fn next(&mut self, _: &Silk, _: Region, _: &mut Pcg32, _: Vec2) -> Option<Move> {
+    fn next(&mut self, _: &Silk, _: &Anchors, _: &mut Pcg32, _: Vec2) -> Option<Move> {
         None
     }
     fn sit_point(&self, _: &Silk) -> Option<Vec2> {
@@ -240,7 +244,7 @@ impl WebProgram for Idle {
     fn complete(&self) -> bool {
         true
     }
-    fn reset(&mut self, _: Region, _: &mut Pcg32) {}
+    fn reset(&mut self, _: &Anchors, _: &mut Pcg32) {}
     fn on_damage(&mut self, _: &Silk) -> bool {
         false
     }
@@ -321,9 +325,15 @@ pub struct Weaver {
     /// Where the current web was planned: the enclosure, or a box on the
     /// desktop under a window edge (WEB_PLAN.md §6).
     pub build_region: Option<Region>,
-    /// The window edge the web hangs from, if any. When it moves or closes
-    /// the threads on it are cut, and the animal repairs or starts again.
+    /// The window edge the web hangs from, when the box was placed under
+    /// one (no frames known). Placement only; breakage goes by structure.
     pub anchor_ledge: Option<Ledge>,
+    /// The windows on screen, as things a thread can be fixed to. Set by the
+    /// runtime from the senses; empty in an enclosure.
+    pub frames: Vec<Frame>,
+    /// What the current web is fixed to. Rebuilt on every plan and whenever
+    /// the frames change.
+    anchors: Anchors,
     /// Local hour, for dusk; set by the runtime from the senses.
     pub hour: f32,
     /// Seconds since the web was last completed.
@@ -376,6 +386,8 @@ impl Weaver {
             strike_cooldown: 0.0,
             build_region: None,
             anchor_ledge: None,
+            frames: Vec::new(),
+            anchors: Anchors::enclosure(Region::new(at, (1.0, 1.0))),
             hour: 12.0,
             web_age: 0.0,
             was_complete: false,
@@ -507,42 +519,74 @@ impl Weaver {
         }
     }
 
-    /// Plan (or re-plan) the web in a region chosen from the world.
+    /// Plan (or re-plan) the web in a region chosen from the world, fixed
+    /// to whatever structures are around it.
+    ///
+    /// An enclosure is used whole, and its walls are the structures. On the
+    /// desktop, when the windows are known, the site is a patch of air
+    /// between them (`Anchors::choose_site`); with only ledges to go on it is
+    /// the old box under the widest window edge.
     fn replan(&mut self, region: Region) {
-        let (build, ledge) = Self::choose_build_region(region, &self.terrain);
+        let (w, h) = region.size;
+        let enclosure = w <= ENCLOSURE_MAX && h <= ENCLOSURE_MAX;
+        let mut r = Pcg32::new(self.rng.next_u32() as u64);
+        let (build, ledge) = if !enclosure && !self.frames.is_empty() {
+            match Anchors::choose_site(region, &self.frames, &mut r) {
+                Some(site) => (site, None),
+                None => Self::choose_build_region(region, &self.terrain),
+            }
+        } else {
+            Self::choose_build_region(region, &self.terrain)
+        };
         self.build_region = Some(build);
         self.anchor_ledge = ledge;
-        let mut r = Pcg32::new(self.rng.next_u32() as u64);
-        self.program.reset(build, &mut r);
+        self.anchors = if enclosure {
+            Anchors::enclosure(build)
+        } else {
+            Anchors::desktop(build, region, &self.frames)
+        };
+        self.program.reset(&self.anchors, &mut r);
         self.current = None;
     }
 
-    /// The window edge the web hangs from moved or closed: cut every thread
-    /// fixed on it, and only those. Returns how many went.
-    fn check_anchor_ledge(&mut self) -> usize {
-        let Some(l) = self.anchor_ledge else { return 0 };
-        let still = self
-            .terrain
-            .iter()
-            .any(|c| c.id == l.id && (c.y - l.y).abs() < 3.0 && c.x0 <= l.x0 + 3.0 && c.x1 >= l.x1 - 3.0);
-        if still {
+    /// What the web is fixed to right now.
+    pub fn anchors(&self) -> &Anchors {
+        &self.anchors
+    }
+
+    /// A structure the web is fixed to moved or closed: cut every thread
+    /// with an end on it, and only those, then let the program repair or
+    /// start again. A window that appeared becomes something new to fix to.
+    /// Returns how many threads went.
+    fn check_structures(&mut self, world: Region) -> usize {
+        if self.anchors.is_enclosure() {
             return 0;
         }
-        let fixed: Vec<Vec2> = self
-            .silk
-            .nodes
-            .iter()
-            .filter(|n| n.anchor == Anchor::Fixed && (n.pos.y - l.y).abs() < 20.0)
-            .map(|n| n.pos)
-            .collect();
+        let old = self.anchors.structures.clone();
         let mut cut = 0;
-        for p in fixed {
-            cut += self.silk.cut_near(p, 3.0);
+        let mut changed = false;
+        for s in old.iter().filter(|s| s.id != SCREEN) {
+            match self.frames.iter().find(|f| f.id == s.id) {
+                Some(f) if !f.moved_from(s) => {}
+                _ => {
+                    cut += self.silk.cut_on(s.id);
+                    changed = true;
+                }
+            }
         }
-        self.anchor_ledge = None;
-        self.current = None;
-        if cut > 0 && self.program.on_damage(&self.silk) {
-            self.begin_rebuild();
+        if self.frames.iter().any(|f| !old.iter().any(|s| s.id == f.id)) {
+            changed = true;
+        }
+        if changed {
+            if let Some(build) = self.build_region {
+                self.anchors = Anchors::desktop(build, world, &self.frames);
+            }
+        }
+        if cut > 0 {
+            self.current = None;
+            if self.program.on_damage(&self.silk) {
+                self.begin_rebuild();
+            }
         }
         cut
     }
@@ -570,7 +614,8 @@ impl Weaver {
         match op {
             Op::Nothing => {}
             Op::PayOut(kind) => {
-                self.silk.pay_out(at, kind);
+                let n = self.silk.pay_out(at, kind);
+                self.silk.nodes[n].on = self.anchors.on(at, ON_TOL);
             }
             Op::StartLine { kind, radius } => {
                 self.silk.release();
@@ -597,7 +642,12 @@ impl Weaver {
                 }
             }
             Op::Attach(anchor) => {
-                self.silk.attach(at, anchor);
+                let m = self.silk.attach(at, anchor);
+                if anchor == Anchor::Fixed {
+                    // Which structure this end is on, if any — the thing
+                    // whose moving will cut this thread.
+                    self.silk.nodes[m].on = self.anchors.on(at, ON_TOL);
+                }
             }
             Op::AttachNear(r) => match self.silk.node_at(at, r) {
                 Some(n) => self.silk.attach_to(n),
@@ -650,6 +700,11 @@ impl Weaver {
     }
 
     pub fn update(&mut self, dt: f32, region: Region, mouse: Option<Vec2>, signals: Option<BrainSignals>) {
+        // The walls, as distinct from the box the web is planned in: an
+        // enclosure is used whole, so they coincide there, but in free roam
+        // the web's box is smaller than the display and the *display* is
+        // where the world ends.
+        let world = region;
         self.time += dt;
         self.state_age += dt;
         self.escape_cooldown = (self.escape_cooldown - dt).max(0.0);
@@ -664,7 +719,7 @@ impl Weaver {
         if self.build_region.is_none() {
             self.replan(region);
         }
-        self.check_anchor_ledge();
+        self.check_structures(world);
         let region = self.build_region.unwrap_or(region);
 
         self.update_bugs(dt, region);
@@ -689,7 +744,7 @@ impl Weaver {
 
         match self.state {
             WeaverState::Dropping | WeaverState::Hanging | WeaverState::Climbing => {
-                self.update_drop(dt, signals.as_ref());
+                self.update_drop(dt, world, signals.as_ref());
             }
             _ => {
                 if let Some(s) = signals {
@@ -699,6 +754,11 @@ impl Weaver {
                 }
             }
         }
+
+        // Whatever the state did, the animal is inside the walls. Zero
+        // margin, because the programs put anchors as close as WALL_INSET to
+        // a wall and a walk to one of those has to be able to arrive.
+        self.pos = world.clamp_inside(self.pos, 0.0);
 
         self.z = 0.0;
         self.update_posture(dt);
@@ -834,7 +894,7 @@ impl Weaver {
         self.current = None;
     }
 
-    fn update_drop(&mut self, dt: f32, signals: Option<&BrainSignals>) {
+    fn update_drop(&mut self, dt: f32, world: Region, signals: Option<&BrainSignals>) {
         if let Some(s) = signals {
             if s.escape && self.escape_cooldown == 0.0 && self.state != WeaverState::Dropping {
                 // Startled again on the line: let out more.
@@ -844,7 +904,13 @@ impl Weaver {
                 self.set_state(WeaverState::Dropping);
             }
         }
-        let bottom = self.drop_anchor.y - self.drop_len;
+        // The line runs "down" the ground plane, toward the near wall. In an
+        // enclosure that wall is close: a garden spider startled at the
+        // bottom of its orb was dropping straight out through the front of
+        // the vivarium. The line is as long as the room there is, and no
+        // longer — and a re-startle cannot pay out past the wall either.
+        let floor = world.min().y + EDGE_MARGIN;
+        let bottom = (self.drop_anchor.y - self.drop_len).max(floor.min(self.drop_anchor.y));
         match self.state {
             WeaverState::Dropping => {
                 self.pos.y -= 140.0 * dt;
@@ -1074,7 +1140,7 @@ impl Weaver {
                 return;
             } else {
                 let mut r = Pcg32::new(self.rng.next_u32() as u64);
-                self.program.nightly(&self.silk, region, &mut r);
+                self.program.nightly(&self.silk, &self.anchors, &mut r);
                 self.web_age = 0.0;
             }
         }
@@ -1101,7 +1167,7 @@ impl Weaver {
         if self.current.is_none() && self.build_gate {
             let here = self.pos;
             let mut r = Pcg32::new(self.rng.next_u32() as u64);
-            self.current = self.program.next(&self.silk, region, &mut r, here);
+            self.current = self.program.next(&self.silk, &self.anchors, &mut r, here);
         }
         if let Some(mv) = self.current.clone() {
             if !self.build_gate {
@@ -1258,7 +1324,7 @@ mod tests {
             fn species(&self) -> Species {
                 Species::Agelenopsis
             }
-            fn next(&mut self, _: &Silk, _: Region, _: &mut Pcg32, _: Vec2) -> Option<Move> {
+            fn next(&mut self, _: &Silk, _: &Anchors, _: &mut Pcg32, _: Vec2) -> Option<Move> {
                 None
             }
             fn sit_point(&self, _: &Silk) -> Option<Vec2> {
@@ -1273,7 +1339,7 @@ mod tests {
             fn complete(&self) -> bool {
                 true
             }
-            fn reset(&mut self, _: Region, _: &mut Pcg32) {}
+            fn reset(&mut self, _: &Anchors, _: &mut Pcg32) {}
             fn on_damage(&mut self, _: &Silk) -> bool {
                 false
             }
@@ -1375,6 +1441,62 @@ mod tests {
         assert!(snapped, "bug at {:?} stuck {}", w.prey[0].pos, w.prey[0].stuck);
     }
 
+    /// Both droppers were seen leaving the vivarium: a GF spike while the
+    /// animal sat near the front wall paid out a dragline longer than the
+    /// room left, and the drop carried it straight out through the glass.
+    /// Startled repeatedly on the line it went further still. The line now
+    /// stops at the wall, and the animal is inside the region at every frame
+    /// of the drop, the hang and the climb back.
+    #[test]
+    fn a_startled_spider_never_drops_out_of_its_enclosure() {
+        // A vivarium-sized box, the size the shell actually gives a weaver.
+        let tank = Region::new(Vec2::new(300.0, -150.0), (460.0, 400.0));
+        for species in [Species::Araneus, Species::Parasteatoda] {
+            let program = program_for(species, &Anchors::enclosure(tank), &mut Pcg32::new(3));
+            let mut w = Weaver::new(species, tank.center, 3, program);
+            // Sitting 40 in from the front wall, well short of one drop.
+            w.pos = Vec2::new(tank.center.x, tank.min().y + 40.0);
+            let mut s = BrainSignals::new();
+            s.walk_drive = 0.6;
+            s.escape = true;
+            let mut t = 0.0;
+            let mut dropped = false;
+            let mut hung = false;
+            let mut startles = 0;
+            while t < 40.0 {
+                // Startle it again every two seconds while it is on the line.
+                s.escape = matches!(w.state, WeaverState::Hanging) && (t * 60.0) as i32 % 120 == 0 && startles < 4;
+                if s.escape {
+                    startles += 1;
+                }
+                if t == 0.0 {
+                    s.escape = true;
+                }
+                w.update(DT, tank, None, Some(s));
+                dropped |= w.state == WeaverState::Dropping;
+                hung |= w.state == WeaverState::Hanging;
+                assert!(
+                    !tank.outside(w.pos, 0.0),
+                    "{species:?} left the tank at ({:.0}, {:.0}) in state {:?} (t={t:.1})",
+                    w.pos.x,
+                    w.pos.y,
+                    w.state
+                );
+                if hung && !matches!(w.state, WeaverState::Dropping | WeaverState::Hanging | WeaverState::Climbing) {
+                    break;
+                }
+                t += DT;
+            }
+            assert!(dropped && hung, "{species:?} never dropped: state {:?}", w.state);
+            assert!(startles >= 2, "{species:?} was not re-startled on the line ({startles})");
+            assert!(
+                !matches!(w.state, WeaverState::Dropping | WeaverState::Hanging | WeaverState::Climbing),
+                "{species:?} is still on the line after {t:.0} s: {:?}",
+                w.state
+            );
+        }
+    }
+
     #[test]
     fn free_roam_hangs_the_web_under_a_wide_window_edge_and_an_enclosure_is_used_whole() {
         let tank = Region::centered((720.0, 520.0));
@@ -1394,14 +1516,30 @@ mod tests {
         assert!(r.size.0 <= 600.0);
     }
 
+    /// The desktop as anchors: two windows with air between them. The web
+    /// is planned in the gap, fixed to both windows and to the screen, and
+    /// when one window moves the threads on *it* go — the other window's and
+    /// the screen's stay. When it closes, likewise. Every fixed end knows
+    /// which structure it is on; nothing is inferred from position.
     #[test]
-    fn a_moved_window_edge_cuts_only_the_threads_fixed_on_it() {
+    fn a_web_spans_two_windows_and_a_moved_window_cuts_only_its_own_threads() {
         let display = Region::centered((2560.0, 1440.0));
-        let ledge = Ledge { y: 220.0, x0: -420.0, x1: 240.0, id: 9 };
+        let a = Frame {
+            lo: Vec2::new(-1200.0, -720.0),
+            hi: Vec2::new(-260.0, 720.0),
+            id: 9,
+        };
+        let b = Frame {
+            lo: Vec2::new(260.0, -720.0),
+            hi: Vec2::new(1200.0, 720.0),
+            id: 4,
+        };
         let mut rng = Pcg32::new(5);
-        let program = crate::orb::OrbProgram::new(display, &mut rng);
+        // The program is re-planned on the first frame from the frames; the
+        // one it is built with is a placeholder.
+        let program = crate::orb::OrbProgram::new(&Anchors::enclosure(display), &mut rng);
         let mut w = Weaver::new(Species::Araneus, Vec2::ZERO, 5, Box::new(program));
-        w.terrain = vec![ledge];
+        w.frames = vec![a, b];
         let mut s = BrainSignals::new();
         s.walk_drive = 0.6;
         let mut t = 0.0;
@@ -1410,42 +1548,55 @@ mod tests {
             t += DT;
         }
         assert!(w.web_complete(), "{}", w.program.stage());
-        assert_eq!(w.anchor_ledge.map(|l| l.id), Some(9));
-        let top = w.build_region.unwrap().max().y;
-        assert!((top - 220.0).abs() < 1e-3);
-        let on_ledge: Vec<Vec2> = w
-            .silk
-            .nodes
-            .iter()
-            .filter(|n| n.anchor == Anchor::Free || n.anchor == Anchor::Fixed)
-            .filter(|n| n.anchor == Anchor::Fixed && (n.pos.y - 220.0).abs() < 20.0)
-            .map(|n| n.pos)
-            .collect();
-        assert!(!on_ledge.is_empty(), "something is fixed on the edge");
-        let touching = w
+        let build = w.build_region.unwrap();
+        assert!(
+            !a.contains(build.center) && !b.contains(build.center),
+            "the web was planned over a window: {build:?}"
+        );
+        assert!(!w.anchors().is_enclosure());
+
+        let on = |w: &Weaver, id: i64| w.silk.nodes.iter().filter(|n| n.on == Some(id)).count();
+        let (on_a, on_b, on_screen) = (on(&w, 9), on(&w, 4), on(&w, crate::anchors::SCREEN));
+        assert!(on_a > 0 && on_b > 0, "the web does not span both windows: a {on_a}, b {on_b}");
+        assert!(on_screen > 0, "nothing reaches the screen edge");
+        let touching_b = w
             .silk
             .threads
             .iter()
-            .filter(|t| {
-                on_ledge.iter().any(|p| {
-                    let (a, b) = (w.silk.nodes[t.a].pos, w.silk.nodes[t.b].pos);
-                    (a.x - p.x).abs() < 1e-3 && (a.y - p.y).abs() < 1e-3
-                        || (b.x - p.x).abs() < 1e-3 && (b.y - p.y).abs() < 1e-3
-                })
-            })
+            .filter(|t| w.silk.nodes[t.a].on == Some(4) || w.silk.nodes[t.b].on == Some(4))
             .count();
+        assert!(touching_b > 0);
         let before = w.silk.threads.len();
-        // The window moves down.
-        w.terrain = vec![Ledge { y: 100.0, ..ledge }];
+
+        // Window b moves down.
+        w.frames = vec![
+            a,
+            Frame {
+                lo: Vec2::new(b.lo.x, b.lo.y - 200.0),
+                hi: Vec2::new(b.hi.x, b.hi.y - 200.0),
+                id: 4,
+            },
+        ];
         w.update(DT, display, None, Some(s));
         let after = w.silk.threads.len();
-        assert_eq!(before - after, touching, "only the threads on the edge went: {before} -> {after}, {touching} touched it");
-        assert!(w.anchor_ledge.is_none());
+        assert_eq!(
+            before - after,
+            touching_b,
+            "only the threads on b should go: {before} -> {after}, {touching_b} were on it"
+        );
+        assert_eq!(on(&w, 4), 0, "something is still fixed to the old b");
+        assert_eq!(on(&w, 9), on_a, "a's threads were touched");
+        assert_eq!(on(&w, crate::anchors::SCREEN), on_screen, "the screen's threads were touched");
+        // And the moved window is a structure again, at its new place.
+        assert!(w.anchors().structures.iter().any(|f| f.id == 4 && (f.lo.y - (b.lo.y - 200.0)).abs() < 1e-3));
+
+        // Window a closes.
+        w.frames = vec![w.frames[1]];
+        w.update(DT, display, None, Some(s));
+        assert_eq!(on(&w, 9), 0, "a closed and its threads remain");
         assert!(
-            matches!(w.state, WeaverState::Eating) || w.program.stage() == "repairing",
-            "state {:?} stage {}",
-            w.state,
-            w.program.stage()
+            !w.anchors().structures.iter().any(|f| f.id == 9),
+            "a closed window is still a structure"
         );
     }
 
@@ -1456,11 +1607,11 @@ mod tests {
         // path from a WebProgram to a BrainSignals or a LifSim. This test
         // exists so the seam is named in the suite; the type system does the
         // enforcing.
-        fn takes_only_the_world(p: &mut dyn WebProgram, silk: &Silk, region: Region) -> Option<Move> {
+        fn takes_only_the_world(p: &mut dyn WebProgram, silk: &Silk, world: &Anchors) -> Option<Move> {
             let mut r = Pcg32::new(1);
-            p.next(silk, region, &mut r, Vec2::ZERO)
+            p.next(silk, world, &mut r, Vec2::ZERO)
         }
         let mut p = Idle(Species::Araneus);
-        assert!(takes_only_the_world(&mut p, &Silk::new(), BOUNDS).is_none());
+        assert!(takes_only_the_world(&mut p, &Silk::new(), &Anchors::enclosure(BOUNDS)).is_none());
     }
 }

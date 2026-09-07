@@ -533,7 +533,7 @@ mod tests {
         use dfcore::{OrbProgram, Region};
         let tank = Region::centered((720.0, 520.0));
         let mut rng = dfcore::rng::Pcg32::new(3);
-        let program = OrbProgram::new(tank, &mut rng);
+        let program = OrbProgram::new(&dfcore::Anchors::enclosure(tank), &mut rng);
         let mut w = WeaverBody::new(Species::Araneus, Vec2::ZERO, 3, Box::new(program));
         let mut s = dfcore::BrainSignals::new();
         s.walk_drive = 0.6;

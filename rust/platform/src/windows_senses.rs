@@ -403,6 +403,12 @@ impl Senses for WindowsSenses {
                     snap.ledges.push(l);
                 }
             }
+            // The same window, whole, for the weavers to fix silk to.
+            if let Some(f) = space.frame_from_window(&r, w.hwnd as i64) {
+                if snap.frames.len() < 24 {
+                    snap.frames.push(f);
+                }
+            }
             if !self.first_poll && !self.known_windows.contains(&(w.hwnd as i64)) {
                 snap.new_windows.push(WindowLoom {
                     center: space.to_scene(r.center_x(), r.center_y()),

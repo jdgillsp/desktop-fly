@@ -97,6 +97,15 @@ pub fn save_habitat_choice(on: bool) {
     save_setting("habitat", serde_json::Value::Bool(on));
 }
 
+/// Whether the habitat camera is a close-up on the animal.
+pub fn load_closeup_choice() -> Option<bool> {
+    load_settings().get("habitat_closeup")?.as_bool()
+}
+
+pub fn save_closeup_choice(on: bool) {
+    save_setting("habitat_closeup", serde_json::Value::Bool(on));
+}
+
 /// How the user has angled and sized the enclosure, as `(pitch, yaw, zoom)`.
 ///
 /// Returned raw: the caller clamps. Keeping the clamp in one place

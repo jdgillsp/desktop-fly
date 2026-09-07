@@ -538,3 +538,56 @@ the controls below were checked.
 - **Contents are per enclosure kind, not per creature.** Two creatures sharing a
   substrate share the tank they were given. This is deliberate, but it means a
   second flier would inherit the fly's arrangement.
+
+## 7. The tank that was not on the monitor (2026-09-07)
+
+Jesse's report: the saved habitat was on, and no tank appeared anywhere on
+either 2560 × 1440 display. The run's own log had placed it at ground
+(−161, −2196), which the placement maths said was on screen — and it was,
+in x and y. It was behind the camera.
+
+`EYE_TILTED` was 1,500: enough for a tank near the middle of the screen at
+the default tilt, which is all v2 ever produced. Once the view became the
+user's (pitch up to 1.32, yaw to ±1.15, zoom down to 0.45), a tank placed in
+the lower-right corner at a steep tilt sits two thousand units out on the
+ground plane, and tilt turns ground depth into view-space distance: at the
+pitch in the log every corner of the tank was at view depth −586 to −141,
+behind the near plane, and the whole box was culled — creature included,
+since it stands inside it. The projection is orthographic, so the eye
+distance is free to move: `EYE_TILTED` is 8,000 and the tilted far plane
+16,000, sized for the worst allowed view on a 5K display with margin.
+
+`every_allowed_view_keeps_the_tank_between_the_clip_planes` places a tank in
+every screen corner for every combination of pitch, yaw and zoom limit on
+displays up to 5120 × 2880 and asserts all eight corners sit between the
+planes with 500 units to spare. With the old constants it fails at once.
+`--snapshot --habitat` for the koi and the orb weaver render as before.
+
+## 8. Close-up view (2026-09-07)
+
+Jesse's ask: toggle to a closer view of the animal within its enclosure.
+
+The habitat camera gained a **framing**: a ground point that lands at the
+centre of the screen and a magnification about it (`camera::Framing`,
+`Camera::framed`). It is applied *after* the tilt and turn, in screen space,
+so the angle is the user's angle and the animal is simply seen closer:
+`CLOSEUP_MAGNIFY` is 2.6, enough that a fly is an animal rather than a
+speck and most of its tank is still around it. The focus follows the
+creature a beat behind (a 200 ms lag), so a walk does not shake the whole
+tank; toggling on snaps it to the animal first.
+
+Everything that maps ground to screen went through `project_ground` /
+`unproject_ground` already, so the cursor still un-projects to the ground
+point under it in a close-up, and the drag chords still work: the pointer is
+read through the framed camera (what the user sees), the tank is clamped on
+screen through the plain one (where the tank is). Placement and fitting are
+unchanged, because `Framing::NONE` produces the old matrices to the bit, and
+free roam has no close-up at all — scene x/y being screen x/y is what puts
+the fly on your window edge.
+
+Where it lives: the tray's **View → Close-up (follow the animal)** check
+item, `--closeup` on the command line, persisted as `habitat_closeup`, and
+`--snapshot --habitat --closeup` for checking it offscreen.
+`a_close_up_centres_the_focus_magnifies_and_keeps_the_angle` pins the focus
+at the centre, the magnification, the untouched angle, and the round trip
+through the cursor's un-projection.

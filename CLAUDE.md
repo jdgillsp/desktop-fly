@@ -91,10 +91,17 @@ otherwise.
   construction programs are **procedural and labelled so** in
   `Provenance::Chimera.procedural`. The programs never write to the sim; the
   brain gates *whether* the animal moves, the program says *where the thread
-  goes*. Suites: `dfcore --creature araneus --simtest --behaviortest` (and
-  the other two). Touching `silk.rs`, `arachnid.rs` or `spider.rs` means
-  diffing the salticid suite output byte for byte; `lif.rs` or `roles.rs`
-  means diffing the fly's.
+  goes*. Webs are fixed to **structures** (`rust/core/src/anchors.rs`): an
+  enclosure's walls, or on the desktop the screen edges and every window's
+  outline (`EnvSnapshot::frames`, from the same rectangles as the ledges).
+  Each fixed end records the structure it is on (`silk::Node::on`); a window
+  that moves or closes cuts exactly its own threads and the program repairs
+  or rebuilds. Windows are solid — the web is planned in the air between
+  them (`Anchors::choose_site`). Suites: `dfcore --creature araneus
+  --simtest --behaviortest` (and the other two); touching `anchors.rs` or a
+  program means diffing all three byte for byte. Touching `silk.rs`,
+  `arachnid.rs` or `spider.rs` means diffing the salticid suite output byte
+  for byte; `lif.rs` or `roles.rs` means diffing the fly's.
 - **Creatures #8 and #9 are procedural** (`DESERT_PLAN.md`): a hognose
   snake (`hognose`) and a *Dune* sandworm (`sandworm`), on the koi's terms —
   no connectome, `Provenance::Procedural`, no brain window, and the sandworm

@@ -23,6 +23,7 @@
 use std::collections::VecDeque;
 
 use crate::creature::Weaver as Species;
+use crate::anchors::Anchors;
 use crate::habitat::Region;
 use crate::rng::Pcg32;
 use crate::silk::{Anchor, Silk, ThreadKind};
@@ -73,7 +74,8 @@ pub struct FunnelProgram {
 }
 
 impl FunnelProgram {
-    pub fn new(region: Region, rng: &mut Pcg32) -> Self {
+    pub fn new(world: &Anchors, rng: &mut Pcg32) -> Self {
+        let region = world.bounds;
         let mut p = FunnelProgram {
             wall: region.center,
             mouth: region.center,
@@ -87,7 +89,7 @@ impl FunnelProgram {
             in_session_fill: false,
             coverage: vec![0; GRID.0 * GRID.1],
         };
-        p.reset(region, rng);
+        p.reset(world, rng);
         p
     }
 
@@ -126,29 +128,43 @@ impl FunnelProgram {
         cands[rng.int_range(0, cands.len() as i64 - 1) as usize]
     }
 
-    fn queue_supports(&mut self, region: Region, rng: &mut Pcg32) {
+    fn queue_supports(&mut self, world: &Anchors, rng: &mut Pcg32) {
         let m = self.mouth;
+        let region = world.bounds;
         let rlo = region.min();
         let rhi = region.max();
         for _ in 0..SUPPORTS_PER_SESSION {
             // A bee line: straight from the mouth to an anchor beyond the
-            // sheet — a wall, or the far corners of the area.
-            let target = match rng.int_range(0, 3) {
-                0 => Vec2::new(
-                    if self.side > 0.0 { rlo.x + WALL_INSET } else { rhi.x - WALL_INSET },
-                    rng.range(self.lo.y, self.hi.y),
+            // sheet — whatever is there in that direction, or the far
+            // corners of the area.
+            let (target, outward) = match rng.int_range(0, 3) {
+                0 => (
+                    Vec2::new(
+                        if self.side > 0.0 { rlo.x + WALL_INSET } else { rhi.x - WALL_INSET },
+                        rng.range(self.lo.y, self.hi.y),
+                    ),
+                    true,
                 ),
-                1 => Vec2::new(rng.range(self.lo.x, self.hi.x), rhi.y - WALL_INSET),
-                2 => Vec2::new(rng.range(self.lo.x, self.hi.x), rlo.y + WALL_INSET),
-                _ => Vec2::new(
-                    if self.side > 0.0 { self.lo.x } else { self.hi.x },
-                    if rng.f32() < 0.5 { self.lo.y } else { self.hi.y },
+                1 => (Vec2::new(rng.range(self.lo.x, self.hi.x), rhi.y - WALL_INSET), true),
+                2 => (Vec2::new(rng.range(self.lo.x, self.hi.x), rlo.y + WALL_INSET), true),
+                _ => (
+                    Vec2::new(
+                        if self.side > 0.0 { self.lo.x } else { self.hi.x },
+                        if rng.f32() < 0.5 { self.lo.y } else { self.hi.y },
+                    ),
+                    false,
                 ),
+            };
+            let target = if outward {
+                world.anchor_toward(m, target, WALL_INSET)
+            } else {
+                target
             };
             let fixed = (target.x - rlo.x).abs() < WALL_INSET + 0.5
                 || (rhi.x - target.x).abs() < WALL_INSET + 0.5
                 || (target.y - rlo.y).abs() < WALL_INSET + 0.5
-                || (rhi.y - target.y).abs() < WALL_INSET + 0.5;
+                || (rhi.y - target.y).abs() < WALL_INSET + 0.5
+                || world.on(target, WALL_INSET + 3.0).is_some();
             self.queue.push_back(Move::new(
                 m,
                 Op::StartLine {
@@ -205,7 +221,7 @@ impl FunnelProgram {
         });
     }
 
-    fn plan(&mut self, region: Region, rng: &mut Pcg32) {
+    fn plan(&mut self, world: &Anchors, rng: &mut Pcg32) {
         match self.stage {
             Stage::Funnel => {
                 // A tube of dense silk from the wall to the mouth: zigzag
@@ -235,7 +251,7 @@ impl FunnelProgram {
                 self.stage = Stage::Supports;
             }
             Stage::Supports => {
-                self.queue_supports(region, rng);
+                self.queue_supports(world, rng);
                 self.stage = Stage::Filling;
             }
             Stage::Filling => {
@@ -271,9 +287,9 @@ impl WebProgram for FunnelProgram {
         Species::Agelenopsis
     }
 
-    fn next(&mut self, _silk: &Silk, region: Region, rng: &mut Pcg32, _pos: Vec2) -> Option<Move> {
+    fn next(&mut self, _silk: &Silk, world: &Anchors, rng: &mut Pcg32, _pos: Vec2) -> Option<Move> {
         if self.queue.is_empty() && self.stage != Stage::Done {
-            self.plan(region, rng);
+            self.plan(world, rng);
         }
         self.queue.pop_front()
     }
@@ -308,14 +324,18 @@ impl WebProgram for FunnelProgram {
         self.stage == Stage::Done && self.queue.is_empty()
     }
 
-    fn reset(&mut self, region: Region, rng: &mut Pcg32) {
+    fn reset(&mut self, world: &Anchors, rng: &mut Pcg32) {
+        let region: Region = world.bounds;
         let rlo = region.min();
         let rhi = region.max();
         let (w, h) = region.size;
         self.side = if rng.f32() < 0.5 { -1.0 } else { 1.0 };
         let y = region.center.y + rng.range(-0.25, 0.25) * h;
         let wall_x = if self.side > 0.0 { rhi.x - WALL_INSET } else { rlo.x + WALL_INSET };
-        self.wall = Vec2::new(wall_x, y);
+        // The funnel is against whatever is really there on that side: the
+        // wall, or on the desktop the nearest window edge or the screen.
+        self.wall = world.anchor_toward(Vec2::new(region.center.x, y), Vec2::new(wall_x, y), WALL_INSET);
+        let wall_x = self.wall.x;
         let tube = (0.09 * w).clamp(30.0, 70.0);
         self.mouth = Vec2::new(wall_x - self.side * tube, y);
         let sw = SHEET_W * w;
@@ -354,9 +374,9 @@ impl WebProgram for FunnelProgram {
         false
     }
 
-    fn nightly(&mut self, _silk: &Silk, region: Region, rng: &mut Pcg32) {
+    fn nightly(&mut self, _silk: &Silk, world: &Anchors, rng: &mut Pcg32) {
         // One more session: the sheet thickens.
-        self.queue_supports(region, rng);
+        self.queue_supports(world, rng);
         self.queue_filling(rng);
         self.queue.push_back(Move::walk(self.mouth));
         self.stage = Stage::Adding;
@@ -378,7 +398,7 @@ mod tests {
 
     fn grass_spider(seed: u64) -> Weaver {
         let mut rng = Pcg32::new(seed);
-        let program = FunnelProgram::new(TANK, &mut rng);
+        let program = FunnelProgram::new(&Anchors::enclosure(TANK), &mut rng);
         Weaver::new(Species::Agelenopsis, TANK.center, seed, Box::new(program))
     }
 

@@ -96,6 +96,8 @@ struct Args {
     /// Whether the user ever said so (flag or saved choice). If not, the
     /// creature's own preference decides: a web builder starts in a tank.
     habitat_explicit: bool,
+    /// The habitat camera follows the animal, close. A toggle, persisted.
+    closeup: bool,
     /// Frame cap. A background pet does not need 60 fps, and Spike 0 measured
     /// ~8% of a core just to clear and present a full-screen overlay -- so the
     /// frame rate is most of the idle cost. See `--fps`.
@@ -151,6 +153,7 @@ fn parse_args() -> Args {
         // install is unaffected by this feature existing.
         habitat: a.iter().any(|x| x == "--habitat") || persist::load_habitat_choice().unwrap_or(false),
         habitat_explicit: a.iter().any(|x| x == "--habitat") || persist::load_habitat_choice().is_some(),
+        closeup: a.iter().any(|x| x == "--closeup") || persist::load_closeup_choice().unwrap_or(false),
         fps: a
             .iter()
             .position(|x| x == "--fps")
@@ -203,6 +206,8 @@ struct App {
     /// it, turning it or resizing it. Drives the rim highlight, so every
     /// adjustment gives the same "you have hold of it" feedback.
     grabbing: bool,
+    /// Where the close-up is looking: the animal's position, a beat behind.
+    closeup_focus: Vec2,
     /// How the user has angled and sized the enclosure. Persisted.
     view: HabitatView,
     /// The chord held this frame and last, and where the pointer was when the
@@ -258,6 +263,7 @@ impl App {
             frame_mesh: mesh::Mesh::default(),
             front_mesh: mesh::Mesh::default(),
             grabbing: false,
+            closeup_focus: Vec2::ZERO,
             view: {
                 let mut v = HabitatView::default();
                 if let Some((pitch, yaw, zoom)) = persist::load_habitat_view() {
@@ -630,6 +636,10 @@ impl App {
     /// enclosure, where nothing is registered to anything (camera.rs).
     fn camera(&self) -> Camera {
         match self.habitat {
+            Some(_) if self.args.closeup => self
+                .view
+                .camera()
+                .framed(self.closeup_focus, camera::CLOSEUP_MAGNIFY),
             Some(_) => self.view.camera(),
             None => Camera::TopDown,
         }
@@ -709,13 +719,16 @@ impl App {
     fn refresh_habitat_menu(&self) {
         let Some(t) = &self.tray else { return };
         t.set_view(
-            &if self.args.habitat {
+            &if self.args.habitat && self.args.closeup {
+                format!("{} - close-up", self.view.describe())
+            } else if self.args.habitat {
                 self.view.describe()
             } else {
                 "habitat off".to_string()
             },
             self.view.is_default(),
         );
+        t.set_closeup(self.args.closeup);
         let slots: Vec<(String, bool, bool)> = match &self.habitat {
             Some(h) => PropKind::catalogue(h.kind)
                 .iter()
@@ -971,6 +984,15 @@ impl App {
                     self.refresh_habitat_menu();
                     println!("habitat view reset: {}", self.view.describe());
                 }
+                tray::TrayCommand::ToggleCloseup => {
+                    self.args.closeup = !self.args.closeup;
+                    // Start on the animal rather than sliding in from wherever
+                    // the focus was last left.
+                    self.closeup_focus = self.rt.position();
+                    persist::save_closeup_choice(self.args.closeup);
+                    self.refresh_habitat_menu();
+                    println!("close-up {}", if self.args.closeup { "on" } else { "off" });
+                }
                 tray::TrayCommand::AddProp(slot) | tray::TrayCommand::RemoveProp(slot) => {
                     let adding = matches!(cmd, tray::TrayCommand::AddProp(_));
                     if let Some(h) = self.habitat.as_mut() {
@@ -1067,15 +1089,16 @@ impl App {
                 let cam = self.camera();
                 let mut penned = env.clone();
                 penned.ledges.clear();
+                penned.frames.clear();
                 penned.cursor = penned.cursor.map(|c| cam.unproject_ground(c));
                 for c in penned.clicks.iter_mut() {
                     *c = cam.unproject_ground(*c);
                 }
                 self.rt.sense(&penned, sense_dt);
-                self.last_env_cursor = penned.cursor;
                 if let Some(h) = self.habitat.as_mut() {
                     h.set_hour(env.local_hour);
                 }
+                self.last_env_cursor = penned.cursor;
                 self.last_screen_cursor = env.cursor;
                 self.chord = env.chord;
                 self.grabbing = env.chord.active();
@@ -1110,6 +1133,14 @@ impl App {
             None => None,
         };
         self.rt.tick(dt, region, self.last_env_cursor, attractor);
+        // The close-up follows the animal a beat behind: a view snapped to
+        // every step would shake the whole tank with the walk.
+        {
+            let target = self.rt.position();
+            let k = 1.0 - (-dt * 5.0).exp();
+            self.closeup_focus.x += (target.x - self.closeup_focus.x) * k;
+            self.closeup_focus.y += (target.y - self.closeup_focus.y) * k;
+        }
         if self.args.diag && self.frames < 3 { eprintln!("[diag] E: body updated"); }
 
         let diag = self.args.diag && self.frames < 3;
@@ -1294,6 +1325,7 @@ fn main() {
         });
         // Bigger frame with a tank in it: 320 px is barely wider than the fly.
         let side = if habitat.is_some() { 560 } else { 320 };
+        let closeup = habitat.is_some() && argv.iter().any(|a| a == "--closeup");
         snapshot::render_to_png(
             rt.as_mut(),
             &path,
@@ -1304,6 +1336,7 @@ fn main() {
             glass,
             zoom,
             habitat,
+            closeup,
         );
         return;
     }

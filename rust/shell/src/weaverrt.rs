@@ -72,7 +72,7 @@ impl WeaverRuntime {
     pub fn new(species: Species, seed: u64) -> Self {
         let region = Region::centered((1920.0, 1080.0));
         let mut rng = dfcore::rng::Pcg32::new(seed ^ 0x5e1f);
-        let program = program_for(species, region, &mut rng);
+        let program = program_for(species, &dfcore::Anchors::enclosure(region), &mut rng);
         let mut rt = WeaverRuntime {
             sim: None,
             brain_points: None,
@@ -213,6 +213,7 @@ impl Runtime for WeaverRuntime {
 
     fn sense(&mut self, env: &EnvSnapshot, dt: f32) {
         self.body.terrain = env.ledges.clone();
+        self.body.frames = env.frames.clone();
         self.body.settled = env.foreground.is_work();
         self.body.hour = env.local_hour;
 
@@ -325,7 +326,7 @@ impl Runtime for WeaverRuntime {
         self.body.silk.clear();
         self.body.prey.clear();
         let mut rng = dfcore::rng::Pcg32::new(self.seed ^ 0x5e1f ^ (region.size.0 as u64));
-        self.body.program = program_for(self.creature, region, &mut rng);
+        self.body.program = program_for(self.creature, &dfcore::Anchors::enclosure(region), &mut rng);
         // The body picks where in the new world the web goes on its next
         // frame (an enclosure whole, or a box under a window edge).
         self.body.build_region = None;
