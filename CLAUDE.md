@@ -50,9 +50,14 @@ otherwise.
   `dfcore --creature salticid --simtest --behaviortest`. The fly's suite
   output must stay byte-identical — diff it after touching `lif.rs`.
 - **Habitat mode** (`HABITAT_PLAN.md`, off by default; `--habitat` or the tray):
-  an optional rendered enclosure — aquarium for a `Swimmer`, terrarium for
-  everything else — that confines the creature to a `Region` of the screen and
-  gives it props to push around. `World` carries a `Region` (centre **and**
+  an optional rendered enclosure, one per `Substrate` and each the container
+  that animal is really kept in — a mesh rearing cage for the fly, a tall
+  arboreal vivarium for the spider, an agar plate for the worm, a stone pond
+  for the koi (`shell/src/habitatmesh/`, one file each) — that confines the
+  creature to a `Region` of the screen and gives it props to notice. Wall
+  height, footprint and the creature's lift are per kind. The side wall the
+  yawed camera looks over is drawn in the *front* pass with the front pane,
+  or its depth hides everything behind it. `World` carries a `Region` (centre **and**
   size) rather than a bare size, so a body can no longer assume the world is
   centred on the origin; `Region::centered` is free roam and is asserted to
   reproduce the old arithmetic exactly. `Substrate`'s first real consumer.
@@ -60,7 +65,16 @@ otherwise.
   react to the creature and to cursor *proximity* instead. Inside a habitat the
   camera is **tilted and yawed** (`shell/src/camera.rs`) so the tank is a real
   glass box; free roam stays straight down, because scene x/y being screen x/y
-  is what lets the fly stand on a real window edge. Ctrl+Shift moves the tank.
+  is what lets the fly stand on a real window edge. The view is the user's:
+  `HabitatView { pitch, yaw, zoom }` sits *in front of* `Camera`, because zoom
+  builds a bigger tank rather than dollying a camera — the creature's apparent
+  size is constant by design. Three modifier-only chords drive it (Ctrl+Shift
+  moves, Ctrl+Alt turns and tilts, Shift+Alt resizes), read from the same
+  content-blind `GetAsyncKeyState` poll as the mouse; orbit deltas must be
+  **screen**-space or the camera feeds back on itself. Contents are managed
+  through `PropKind::catalogue` and fixed tray slots; angles and a normalised
+  prop arrangement persist in `settings.json`. A resize *carries* props — never
+  restock on resize, or a held zoom reshuffles the tank every frame.
 - **Silk** (`WEB_PLAN.md`, Phase 0 built): `rust/core/src/silk.rs` is a
   graph of threads with a *trailing line* — `pay_out` before a jump or a
   descent, `attach` to close a thread and carry on, `release` to let go. The
