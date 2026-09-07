@@ -10,7 +10,7 @@
 //! The sandworm gets the same tank. The fiction would object to the scale;
 //! the honest reading is a very small worm in a very large desert.
 
-use dfcore::{Prop, PropKind, Vec2};
+use dfcore::{Prop, PropKind, Region, Vec2};
 
 use super::prims::*;
 use super::{Ctx, FLOOR_Z, SAND};
@@ -25,6 +25,24 @@ const STONE: [f32; 3] = [0.58, 0.55, 0.50];
 const DISH: [f32; 3] = [0.30, 0.30, 0.32];
 const WATER: [f32; 3] = [0.42, 0.66, 0.74];
 const SUCCULENT: [f32; 3] = [0.44, 0.58, 0.36];
+const HEAT: [f32; 3] = [0.95, 0.42, 0.18];
+
+/// Where the water dish sits and how big it is: a front corner at the *cool*
+/// end, away from the heat mat — which is also where a keeper puts it, so
+/// it does not evaporate. Public because the sandworm's runtime has to know
+/// where the water is; the body avoids it.
+pub(crate) fn water_dish(region: &Region) -> (Vec2, f32) {
+    let (lo, hi) = (region.min(), region.max());
+    let size = region.size;
+    let r = (size.0.min(size.1) * 0.09).clamp(14.0, 26.0);
+    (Vec2::new(lo.x + r + 18.0, lo.y + r + 18.0), r)
+}
+
+/// The heat mat: under the sand at the +x third of the tank.
+pub(crate) fn heat_mat(region: &Region) -> (Vec2, Vec2) {
+    let (lo, hi) = (region.min(), region.max());
+    (Vec2::new(lo.x + region.size.0 * 0.64, lo.y + 6.0), Vec2::new(hi.x - 6.0, hi.y - 6.0))
+}
 
 pub fn back(out: &mut Mesh, c: &Ctx) {
     let (lo, hi) = (c.lo, c.hi);
@@ -34,6 +52,11 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
     // --- the tank floor, then the sand as a block: darker down the sides,
     // where it is seen through the glass and packed, pale on top.
     ground_face(out, lo, hi, FLOOR_Z, rgba(shade(SAND_DEEP, 0.58), 0.45));
+    // The heat mat under one end: a warm glow through the floor, and a
+    // fainter one through the sand above it, so the tank reads as having a
+    // warm end and a cool end.
+    let (mlo, mhi) = heat_mat(&c.h.region);
+    ground_face(out, mlo, mhi, FLOOR_Z + 0.2, rgba(HEAT, 0.30));
     let inset = 0.5;
     let (slo, shi) = (
         Vec2::new(lo.x + inset, lo.y + inset),
@@ -81,6 +104,7 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
         face(out, quad, n, side);
     }
     ground_face(out, slo, shi, sand_z, rgba(SAND_C, 0.58));
+    ground_face(out, mlo, mhi, sand_z + 0.05, rgba(HEAT, 0.07));
 
     // --- the surface is not flat: low drifts, and a scatter of coarser
     // grains, so the sand has grain rather than reading as a beige sheet.
@@ -120,11 +144,10 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
     }
 
     // --- the water dish: a shallow black bowl sunk into the sand in a front
-    // corner, with water in it. Fixed furniture, not a prop: every terrarium
-    // has one and it is not something to take out.
+    // corner at the cool end, with water in it. Fixed furniture, not a prop:
+    // every terrarium has one and it is not something to take out.
     {
-        let r = (size.0.min(size.1) * 0.09).clamp(14.0, 26.0);
-        let at = Vec2::new(hi.x - r - 18.0, lo.y + r + 18.0);
+        let (at, r) = water_dish(&c.h.region);
         blob(out, at, sand_z + 0.3, r + 2.5, 1.8, 0.05, 3.0, rgba(DISH, 0.9));
         disc(out, [at.x, at.y, sand_z + 1.6], r, None, rgba(WATER, 0.55));
         // A bright ring where the water meets the rim.

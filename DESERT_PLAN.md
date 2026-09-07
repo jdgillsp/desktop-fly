@@ -116,15 +116,37 @@ seconds is a weak regular tread and a lure; erratic movement calls nothing.
 Not modelled: water as poison (the terrarium's dish is furniture the body
 does not know about), sandtrout, spice.
 
-**A bug found on the way.** The body builders' `frame()` tangent runs
+**A bug found on the way.** The body builders' `frame()` tangent ran
 head-to-tail, so both heads were being built *backwards into the neck* —
-which is why the first hognose looked to have a tiny head. Fixed in both;
-the koi's `koibody.rs` uses the same convention and may have the same
-problem, and was left alone.
+which is why the first hognose looked to have a tiny head. Fixed in both,
+and in the koi, whose `koibody.rs` had the same defect: its snout, eyes and
+fins were inside the body, and its caudal fin pointed forward. Its frame is
+now head-ward and `the_snout_is_ahead_and_the_tail_fin_is_behind` pins it.
+
+## 4b. The remainder
+
+**Hognose.** The **peek**: the act ends head-first — the head rights and
+lifts to look while the body stays over (`peek`, and per-segment in the
+geometry), and a threat during the look drops it straight back into the act
+for longer. The **thermal gradient**: the terrarium has a heat mat under
+its +x end (drawn as a glow through the floor and, faintly, the sand) and
+two hides, one on each end. `Habitat::set_hour` is fed the local hour by
+the shell and `preferred_hide_variant` sends the snake to the warm hide in
+the morning and evening and the cool one through midday and at night — the
+choice is the enclosure's, since the hides are its furniture. Musking is
+not modelled: it is a smell.
+
+**Sandworm.** **Water is poison.** A new `Runtime::habitat_changed` seam
+tells a runtime when its enclosure is built or removed; the sandworm's uses
+it to learn where the terrarium's water dish is (`terrarium::water_dish`,
+now at the cool end) and hands it to the body as `hazard`. The body turns
+off it well before reaching it, and will not answer a thumper set beside
+it. On the open desktop there is no water anywhere. Sandtrout and spice
+remain unmodelled.
 
 ## 5. Verification
 
-- `cargo test --workspace` (core: 171, shell: 132 at the time of writing).
+- `cargo test --workspace` (core: 174, shell: 135 at the time of writing).
 - The fly's `--simtest --behaviortest` output is byte-identical to the
   parent commit's — neither `lif.rs` nor `roles.rs` is touched.
 - `--snapshot` for both, with and without `--habitat`.

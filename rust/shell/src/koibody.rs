@@ -127,10 +127,14 @@ pub fn build_frame(out: &mut Mesh, koi: &KoiBody, glass: bool) {
     }
     let scale = koi.scale();
 
-    // Local frame at each spine point: tangent along the body, normal across.
+    // Local frame at each spine point: tangent along the body **toward the
+    // head**, normal across. The spine is head-first, so the tangent is
+    // taken from the point behind to the point ahead; the first version had
+    // it the other way round, and built the snout, the eyes and the fins
+    // pointing backwards into the body.
     let frame = |i: usize| -> ([f32; 2], [f32; 2]) {
-        let a = spine[i.saturating_sub(1)];
-        let b = spine[(i + 1).min(n - 1)];
+        let a = spine[(i + 1).min(n - 1)];
+        let b = spine[i.saturating_sub(1)];
         let (mut tx, mut ty) = (b.x - a.x, b.y - a.y);
         let l = (tx * tx + ty * ty).sqrt();
         if l < 1e-4 {
@@ -489,6 +493,36 @@ mod tests {
             max_across > widest * 1.35,
             "nothing reaches past the flank ({max_across:.1} vs {widest:.1})"
         );
+    }
+
+    /// The snout has to be in front of the head, and the caudal fin behind
+    /// the tail — the frame's tangent once pointed the wrong way and put
+    /// both inside the body.
+    #[test]
+    fn the_snout_is_ahead_and_the_tail_fin_is_behind() {
+        let k = koi();
+        let mut m = Mesh::default();
+        build_frame(&mut m, &k, false);
+        let n = k.spine.len();
+        let head = k.spine[0];
+        let tail = k.spine[n - 1];
+        // Forward is from the second spine point to the first.
+        let (fx, fy) = (head.x - k.spine[1].x, head.y - k.spine[1].y);
+        let snout = m.verts[n * 10].pos;
+        assert!(
+            (snout[0] - head.x) * fx + (snout[1] - head.y) * fy > 0.0,
+            "the snout points backwards"
+        );
+        // The caudal fin's vertices come right after the snout tip; all of
+        // them lie behind the tail, i.e. away from the spine point ahead of
+        // it.
+        let (bx, by) = (k.spine[n - 2].x - tail.x, k.spine[n - 2].y - tail.y);
+        for v in &m.verts[n * 10 + 2..n * 10 + 5] {
+            assert!(
+                (v.pos[0] - tail.x) * bx + (v.pos[1] - tail.y) * by <= 0.01,
+                "a caudal fin vertex is ahead of the tail"
+            );
+        }
     }
 
     #[test]

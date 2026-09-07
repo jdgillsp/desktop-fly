@@ -21,6 +21,10 @@
 //!   needed for the next visit. Fremen also know that *regular* footsteps
 //!   call a worm and walk without rhythm to avoid it — so a cursor moving
 //!   at a steady pace is a weak lure too, and an erratic one is nothing.
+//! * **Water is poison to it.** The one thing it keeps away from. The
+//!   runtime tells the body where the terrarium's dish is
+//!   ([`Sandworm::hazard`]); the body steers off it, will not breach beside
+//!   it, and drops a lure that sits too close to it.
 //! * **It is not afraid of anything.** No startle. The only thing that sends
 //!   it down is the tray's escape test (a hard `escape`), which it obeys
 //!   because every runtime must.
@@ -78,6 +82,8 @@ pub struct Sandworm {
     /// Raised for one step when the worm breaches over its lure: it has
     /// eaten the thumper. The runtime clears the rhythm on seeing it.
     pub swallowed: bool,
+    /// Standing water, as a centre and a radius. Kept away from.
+    pub hazard: Option<(Vec2, f32)>,
     pub time: f32,
 
     path: Vec<Vec2>,
@@ -112,6 +118,7 @@ impl Sandworm {
             breach_cooldown: rng.range(10.0, 25.0),
             lure: None,
             swallowed: false,
+            hazard: None,
             time: rng.range(0.0, 100.0),
             path: vec![tail, at],
             arc: vec![0.0, start],
@@ -246,7 +253,12 @@ impl Body for Sandworm {
         // it follows the sound.
         if drives.pursuit > 0.2 {
             if let Some(a) = world.attractor {
-                self.lure = Some(a);
+                // A thumper beside water is a thumper it will not come to.
+                let by_water = self
+                    .hazard
+                    .map(|(w, r)| a.dist(w) < r + 40.0)
+                    .unwrap_or(false);
+                self.lure = if by_water { None } else { Some(a) };
                 if self.state == SandwormState::Idle {
                     self.state = SandwormState::Submerged;
                     self.state_timer = 10.0;
@@ -362,6 +374,16 @@ impl Body for Sandworm {
         if world.region.outside(self.pos, 50.0) {
             let home = world.region.bearing_home(self.pos);
             self.heading += angle_diff(self.heading, home) * (1.8 * dt).min(1.0);
+        } else if let Some((w, r)) = self.hazard {
+            // Water: turn away well before reaching it, harder the nearer.
+            let d = self.pos.dist(w);
+            let reach = r + 70.0;
+            if d < reach {
+                let away = (self.pos.y - w.y).atan2(self.pos.x - w.x);
+                let k = 1.0 - d / reach;
+                self.heading += angle_diff(self.heading, away) * (4.0 * k * dt).min(1.0);
+                self.pending_turn = 0.0;
+            }
         }
 
         self.resample_spine();
@@ -475,6 +497,33 @@ mod tests {
         assert!(max_rear > 0.7, "no rear: {max_rear}");
         assert!(max_gape > 0.7, "no gape: {max_gape}");
         assert!(w.surface > 0.5 || w.state == SandwormState::Dive, "never surfaced");
+    }
+
+    /// Water is poison. The body turns off it, and will not answer a
+    /// thumper set beside it.
+    #[test]
+    fn it_keeps_away_from_water() {
+        let water = (Vec2::new(200.0, 0.0), 20.0);
+        let mut w = submerged(29);
+        w.heading = 0.0; // straight at the dish
+        w.hazard = Some(water);
+        let mut nearest = f32::MAX;
+        for _ in 0..1200 {
+            w.step(1.0 / 60.0, &drives(), &world());
+            nearest = nearest.min(w.pos.dist(water.0));
+        }
+        assert!(nearest > water.1 + 8.0, "went into the water: {nearest:.0}");
+        // A thumper at the water's edge is ignored.
+        let mut wd = world();
+        wd.attractor = Some(Vec2::new(200.0, 30.0));
+        let mut d = drives();
+        d.pursuit = 1.0;
+        w.step(1.0 / 60.0, &d, &wd);
+        assert!(w.lure.is_none(), "took a lure beside water");
+        // One away from the water is fine.
+        wd.attractor = Some(Vec2::new(-300.0, 0.0));
+        w.step(1.0 / 60.0, &d, &wd);
+        assert!(w.lure.is_some());
     }
 
     /// Reaching the thumper eats it: the body says so once, and drops the

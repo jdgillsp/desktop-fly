@@ -48,7 +48,7 @@ mod flycage;
 mod plate;
 mod pond;
 mod prims;
-mod terrarium;
+pub(crate) mod terrarium;
 mod vivarium;
 
 use dfcore::{Habitat, HabitatKind, Vec2};

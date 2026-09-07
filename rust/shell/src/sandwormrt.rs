@@ -187,6 +187,15 @@ impl Runtime for SandwormRuntime {
         self.forced_dive = true;
     }
 
+    /// In a terrarium there is a water dish, and water is poison to a
+    /// sandworm. The body is told where it is; on the open desktop there is
+    /// no water anywhere.
+    fn habitat_changed(&mut self, habitat: Option<&dfcore::Habitat>) {
+        self.worm.hazard = habitat
+            .filter(|h| h.kind == dfcore::HabitatKind::SandTerrarium)
+            .map(|h| crate::habitatmesh::terrarium::water_dish(&h.region));
+    }
+
     fn sense(&mut self, env: &EnvSnapshot, dt: f32) {
         for b in self.beats.iter_mut() {
             b.0 += dt;
@@ -276,7 +285,9 @@ impl Runtime for SandwormRuntime {
 
     fn place(&mut self, at: Vec2) {
         let seed = (at.x.abs() as u64) ^ ((at.y.abs() as u64) << 8) ^ 0x5A4D;
+        let hazard = self.worm.hazard;
         self.worm = SandwormBody::new(at, seed);
+        self.worm.hazard = hazard;
     }
 
     fn moved_display(&mut self, region: Region) {
@@ -455,6 +466,27 @@ mod tests {
             erratic.sense(&env, dt);
         }
         assert!(erratic.thumper < 0.15, "the sandwalk called a worm: {}", erratic.thumper);
+    }
+
+    /// The terrarium's dish reaches the body as a hazard; the open desktop
+    /// has none, and a tank of another kind has none either.
+    #[test]
+    fn the_terrarium_dish_is_a_hazard_and_free_roam_has_none() {
+        let mut rt = SandwormRuntime::new(15);
+        assert!(rt.worm.hazard.is_none());
+        let h = dfcore::Habitat::new(
+            dfcore::HabitatKind::SandTerrarium,
+            Region::new(Vec2::new(100.0, -50.0), (600.0, 400.0)),
+            1,
+        );
+        rt.habitat_changed(Some(&h));
+        let (at, r) = rt.worm.hazard.expect("no hazard from the terrarium");
+        assert!(r > 10.0);
+        assert!(at.x < h.region.center.x, "the dish should be at the cool end");
+        rt.place(Vec2::ZERO);
+        assert!(rt.worm.hazard.is_some(), "placing the worm lost the water");
+        rt.habitat_changed(None);
+        assert!(rt.worm.hazard.is_none());
     }
 
     /// A double-click is not two beats of a rhythm.

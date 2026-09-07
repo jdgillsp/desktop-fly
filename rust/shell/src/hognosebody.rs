@@ -103,6 +103,16 @@ fn ventral_color(t: f32) -> [f32; 4] {
     if u < 0.30 { BLOTCH } else { BELLY }
 }
 
+/// How far a spine point has righted itself during the peek: the head and
+/// neck come up first, the rest of the body stays over.
+fn peek_at(i: usize, peek: f32) -> f32 {
+    const NECK: usize = 6;
+    if i >= NECK {
+        return 0.0;
+    }
+    peek * (1.0 - i as f32 / NECK as f32)
+}
+
 /// What the top-down camera sees at `t`: the back, or — rolled over — the
 /// belly. `roll` is the body's `belly_up`.
 fn body_color(t: f32, roll: f32, glass: bool) -> [f32; 4] {
@@ -193,8 +203,11 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
         let spread = hood_at(t, snake.hood);
         let w = r + spread;
         let h = r * (1.0 - 0.45 * (spread / 1.5).min(1.0));
-        let zc = z0 + lift_at(i, snake.head_lift);
-        let c = body_color(t, roll, glass);
+        // Peeking, the head and neck have righted and lifted a little
+        // while the body is still on its back.
+        let righted = peek_at(i, snake.peek);
+        let zc = z0 + lift_at(i, snake.head_lift) + righted * 2.0;
+        let c = body_color(t, roll * (1.0 - righted), glass);
         for k in 0..RING {
             let a = std::f32::consts::TAU * k as f32 / RING as f32;
             let (sa, ca) = a.sin_cos();
@@ -233,11 +246,12 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
     // everything on the head wants the other way.
     let (tan, nrm) = frame(0);
     let tan = [-tan[0], -tan[1]];
-    let zh = z0 + lift_at(0, snake.head_lift);
+    let head_roll = roll * (1.0 - peek_at(0, snake.peek));
+    let zh = z0 + lift_at(0, snake.head_lift) + peek_at(0, snake.peek) * 2.0;
     let snout = [
         head.x + tan[0] * 2.4,
         head.y + tan[1] * 2.4,
-        zh + 1.3 * (1.0 - 2.0 * roll),
+        zh + 1.3 * (1.0 - 2.0 * head_roll),
     ];
     {
         let tip = out.verts.len() as u32;
@@ -300,8 +314,8 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
     }
 
     // --- playing dead: the mouth hangs open. A pink wedge at the snout.
-    if !glass && roll > 0.3 {
-        let open = (roll - 0.3) / 0.7;
+    if !glass && head_roll > 0.3 {
+        let open = (head_roll - 0.3) / 0.7;
         let w = 2.0 * open;
         let root = [head.x + tan[0] * 1.0, head.y + tan[1] * 1.0, zh + 0.5];
         let a = [
@@ -318,7 +332,7 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
     }
 
     // --- eyes, on the sides of the head just behind the snout.
-    if !glass && roll < 0.6 {
+    if !glass && head_roll < 0.6 {
         for side in [-1.0f32, 1.0] {
             let e = [
                 head.x + nrm[0] * side * 2.2 + tan[0] * 0.6,
@@ -460,6 +474,29 @@ mod tests {
         let mouth = |m: &Mesh| m.verts.iter().any(|v| v.color == MOUTH);
         assert!(!mouth(&a), "mouth open while alive");
         assert!(mouth(&b), "no mouth opened");
+    }
+
+    /// Peeking: the head shows its back again while the body is still
+    /// showing its belly.
+    #[test]
+    fn a_peek_rights_the_head_but_not_the_body() {
+        let mut s = snake();
+        s.belly_up = 1.0;
+        s.peek = 1.0;
+        let mut m = Mesh::default();
+        build_frame(&mut m, &s, false);
+        let sum = |ring: usize| -> f32 {
+            (ring * 10..ring * 10 + 10).map(|k| m.verts[k].color).map(|c| c[0] + c[1] + c[2]).fold(0.0f32, f32::max)
+        };
+        let mut over = snake();
+        over.belly_up = 1.0;
+        let mut o = Mesh::default();
+        build_frame(&mut o, &over, false);
+        let osum = |ring: usize| -> f32 {
+            (ring * 10..ring * 10 + 10).map(|k| o.verts[k].color).map(|c| c[0] + c[1] + c[2]).fold(0.0f32, f32::max)
+        };
+        assert_ne!(sum(0), osum(0), "the head did not right itself");
+        assert_eq!(sum(15), osum(15), "the body righted too");
     }
 
     #[test]

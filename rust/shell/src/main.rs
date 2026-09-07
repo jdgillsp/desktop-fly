@@ -656,6 +656,7 @@ impl App {
     fn rebuild_habitat(&mut self, keep_place: bool) {
         if !self.args.habitat {
             self.habitat = None;
+            self.rt.habitat_changed(None);
             return;
         }
         let kind = HabitatKind::for_substrate(self.rt.substrate());
@@ -700,6 +701,7 @@ impl App {
                 self.habitat = Some(h);
             }
         }
+        self.rt.habitat_changed(self.habitat.as_ref());
     }
 
     /// Tell the tray what the view is and what the enclosure could hold. Both
@@ -1071,6 +1073,9 @@ impl App {
                 }
                 self.rt.sense(&penned, sense_dt);
                 self.last_env_cursor = penned.cursor;
+                if let Some(h) = self.habitat.as_mut() {
+                    h.set_hour(env.local_hour);
+                }
                 self.last_screen_cursor = env.cursor;
                 self.chord = env.chord;
                 self.grabbing = env.chord.active();

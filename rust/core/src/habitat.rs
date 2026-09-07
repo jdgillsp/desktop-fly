@@ -219,7 +219,9 @@ pub enum PropKind {
     /// A large rounded river stone on the pond bottom. Scenery.
     Cobble,
     /// A half-round of cork bark lying on the sand: the hide. Anchored; the
-    /// standing target a snake goes to and rests under.
+    /// standing target a snake goes to and rests under. The `variant` is
+    /// which end of the thermal gradient it sits on: 0 the warm end, over
+    /// the heat mat; 1 the cool end. A snake picks by the time of day.
     Hide,
 }
 
@@ -284,8 +286,8 @@ impl PropKind {
     /// would never leave the furniture.
     pub fn max_count(&self) -> usize {
         match self {
-            PropKind::Lawn | PropKind::Dish | PropKind::Bark | PropKind::Hide => 1,
-            PropKind::Twig | PropKind::Food => 2,
+            PropKind::Lawn | PropKind::Dish | PropKind::Bark => 1,
+            PropKind::Twig | PropKind::Food | PropKind::Hide => 2,
             _ => 4,
         }
     }
@@ -438,6 +440,9 @@ pub struct Habitat {
     /// bodies only ever see its position, via `World::attractor`.
     pub focus: Option<usize>,
     focus_timer: f32,
+    /// Local hour, for the one choice that depends on it: which end of a
+    /// thermal gradient to lie at. Set by the shell; noon when it never is.
+    hour: f32,
     rng: Pcg32,
 }
 
@@ -449,10 +454,30 @@ impl Habitat {
             props: Vec::new(),
             focus: None,
             focus_timer: 0.0,
+            hour: 12.0,
             rng: Pcg32::new(seed),
         };
         h.stock();
         h
+    }
+
+    /// Tell the enclosure what time it is. Reptiles bask in the morning and
+    /// evening and retreat to the cool end through the heat of the day, and
+    /// that is a choice the enclosure makes for the animal, because the
+    /// hides are its furniture.
+    pub fn set_hour(&mut self, hour: f32) {
+        self.hour = hour;
+    }
+
+    /// Which hide the hour calls for: 0 (warm) morning and evening, 1 (cool)
+    /// through the middle of the day and at night, when the mat is off.
+    pub fn preferred_hide_variant(&self) -> u8 {
+        let h = self.hour.rem_euclid(24.0);
+        if (7.0..11.5).contains(&h) || (16.5..21.0).contains(&h) {
+            0
+        } else {
+            1
+        }
     }
 
     /// Fill the enclosure with its default contents. Deliberately sparse: four
@@ -478,6 +503,7 @@ impl Habitat {
             HabitatKind::AgarPlate => vec![(PropKind::Lawn, 0)],
             HabitatKind::SandTerrarium => vec![
                 (PropKind::Hide, 0),
+                (PropKind::Hide, 1),
                 (PropKind::Cobble, 0),
                 (PropKind::Plant, 0),
                 (PropKind::Pebble, 0),
@@ -525,12 +551,16 @@ impl Habitat {
                 c.x + self.rng.range(-hw * 0.72, hw * 0.72),
                 c.y + self.rng.range(-hh * 0.28, hh * 0.70),
             ),
-            // In the back half, clear of the middle, where a snake can get
-            // under it without the tank being all hide.
-            PropKind::Hide => Vec2::new(
-                c.x + self.rng.range(-hw * 0.6, hw * 0.6),
-                c.y + self.rng.range(hh * 0.1, hh * 0.6),
-            ),
+            // One at each end of the thermal gradient: the warm hide over
+            // the heat mat at the +x end, the cool one at the other, both
+            // toward the back so the middle stays open sand.
+            PropKind::Hide => {
+                let end = if variant == 0 { 1.0 } else { -1.0 };
+                Vec2::new(
+                    c.x + end * hw * self.rng.range(0.5, 0.7),
+                    c.y + self.rng.range(hh * 0.1, hh * 0.6),
+                )
+            }
             // Hard against the back wall: it leans on it.
             PropKind::Bark => Vec2::new(
                 c.x + self.rng.range(-hw * 0.55, hw * 0.55),
@@ -822,13 +852,21 @@ impl Habitat {
             .map(|p| p.kind.rank())
             .max()
             .unwrap_or(0);
-        let candidates: Vec<usize> = self
+        let mut candidates: Vec<usize> = self
             .props
             .iter()
             .enumerate()
             .filter(|(_, p)| p.present() && top > 0 && p.kind.rank() == top)
             .map(|(i, _)| i)
             .collect();
+        // Between two hides, the hour decides — if the preferred end has one.
+        let want = self.preferred_hide_variant();
+        if candidates
+            .iter()
+            .any(|&i| self.props[i].kind == PropKind::Hide && self.props[i].variant == want)
+        {
+            candidates.retain(|&i| self.props[i].kind != PropKind::Hide || self.props[i].variant == want);
+        }
         self.focus = match candidates.len() {
             0 => None,
             1 => Some(candidates[0]),
@@ -1117,6 +1155,27 @@ mod tests {
         // And only the pond holds water.
         for k in HabitatKind::ALL {
             assert_eq!(k.is_wet(), k == HabitatKind::Pond, "{k:?}");
+        }
+    }
+
+    /// A terrarium has a warm end and a cool end, and the snake is sent to
+    /// the right one for the hour.
+    #[test]
+    fn the_terrarium_sends_the_snake_to_the_warm_hide_in_the_morning_and_the_cool_one_at_noon() {
+        let r = Region::centered((600.0, 400.0));
+        let mut h = Habitat::new(HabitatKind::SandTerrarium, r, 3);
+        let hides: Vec<&Prop> = h.props.iter().filter(|p| p.kind == PropKind::Hide).collect();
+        assert_eq!(hides.len(), 2);
+        let warm = hides.iter().find(|p| p.variant == 0).unwrap().pos;
+        let cool = hides.iter().find(|p| p.variant == 1).unwrap().pos;
+        assert!(warm.x > r.center.x && cool.x < r.center.x, "the ends are not at the ends");
+        let far = Vec2::new(r.center.x, r.center.y - 150.0);
+        for (hour, want) in [(9.0, warm), (13.0, cool), (18.0, warm), (2.0, cool)] {
+            h.set_hour(hour);
+            h.focus = None;
+            h.focus_timer = 0.0;
+            h.step(1.0 / 60.0, far, None);
+            assert_eq!(h.attractor(), Some(want), "at {hour}h");
         }
     }
 

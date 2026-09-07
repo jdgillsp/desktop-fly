@@ -34,7 +34,10 @@
 //! The bluff is more than a hood: the animal raises its head and forebody
 //! ([`Hognose::head_lift`]), inflates and deflates as it hisses
 //! ([`Hognose::puff`]), and the death act begins with a bout of writhing
-//! ([`Hognose::writhe`]) before the flop. The centreline
+//! ([`Hognose::writhe`]) before the flop. Coming out of it, the animal
+//! rights its *head* first and looks around ([`Hognose::peek`]); if the
+//! threat is still there it drops back into the act, which is the
+//! best-known thing about the whole performance. The centreline
 //! follows the head's recorded path, as the worm's and the koi's do, because
 //! a body of fixed length cannot be turned by moving one end without
 //! retracing its track.
@@ -91,6 +94,10 @@ pub struct Hognose {
     pub puff: f32,
     /// Writhing envelope, 0..1: the thrashing that opens the death act.
     pub writhe: f32,
+    /// The head righted and raised to look, 0..1, at the end of the act.
+    pub peek: f32,
+    /// In the peek phase of the act.
+    peeking: bool,
     /// Seconds into the current death act.
     act_time: f32,
     /// Rectilinear creep this bout, rather than undulation.
@@ -142,6 +149,8 @@ impl Hognose {
             head_lift: 0.0,
             puff: 0.0,
             writhe: 0.0,
+            peek: 0.0,
+            peeking: false,
             act_time: 0.0,
             rectilinear: false,
             state_timer: rng.range(3.0, 7.0),
@@ -280,7 +289,14 @@ impl Hognose {
                     self.play_dead();
                 }
             }
-            HognoseState::PlayDead | HognoseState::Burrow => {}
+            HognoseState::PlayDead => {
+                // Caught peeking: back into the act, for a while longer.
+                if self.peeking {
+                    self.peeking = false;
+                    self.state_timer = self.rng.range(6.0, 12.0);
+                }
+            }
+            HognoseState::Burrow => {}
         }
     }
 
@@ -290,6 +306,7 @@ impl Hognose {
         // the desktop is not a field.
         self.state_timer = self.rng.range(18.0, 35.0);
         self.act_time = 0.0;
+        self.peeking = false;
         self.hood = 0.0;
         self.strike = 0.0;
         self.speed = 0.0;
@@ -351,12 +368,17 @@ impl Body for Hognose {
                     }
                 }
                 HognoseState::PlayDead => {
-                    // Only get up once nothing has bothered it for a while;
-                    // a hognose turned right side up while the threat is
-                    // still there rolls straight back over.
-                    if self.calm_time > 3.0 {
+                    // Only get up once nothing has bothered it for a while,
+                    // and then head first: a look around before the body
+                    // follows. A threat during the look sends it straight
+                    // back into the act.
+                    if self.peeking {
                         self.state = HognoseState::Slither;
                         self.state_timer = self.rng.range(3.0, 6.0);
+                        self.peeking = false;
+                    } else if self.calm_time > 3.0 {
+                        self.peeking = true;
+                        self.state_timer = self.rng.range(2.0, 3.5);
                     } else {
                         self.state_timer = 2.0;
                     }
@@ -428,6 +450,8 @@ impl Body for Hognose {
         let over = if self.state == HognoseState::PlayDead { 1.0 } else { 0.0 };
         let roll_rate = if over > self.belly_up { 1.4 } else { 1.1 };
         self.belly_up += (over - self.belly_up) * (roll_rate * dt).min(1.0);
+        let peek_t = if self.peeking { 1.0 } else { 0.0 };
+        self.peek += (peek_t - self.peek) * (3.0 * dt).min(1.0);
         // Head up and body inflated while bluffing; the puff pulses at the
         // rate of the hisses, which are long exhalations.
         let lift_t = if self.state == HognoseState::Bluff { 1.0 } else { 0.0 };
@@ -692,6 +716,31 @@ mod tests {
         assert_ne!(h.state, HognoseState::PlayDead);
         run(&mut h, 4.0, &drives());
         assert!(h.belly_up < 0.2, "still on its back: {}", h.belly_up);
+    }
+
+    /// The end of the act: the head comes up first, and a threat during
+    /// that look puts the whole animal straight back on its back.
+    #[test]
+    fn it_peeks_before_righting_and_a_threat_then_resumes_the_act() {
+        let mut h = slithering(41);
+        run(&mut h, 1.0, &drives());
+        h.play_dead();
+        h.state_timer = 1.0;
+        run(&mut h, 1.5, &drives()); // calm; the act ends into a peek
+        assert!(h.peeking, "no peek: {:?}", h.state);
+        assert_eq!(h.state, HognoseState::PlayDead);
+        run(&mut h, 1.0, &drives());
+        assert!(h.peek > 0.7, "the head did not come up: {}", h.peek);
+        assert!(h.belly_up > 0.8, "the body should still be over: {}", h.belly_up);
+        // Caught looking.
+        h.threaten(Some(Vec2::new(40.0, 0.0)));
+        assert!(!h.peeking, "still peeking under a threat");
+        assert!(h.state_timer > 5.0, "the act was not extended");
+        run(&mut h, 1.5, &drives());
+        assert!(h.peek < 0.2, "the head did not go back down: {}", h.peek);
+        // Left alone through the whole thing, it gets up.
+        run(&mut h, 20.0, &drives());
+        assert_ne!(h.state, HognoseState::PlayDead);
     }
 
     #[test]

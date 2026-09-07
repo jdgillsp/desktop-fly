@@ -66,6 +66,13 @@ pub trait Runtime {
         false
     }
 
+    /// The enclosure was built, rebuilt or removed. Most creatures learn
+    /// nothing from this — props reach them as the attractor. The one that
+    /// does is the sandworm, for which the terrarium's water dish is a
+    /// hazard rather than furniture, and there is no other way for a body
+    /// to be told where something *not* to go is.
+    fn habitat_changed(&mut self, _habitat: Option<&dfcore::Habitat>) {}
+
     fn sim(&self) -> Option<&dyn Sim>;
     fn sim_mut(&mut self) -> Option<&mut dyn Sim>;
     /// Soma cloud for the brain window; `None` when the creature has no data.
