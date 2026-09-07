@@ -115,6 +115,13 @@ pub fn make(id: &str, seed: u64) -> Box<dyn Runtime> {
         "c_elegans" => Box::new(crate::wormrt::WormRuntime::new(seed)),
         "salticid" => Box::new(crate::spiderrt::SpiderRuntime::new(seed)),
         "koi" => Box::new(crate::koirt::KoiRuntime::new(seed)),
+        "araneus" => Box::new(crate::weaverrt::WeaverRuntime::new(dfcore::Weaver::Araneus, seed)),
+        "parasteatoda" => {
+            Box::new(crate::weaverrt::WeaverRuntime::new(dfcore::Weaver::Parasteatoda, seed))
+        }
+        "agelenopsis" => {
+            Box::new(crate::weaverrt::WeaverRuntime::new(dfcore::Weaver::Agelenopsis, seed))
+        }
         _ => Box::new(FlyRuntime::new(seed)),
     }
 }
@@ -476,7 +483,6 @@ mod tests {
     fn every_creature_fits_between_the_floor_and_the_rim_of_its_tank() {
         use dfcore::HabitatKind;
         let floor = crate::habitatmesh::FLOOR_Z;
-        let rim = floor + crate::habitatmesh::WALL_H;
         for id in CREATURE_IDS {
             let mut rt = make(id, 4);
             for _ in 0..60 {
@@ -488,6 +494,14 @@ mod tests {
                 );
             }
             let kind = HabitatKind::for_substrate(rt.substrate());
+            let rim = crate::habitatmesh::top_z(kind);
+            // The worm stands on the agar, not the bottom of the dish, and must
+            // clear *that*.
+            let floor = if kind == HabitatKind::AgarPlate {
+                floor + crate::habitatmesh::AGAR
+            } else {
+                floor
+            };
             // Both extremes of the water column for a swimmer; a walker's hint
             // is a constant.
             for hint in [0.0f32, 1.0] {
@@ -515,18 +529,20 @@ mod tests {
     #[test]
     fn a_swimmers_depth_becomes_real_height_in_the_tank() {
         use dfcore::HabitatKind;
-        let deep = crate::habitatmesh::creature_lift(HabitatKind::Aquarium, 0.0);
-        let shallow = crate::habitatmesh::creature_lift(HabitatKind::Aquarium, 1.0);
+        let deep = crate::habitatmesh::creature_lift(HabitatKind::Pond, 0.0);
+        let shallow = crate::habitatmesh::creature_lift(HabitatKind::Pond, 1.0);
         assert!(
             shallow > deep + 20.0,
             "surfacing only lifts the fish {:.1} units",
             shallow - deep
         );
         // A walker has no such freedom; it is on the ground either way.
-        assert_eq!(
-            crate::habitatmesh::creature_lift(HabitatKind::Terrarium, 0.0),
-            crate::habitatmesh::creature_lift(HabitatKind::Terrarium, 1.0)
-        );
+        for kind in [HabitatKind::FlyCage, HabitatKind::Vivarium, HabitatKind::AgarPlate] {
+            assert_eq!(
+                crate::habitatmesh::creature_lift(kind, 0.0),
+                crate::habitatmesh::creature_lift(kind, 1.0)
+            );
+        }
         // And only the koi ever asks to be lifted.
         for id in CREATURE_IDS {
             let hint = make(id, 1).vertical_hint();
@@ -537,16 +553,18 @@ mod tests {
         }
     }
 
-    /// The swimmer gets water and the rest get soil — through the runtime, not
-    /// through a second table that could disagree with the bodies.
+    /// Each animal gets the container it is actually kept in — through the
+    /// runtime, not through a second table that could disagree with the
+    /// bodies.
     #[test]
     fn each_creature_asks_for_the_right_enclosure() {
         use dfcore::HabitatKind;
         for id in CREATURE_IDS {
-            let want = if id == "koi" {
-                HabitatKind::Aquarium
-            } else {
-                HabitatKind::Terrarium
+            let want = match id {
+                "koi" => HabitatKind::Pond,
+                "c_elegans" => HabitatKind::AgarPlate,
+                "salticid" | "araneus" | "parasteatoda" | "agelenopsis" => HabitatKind::Vivarium,
+                _ => HabitatKind::FlyCage,
             };
             let got = HabitatKind::for_substrate(make(id, 1).substrate());
             assert_eq!(got, want, "{id} was given a {}", got.label());

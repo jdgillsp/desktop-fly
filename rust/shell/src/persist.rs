@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use dfcore::Habituation;
+use dfcore::{Habituation, PropSave};
 
 /// `%LOCALAPPDATA%\DesktopFly\` on Windows, `$XDG_DATA_HOME`/`~/.local/share`
 /// elsewhere.
@@ -95,6 +95,56 @@ pub fn load_habitat_choice() -> Option<bool> {
 
 pub fn save_habitat_choice(on: bool) {
     save_setting("habitat", serde_json::Value::Bool(on));
+}
+
+/// How the user has angled and sized the enclosure, as `(pitch, yaw, zoom)`.
+///
+/// Returned raw: the caller clamps. Keeping the clamp in one place
+/// (`HabitatView`) rather than two means a hand-edited settings file cannot
+/// produce a projection the app has never validated.
+pub fn load_habitat_view() -> Option<(f32, f32, f32)> {
+    let v = load_settings();
+    let o = v.get("habitat_view")?;
+    let f = |k: &str| o.get(k).and_then(|x| x.as_f64()).map(|x| x as f32);
+    Some((f("pitch")?, f("yaw")?, f("zoom")?))
+}
+
+pub fn save_habitat_view(pitch: f32, yaw: f32, zoom: f32) {
+    save_setting(
+        "habitat_view",
+        serde_json::json!({ "pitch": pitch, "yaw": yaw, "zoom": zoom }),
+    );
+}
+
+/// The contents of one kind of enclosure, keyed by that kind rather than by the
+/// creature: a pond is a pond whichever fish is in it, and two creatures that
+/// share a substrate should share the tank they were given.
+///
+/// `None` means "never arranged" and the enclosure stocks itself. That is not
+/// the same as `Some(vec![])`, which is an enclosure the user deliberately
+/// emptied — restocking that on every launch would make emptying it impossible.
+pub fn load_habitat_contents(habitat_slug: &str) -> Option<Vec<PropSave>> {
+    let v = load_settings();
+    let entry = v.get("habitat_contents")?.get(habitat_slug)?;
+    match serde_json::from_value::<Vec<PropSave>>(entry.clone()) {
+        Ok(props) => Some(props),
+        Err(e) => {
+            // Same reasoning as the habituation file: unreadable settings must
+            // never stop the app, and a default enclosure is a fine fallback.
+            eprintln!("saved {habitat_slug} contents unreadable ({e}); using the default");
+            None
+        }
+    }
+}
+
+pub fn save_habitat_contents(habitat_slug: &str, props: &[PropSave]) {
+    let mut all = load_settings()
+        .get("habitat_contents")
+        .cloned()
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    all[habitat_slug] = serde_json::to_value(props).unwrap_or(serde_json::Value::Null);
+    save_setting("habitat_contents", all);
 }
 
 pub fn load(creature_id: &str) -> Habituation {

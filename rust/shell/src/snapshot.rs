@@ -33,7 +33,10 @@ pub fn render_to_png(
     walking_frames: u32,
     glass: bool,
     zoom: f32,
-    habitat: bool,
+    // `Some` renders the creature inside its enclosure, at that view. Taking
+    // the view rather than a bare flag is what makes the angle and size
+    // controls checkable offscreen, the same way the enclosure itself was.
+    habitat: Option<crate::camera::HabitatView>,
 ) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         #[cfg(target_os = "windows")]
@@ -67,21 +70,22 @@ pub fn render_to_png(
     // posed inside the tank rather than across the whole frame. Built here
     // through the same functions and the same camera the desktop uses, which is
     // what makes habitat mode verifiable without a screen.
-    let cam = if habitat {
-        crate::camera::habitat()
-    } else {
-        crate::camera::Camera::TopDown
+    let cam = match habitat {
+        Some(v) => v.camera(),
+        None => crate::camera::Camera::TopDown,
     };
-    let enclosure = habitat.then(|| {
+    let enclosure = habitat.map(|v| {
         let kind = dfcore::HabitatKind::for_substrate(rt.substrate());
         let display = (width as f32, height as f32);
         // The largest tank that fits the frame, centred, through the same
         // fitting the desktop uses.
+        let (fw, fh) = crate::habitatmesh::footprint(kind);
+        let z = v.clamped_zoom();
         let size = cam.fit_size(
             display,
-            (width as f32 * 1.2, height as f32 * 1.2),
+            (width as f32 * 1.2 * fw * z, height as f32 * 1.2 * fh * z),
             crate::habitatmesh::FLOOR_Z,
-            crate::habitatmesh::top_z(),
+            crate::habitatmesh::top_z(kind),
             10.0,
         );
         let mut h = dfcore::Habitat::new(
@@ -339,10 +343,9 @@ pub fn render_to_png(
             params: [
                 0.42,
                 0.22,
-                if habitat {
-                    crate::habitatmesh::FLOOR_Z + 0.9
-                } else {
-                    -0.5
+                match &enclosure {
+                    Some(h) => crate::habitatmesh::shadow_z(h.kind),
+                    None => -0.5,
                 },
                 0.0,
             ],

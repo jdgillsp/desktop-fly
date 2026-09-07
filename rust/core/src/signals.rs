@@ -39,6 +39,9 @@ pub struct BrainSignals {
     pub prey_bias: f32,
     /// The authored pounce node spiked -> pounce NOW, if something is in range.
     pub pounce: bool,
+    /// The weavers' authored strike node spiked -> something is struggling in
+    /// the web; go to it. Always false for every other creature.
+    pub strike: bool,
 }
 
 impl BrainSignals {
@@ -91,6 +94,7 @@ impl SignalBuilder {
             0.0
         };
         s.pounce = sim.consume_pounce();
+        s.strike = sim.consume_strike();
         s
     }
 }
@@ -166,6 +170,8 @@ mod graded_tests {
                     color: [0.0; 3],
                 },
             ],
+            tau_ms: Vec::new(),
+            threshold: Vec::new(),
         };
         let c = Connectome {
             roles: vec!["forward".into(), "reverse".into()],

@@ -71,6 +71,13 @@ pub enum Provenance {
         measured: Box<Provenance>,
         /// What was authored, in one phrase: "pounce connective".
         authored: String,
+        /// Behaviours inside this animal that have **no neurons in the loop
+        /// at all** — hand-written motor programs, named so the label can say
+        /// so (WEB_PLAN.md §3.2). Empty for the salticid; the web builders
+        /// list their construction program here. This is the koi's
+        /// [`Provenance::Procedural`] claim applied to one behaviour rather
+        /// than to a whole creature.
+        procedural: Vec<String>,
     },
 }
 
@@ -111,10 +118,17 @@ impl Provenance {
             Provenance::Procedural { model, .. } => {
                 format!("{model} - PROCEDURAL, no connectome")
             }
-            Provenance::Chimera { measured, authored } => format!(
-                "chimera: {} modules + authored {authored}",
-                measured.describe()
-            ),
+            Provenance::Chimera {
+                measured,
+                authored,
+                procedural,
+            } => {
+                let mut d = format!("chimera: {} modules + authored {authored}", measured.describe());
+                if !procedural.is_empty() {
+                    d.push_str(&format!("; {}: PROCEDURAL, no neurons", procedural.join(", ")));
+                }
+                d
+            }
         }
     }
 
@@ -273,7 +287,15 @@ impl Connectome {
 
 /// Every creature the engine can run, in menu order. The fly is first because
 /// it is the one with shipped data.
-pub const CREATURE_IDS: [&str; 4] = ["drosophila", "salticid", "c_elegans", "koi"];
+pub const CREATURE_IDS: [&str; 7] = [
+    "drosophila",
+    "salticid",
+    "c_elegans",
+    "koi",
+    "araneus",
+    "parasteatoda",
+    "agelenopsis",
+];
 
 /// Look a creature up by its `id()`. `None` for an id that is not a creature,
 /// so a stale settings file or a typo on the command line degrades to the
@@ -284,6 +306,9 @@ pub fn by_id(id: &str) -> Option<Box<dyn Creature>> {
         "salticid" => Some(Box::new(Salticid)),
         "c_elegans" => Some(Box::new(CElegans)),
         "koi" => Some(Box::new(Koi)),
+        "araneus" => Some(Box::new(Weaver::Araneus)),
+        "parasteatoda" => Some(Box::new(Weaver::Parasteatoda)),
+        "agelenopsis" => Some(Box::new(Weaver::Agelenopsis)),
         _ => None,
     }
 }
@@ -317,6 +342,7 @@ impl Creature for Salticid {
         Provenance::Chimera {
             measured: Box::new(Provenance::flywire_v783()),
             authored: "pounce connective".into(),
+            procedural: Vec::new(),
         }
     }
     fn data_dir(&self) -> &'static str {
@@ -375,6 +401,86 @@ impl Creature for Koi {
     }
     fn data_dir(&self) -> &'static str {
         "koi"
+    }
+}
+
+/// Creatures #5–#7: the web-building chimeras (WEB_PLAN.md).
+///
+/// Three species, one circuit. An orb weaver, a gumfoot-tangle weaver and a
+/// sheet-and-funnel weaver differ in body and in the construction program
+/// they run — not in wiring, because there is no wiring to differ in: **no
+/// spider connectome exists** (verified 2026-09-05, SPIDER_PLAN.md §8.6). So
+/// all three run the same labelled chimera, `data/weaver/`: the fly's
+/// measured motor and escape modules plus its measured mechanosensory
+/// partners, with the salticid's LC11 dropped (these animals hunt by web
+/// vibration, not by sight — a visual prey pathway would be real data in a
+/// false place) and **one authored node**, the strike, that integrates
+/// sustained small vibration on a slow membrane. The web-building program
+/// itself has no neurons in it at all, and `describe()` says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Weaver {
+    /// *Araneus diadematus*, the garden cross spider: an orb, rebuilt daily.
+    Araneus,
+    /// *Parasteatoda tepidariorum*, the common house spider: a gumfoot tangle
+    /// with a central retreat, added to over nights.
+    Parasteatoda,
+    /// *Agelenopsis* sp., a grass spider: a non-sticky sheet with a funnel,
+    /// thickened by every crossing.
+    Agelenopsis,
+}
+
+impl Weaver {
+    pub const ALL: [Weaver; 3] = [Weaver::Araneus, Weaver::Parasteatoda, Weaver::Agelenopsis];
+
+    /// The Latin binomial, for the console and the README.
+    pub fn species(&self) -> &'static str {
+        match self {
+            Weaver::Araneus => "Araneus diadematus",
+            Weaver::Parasteatoda => "Parasteatoda tepidariorum",
+            Weaver::Agelenopsis => "Agelenopsis sp.",
+        }
+    }
+
+    /// Which web family's construction program this species runs.
+    pub fn web(&self) -> &'static str {
+        match self {
+            Weaver::Araneus => "orb web",
+            Weaver::Parasteatoda => "gumfoot tangle web",
+            Weaver::Agelenopsis => "sheet web with funnel",
+        }
+    }
+}
+
+impl Creature for Weaver {
+    fn id(&self) -> &'static str {
+        match self {
+            Weaver::Araneus => "araneus",
+            Weaver::Parasteatoda => "parasteatoda",
+            Weaver::Agelenopsis => "agelenopsis",
+        }
+    }
+    fn display_name(&self) -> &'static str {
+        match self {
+            Weaver::Araneus => "Garden cross spider (chimera)",
+            Weaver::Parasteatoda => "House spider (chimera)",
+            Weaver::Agelenopsis => "Grass spider (chimera)",
+        }
+    }
+    fn manifest(&self) -> RoleManifest {
+        crate::roles::weaver()
+    }
+    fn dynamics(&self) -> DynamicsSpec {
+        DynamicsSpec::Lif(LifParams::default())
+    }
+    fn provenance(&self) -> Provenance {
+        Provenance::Chimera {
+            measured: Box::new(Provenance::flywire_v783()),
+            authored: "strike node".into(),
+            procedural: vec![format!("{} construction program", self.web())],
+        }
+    }
+    fn data_dir(&self) -> &'static str {
+        "weaver"
     }
 }
 
@@ -583,6 +689,10 @@ pub enum Substrate {
     /// Swims. Ignores window ledges entirely — the desktop is water, not
     /// terrain — and has no gait, no altitude and nothing to stand on.
     Swimmer,
+    /// Walks on the desktop, on window ledges and on its own silk, and
+    /// builds a web between whatever it can anchor to. No flight, no
+    /// ballistic jump; a drop on the dragline instead.
+    WalkerWeaver,
 }
 
 /// The world a body moves through, as the body sees it.
@@ -789,6 +899,35 @@ mod tests {
         assert!(!s.display_name().to_lowercase().contains("connectome"));
         assert!(s.display_name().to_lowercase().contains("chimera"));
         assert_eq!(p.default_origin(), Origin::Authored, "un-itemised elements of a chimera are not measured");
+    }
+
+    /// The web builders' version: the same chimera rules, plus the claim that
+    /// their construction program has no neurons in it must be in the line a
+    /// user sees, and LC11 must be gone from their manifest.
+    #[test]
+    fn weaver_labels_are_honest_and_lc11_is_gone() {
+        for w in Weaver::ALL {
+            let p = w.provenance();
+            assert!(!p.is_measured());
+            let d = p.describe();
+            let lower = d.to_lowercase();
+            assert!(lower.contains("chimera"), "{d}");
+            assert!(lower.contains("flywire"), "{d}");
+            assert!(lower.contains("authored strike"), "{d}");
+            assert!(d.contains("PROCEDURAL"), "the program's label must be unmissable: {d}");
+            assert!(lower.contains("construction program"), "{d}");
+            for forbidden in ["spider connectome", "spider brain"] {
+                assert!(!lower.contains(forbidden), "'{forbidden}' in {d}");
+            }
+            assert!(w.display_name().to_lowercase().contains("chimera"));
+            assert!(!w.display_name().to_lowercase().contains("connectome"));
+            let m = w.manifest();
+            assert!(m.find("lc11").is_none(), "a blind hunter has no visual prey pathway");
+            assert!(m.find("escw").is_none(), "no wings");
+            assert!(m.find("strike").is_some());
+            assert_eq!(w.data_dir(), "weaver", "one shared circuit, not three copies");
+        }
+        assert_eq!(Weaver::Araneus.web(), "orb web");
     }
 
     /// The koi's version of the same rule. It is the strongest claim in the

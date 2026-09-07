@@ -1175,3 +1175,541 @@ pub fn spider_behavior_test(data: &BrainData, seed: u64) -> Outcome {
         lines,
     }
 }
+
+// ---------------------------------------------------------------------------
+// The web builders (WEB_PLAN.md): their circuit and their behaviour.
+// ---------------------------------------------------------------------------
+
+use crate::habitat::Region;
+use crate::silk::{Anchor, ThreadKind};
+use crate::weaver::{Idle, Weaver, WeaverState};
+
+fn weaver_sim(data: &BrainData, seed: u64) -> LifSim {
+    LifSim::with_params(
+        &data.circuit,
+        seed,
+        crate::lif::LifParams::default(),
+        crate::roles::weaver(),
+    )
+}
+
+/// The weavers share the fly's modules minus the wings and *without* LC11,
+/// plus one authored node on a slow membrane. The claims to check are the
+/// amplitude split (WEB_PLAN.md §3.1): a sustained small vibration reaches
+/// the strike node and not the giant fiber; a sharp knock reaches the giant
+/// fiber; a loom still does; and at rest both are silent.
+pub fn weaver_test(data: &BrainData, seed: u64) -> Outcome {
+    use crate::creature::Creature;
+    let mut out = Outcome {
+        passed: false,
+        lines: Vec::new(),
+    };
+    let mut sim = weaver_sim(data, seed);
+    let connectome = crate::creature::Connectome::from_circuit(
+        &data.circuit,
+        crate::creature::Weaver::Araneus.provenance(),
+    );
+    let (auth_n, auth_e) = connectome.authored_counts();
+    out.say(format!(
+        "weaver chimera: {} neurons ({auth_n} authored) | {} edges ({auth_e} authored) | loom L/R: {}/{} \
+         | LC11: {} | strike: {} | GF: {} | DNa L/R: {}/{} | MDN: {} | DNp09: {} | DNg11: {} \
+         | ascend: {} | sens: {}",
+        sim.n,
+        data.circuit.edges.len(),
+        sim.loom_left.len(),
+        sim.loom_right.len(),
+        sim.lc11_l.len() + sim.lc11_r.len(),
+        sim.strike.len(),
+        sim.gf.len(),
+        sim.dna_l.len(),
+        sim.dna_r.len(),
+        sim.mdn.len(),
+        sim.fwd.len(),
+        sim.groom.len(),
+        sim.ascend.len(),
+        sim.sens.len()
+    ));
+    let mut ok = true;
+    if sim.lc11_l.len() + sim.lc11_r.len() != 0 || sim.strike.len() != 1 || sim.sens.is_empty() {
+        out.say("FAIL population check: expected no LC11, one strike node, mechanosensory partners".into());
+        ok = false;
+    }
+    // The strike node has no synapses at all: by construction there is no
+    // path from a struggle to the giant fiber, or from anything to it.
+    let strike_edges = data
+        .circuit
+        .edges
+        .iter()
+        .filter(|e| sim.strike.contains(&(e[0] as usize)) || sim.strike.contains(&(e[1] as usize)))
+        .count();
+    out.say(format!("strike node synapses: {strike_edges} (a sense with no wiring, driven by the transduction only)"));
+    if strike_edges != 0 {
+        out.say("FAIL structure: the strike node must have no synapses".into());
+        ok = false;
+    }
+
+    // 12 s of rest: long enough to contain the LIF's periodic noise burst
+    // (every 15-40 s, six times the noise for 400 ms), which a 250 ms
+    // membrane integrates the way it integrates anything sustained. So the
+    // honest claim is a *rate*: quiet at rest, several times louder under a
+    // struggle. The body ignores a strike with nothing loud in the web.
+    let (mut gf_spont, mut strike_spont) = (0, 0);
+    for _ in 0..120 {
+        sim.step(100);
+        if sim.consume_gf() {
+            gf_spont += 1;
+        }
+        if sim.consume_strike() {
+            strike_spont += 1;
+        }
+    }
+    let rest_rate = strike_spont as f32 / 12.0;
+    out.say(format!(
+        "rest 12s: pop {:.2} Hz/neuron, GF spikes {gf_spont}, strike spikes {strike_spont} ({rest_rate:.2} Hz)",
+        sim.total_spikes as f32 / 12.0 / sim.n as f32
+    ));
+    // The measured wiring's own spontaneous giant-fiber rate (the fly's
+    // occasional unprompted takeoff) is not the weavers' to fix.
+    if gf_spont > 1 || strike_spont != 0 {
+        out.say("FAIL rest: the giant fiber must be near-silent and the strike node silent".into());
+        ok = false;
+    }
+
+    // A struggle: sustained vibration on the strike node's own channel.
+    let (mut gf_prey, mut strike_prey, mut latency) = (0, 0, -1i64);
+    for ms in 0..3000 {
+        sim.vibration = 0.8;
+        sim.step(1);
+        if sim.consume_gf() {
+            gf_prey += 1;
+        }
+        if sim.consume_strike() {
+            strike_prey += 1;
+            if latency < 0 {
+                latency = ms;
+            }
+        }
+    }
+    sim.vibration = 0.0;
+    out.say(format!(
+        "struggle (vibration 0.8 for 3 s): strike spikes {strike_prey} (first at {latency} ms), GF spikes {gf_prey}, strike rate {:.1} Hz",
+        sim.rate_strike
+    ));
+    let struggle_rate = strike_prey as f32 / 3.0;
+    if strike_prey < 2 || latency > 1000 || struggle_rate < 4.0 * rest_rate.max(0.1) {
+        out.say(format!(
+            "FAIL struggle: the strike node must fire within 1 s and keep firing ({struggle_rate:.2} vs {rest_rate:.2} Hz at rest)"
+        ));
+        ok = false;
+    }
+    // GF spikes here can only be the circuit's own spontaneous rate: the
+    // channel has no synapses to reach it by. Reported, not asserted.
+    // Let it settle.
+    for _ in 0..6 {
+        sim.step(100);
+        sim.consume_gf();
+        sim.consume_strike();
+    }
+
+    // A knock: the fly suite's tap, delivered the same way a click is.
+    let (mut gf_knock, mut knock_latency) = (0, -1i64);
+    let sens = sim.sens.clone();
+    sim.stimulate(&sens, 0.45, 150);
+    for ms in 0..300 {
+        sim.step(1);
+        if sim.consume_gf() {
+            gf_knock += 1;
+            if knock_latency < 0 {
+                knock_latency = ms;
+            }
+        }
+    }
+    let strike_knock = sim.consume_strike();
+    out.say(format!(
+        "knock (tap on the sensory partners, 150 ms): GF spikes {gf_knock} (first at {knock_latency} ms), strike also fired: {strike_knock}"
+    ));
+    if gf_knock == 0 {
+        out.say("FAIL knock: a sharp vibration must reach the giant fiber".into());
+        ok = false;
+    }
+    for _ in 0..6 {
+        sim.step(100);
+        sim.consume_gf();
+    }
+
+    // An abrupt loom: the fly's invariant, on this circuit.
+    let (mut gf_loom, mut loom_latency) = (0, -1i64);
+    for ms in 0..400 {
+        sim.loom_l = 1.0;
+        sim.loom_r = 0.5;
+        sim.step(1);
+        if sim.consume_gf() {
+            gf_loom += 1;
+            if loom_latency < 0 {
+                loom_latency = ms;
+            }
+        }
+    }
+    sim.loom_l = 0.0;
+    sim.loom_r = 0.0;
+    out.say(format!("abrupt loom: GF spikes {gf_loom}, first at {loom_latency} ms"));
+    if gf_loom == 0 || loom_latency > 12 {
+        out.say("FAIL loom: the giant fiber must fire within ~10 ms of an abrupt loom".into());
+        ok = false;
+    }
+
+    // Silence again, once the loom's activity has died down.
+    for _ in 0..20 {
+        sim.step(100);
+        sim.consume_gf();
+        sim.consume_strike();
+    }
+    let (mut gf_after, mut strike_after) = (0, 0);
+    for _ in 0..80 {
+        sim.step(100);
+        if sim.consume_gf() {
+            gf_after += 1;
+        }
+        if sim.consume_strike() {
+            strike_after += 1;
+        }
+    }
+    let after_rate = strike_after as f32 / 8.0;
+    out.say(format!("8 s after: GF spikes {gf_after}, strike spikes {strike_after} ({after_rate:.2} Hz)"));
+    if gf_after > 1 || strike_after > 1 {
+        out.say("FAIL after: the giant fiber must be silent and the strike node quiet again".into());
+        ok = false;
+    }
+
+    out.say(if ok {
+        "ALL WEAVER CIRCUIT TESTS PASS".into()
+    } else {
+        "WEAVER CIRCUIT TESTS FAILED".into()
+    });
+    out.passed = ok;
+    out
+}
+
+struct WeaverHarness<'a> {
+    data: &'a BrainData,
+    seed: u64,
+    species: crate::creature::Weaver,
+    failures: u32,
+    lines: Vec<String>,
+}
+
+const WEAVER_TANK: Region = Region {
+    center: Vec2 { x: 160.0, y: -80.0 },
+    size: (720.0, 520.0),
+};
+
+fn weaver_body_for(species: crate::creature::Weaver, seed: u64, idle: bool) -> Weaver {
+    let mut rng = crate::rng::Pcg32::new(seed ^ 0x77);
+    let program: Box<dyn crate::weaver::WebProgram> = if idle {
+        Box::new(Idle(species))
+    } else {
+        crate::weaver::program_for(species, WEAVER_TANK, &mut rng)
+    };
+    Weaver::new(species, WEAVER_TANK.center, seed, program)
+}
+
+impl<'a> WeaverHarness<'a> {
+    fn body(&self, idle: bool) -> Weaver {
+        weaver_body_for(self.species, self.seed, idle)
+    }
+
+    /// Run the circuit and the body together, feeding the body's felt
+    /// vibration back into the mechanosensory channel exactly as the shell
+    /// does, with the stimulus applied at the start.
+    #[allow(clippy::too_many_arguments)]
+    fn scenario(
+        &mut self,
+        name: &str,
+        idle: bool,
+        stim: impl FnOnce(&mut LifSim),
+        hold: f32,
+        setup: impl FnOnce(&mut Weaver),
+        check: impl Fn(&Weaver) -> bool,
+        describe: impl Fn(&Weaver) -> String,
+    ) {
+        const DT: f32 = 1.0 / 60.0;
+        let mut sim = weaver_sim(self.data, self.seed);
+        let mut builder = SignalBuilder::new();
+        let mut w = self.body(idle);
+        setup(&mut w);
+        sim.step(1500);
+        let _ = sim.consume_gf();
+        let _ = sim.consume_strike();
+        stim(&mut sim);
+        let mut passed = false;
+        let mut frames = (hold / DT) as i32;
+        while frames > 0 {
+            frames -= 1;
+            sim.gait_drive = w.walking_intensity();
+            sim.gait_phase = w.gait_phase;
+            // The shell's vibration channel: felt -> the strike node.
+            sim.vibration = (w.felt * 4.0).min(1.0);
+            sim.step((DT * 1000.0).round() as i64);
+            let s = builder.make(&mut sim, DT);
+            w.update(DT, WEAVER_TANK, None, Some(s));
+            if check(&w) {
+                passed = true;
+                break;
+            }
+        }
+        if !passed {
+            self.failures += 1;
+        }
+        self.lines.push(format!(
+            "{}  {name}: {}",
+            if passed { "PASS" } else { "FAIL" },
+            describe(&w)
+        ));
+    }
+
+    fn body_check(&mut self, name: &str, run: impl FnOnce() -> (bool, String)) {
+        let (ok, detail) = run();
+        if !ok {
+            self.failures += 1;
+        }
+        self.lines
+            .push(format!("{}  {name}: {detail}", if ok { "PASS" } else { "FAIL" }));
+    }
+}
+
+pub fn weaver_behavior_test(data: &BrainData, seed: u64, id: &str) -> Outcome {
+    let species = match id {
+        "parasteatoda" => crate::creature::Weaver::Parasteatoda,
+        "agelenopsis" => crate::creature::Weaver::Agelenopsis,
+        _ => crate::creature::Weaver::Araneus,
+    };
+    let mut h = WeaverHarness {
+        data,
+        seed,
+        species,
+        failures: 0,
+        lines: Vec::new(),
+    };
+    const DT: f32 = 1.0 / 60.0;
+    let seed = h.seed;
+    let drops = crate::weaver::Traits::of(species).threat == crate::weaver::ThreatResponse::Drop;
+
+    // ---- sim -> body scenarios ----
+
+    h.scenario(
+        if drops { "GF stim -> drops on the dragline" } else { "GF stim -> runs for the retreat" },
+        true,
+        |s| {
+            let g = s.gf.clone();
+            s.stimulate(&g, 0.5, 40)
+        },
+        0.5,
+        |_| {},
+        |w| {
+            if drops {
+                w.state == WeaverState::Dropping && w.dragline().is_some()
+            } else {
+                matches!(w.state, WeaverState::Retreating | WeaverState::Dropping)
+            }
+        },
+        |w| format!("state={:?} line={}", w.state, w.dragline().is_some()),
+    );
+
+    h.scenario(
+        "struggling bug -> vibration -> strike node -> capture",
+        true,
+        |_| {},
+        12.0,
+        |w| {
+            // One sticky thread from under the spider to a stuck bug.
+            let here = w.pos;
+            let far = Vec2::new(here.x + 140.0, here.y);
+            w.silk.pay_out(here, ThreadKind::Capture);
+            w.silk.attach(far, Anchor::Fixed);
+            w.silk.release();
+            w.spawn_bug(far, Vec2::ZERO, false);
+            let n = w.prey.len() - 1;
+            w.prey[n].stuck = true;
+            w.prey[n].struggle = 1.0;
+        },
+        |w| w.captured >= 1,
+        |w| format!("captured {} state={:?} felt {:.3}", w.captured, w.state, w.felt),
+    );
+
+    h.scenario(
+        "DNp09 stim -> construction advances",
+        false,
+        |s| {
+            let g = s.fwd.clone();
+            s.stimulate(&g, 0.25, 4000)
+        },
+        4.0,
+        |_| {},
+        |w| w.state == WeaverState::Building && (!w.silk.threads.is_empty() || w.dragline().is_some()),
+        |w| {
+            format!(
+                "threads {} line={} state={:?} stage={}",
+                w.silk.threads.len(),
+                w.dragline().is_some(),
+                w.state,
+                w.program.stage()
+            )
+        },
+    );
+
+    h.scenario(
+        "DNg11 stim -> grooming",
+        true,
+        |s| {
+            let g = s.groom.clone();
+            s.stimulate(&g, 0.25, 600)
+        },
+        1.5,
+        |_| {},
+        |w| w.state == WeaverState::Grooming,
+        |w| format!("state={:?}", w.state),
+    );
+
+    h.scenario(
+        "MDN stim -> backs away",
+        true,
+        |s| {
+            let g = s.mdn.clone();
+            s.stimulate(&g, 0.3, 600)
+        },
+        1.2,
+        |_| {},
+        |w| w.backward_timer > 0.0,
+        |w| format!("backwardTimer={:.2}", w.backward_timer),
+    );
+
+    h.scenario(
+        "moderate loom -> crouches (or flees); never ignores it",
+        true,
+        |s| {
+            s.loom_l = 0.45;
+            s.loom_r = 0.45;
+        },
+        1.0,
+        |_| {},
+        |w| w.crouch > 0.5 || matches!(w.state, WeaverState::Dropping | WeaverState::Retreating),
+        |w| format!("crouch {:.2} state={:?}", w.crouch, w.state),
+    );
+
+    // ---- body-level checks, hand-built signals, no sim ----
+
+    let mut walk = BrainSignals::new();
+    walk.walk_drive = 0.6;
+
+    if species == crate::creature::Weaver::Araneus {
+        h.body_check("full orb in under 10 min of body time, radii in the species band", || {
+            let mut w = weaver_body_for(species, seed, false);
+            let mut t = 0.0;
+            while !w.web_complete() && t < 900.0 {
+                w.update(DT, WEAVER_TANK, None, Some(walk));
+                t += DT;
+            }
+            for _ in 0..30 {
+                w.update(DT, WEAVER_TANK, None, Some(walk));
+            }
+            let hub = w.sit_point().unwrap_or(w.pos);
+            let silk = &w.silk;
+            let radii = silk
+                .threads
+                .iter()
+                .filter(|t| t.kind == ThreadKind::Radius)
+                .filter(|t| {
+                    let (a, b) = (silk.nodes[t.a].pos, silk.nodes[t.b].pos);
+                    crate::util::hypot(a.x - hub.x, a.y - hub.y) < 3.0
+                        || crate::util::hypot(b.x - hub.x, b.y - hub.y) < 3.0
+                })
+                .count();
+            let capture = silk.count_kind(ThreadKind::Capture);
+            let aux = silk.count_kind(ThreadKind::Auxiliary);
+            let ok = w.web_complete()
+                && t < 600.0
+                && (crate::orb::RADII.0..=crate::orb::RADII.1 + 2).contains(&radii)
+                && capture > 200
+                && aux == 0
+                && w.state == WeaverState::Sitting;
+            (
+                ok,
+                format!(
+                    "{t:.0} s, {radii} radii, {capture} capture segments, {aux} scaffold left, state={:?}",
+                    w.state
+                ),
+            )
+        });
+
+        h.body_check("a cut radius is repaired; half the web gone is a rebuild", || {
+            let mut w = weaver_body_for(species, seed, false);
+            let mut t = 0.0;
+            while !w.web_complete() && t < 900.0 {
+                w.update(DT, WEAVER_TANK, None, Some(walk));
+                t += DT;
+            }
+            let hub = w.sit_point().unwrap_or(w.pos);
+            let cut = w.damage(Vec2::new(hub.x + 55.0, hub.y), 12.0);
+            let repairing = w.program.stage() == "repairing";
+            let mut t2 = 0.0;
+            while !w.web_complete() && t2 < 300.0 {
+                w.update(DT, WEAVER_TANK, None, Some(walk));
+                t2 += DT;
+            }
+            let repaired = w.web_complete();
+            for k in 0..12 {
+                let a = k as f32 * 0.5;
+                w.damage(Vec2::new(hub.x + a.cos() * 120.0, hub.y + a.sin() * 120.0), 60.0);
+            }
+            let rebuilding = w.state == WeaverState::Eating;
+            (
+                cut > 0 && repairing && repaired && rebuilding,
+                format!("cut {cut}, repairing={repairing}, repaired in {t2:.0} s, then rebuild={rebuilding}"),
+            )
+        });
+    }
+
+    h.body_check("the construction program never excites the silk", || {
+        let mut w = weaver_body_for(species, seed, false);
+        let mut t = 0.0;
+        let mut max_felt: f32 = 0.0;
+        while !w.web_complete() && t < 900.0 {
+            w.update(DT, WEAVER_TANK, None, Some(walk));
+            max_felt = max_felt.max(w.felt);
+            if w.silk.loudest(0.0).is_some() {
+                max_felt = 1.0;
+            }
+            t += DT;
+        }
+        (max_felt == 0.0, format!("max vibration during a {t:.0} s build: {max_felt}"))
+    });
+
+    h.body_check("construction pauses while the walk drive is down", || {
+        let mut w = weaver_body_for(species, seed, false);
+        for _ in 0..600 {
+            w.update(DT, WEAVER_TANK, None, Some(walk));
+        }
+        let before = w.silk.threads.len();
+        let rest = BrainSignals::new();
+        for _ in 0..600 {
+            w.update(DT, WEAVER_TANK, None, Some(rest));
+        }
+        (
+            w.silk.threads.len() == before,
+            format!("{before} threads before rest, {} after", w.silk.threads.len()),
+        )
+    });
+
+    let failures = h.failures;
+    let mut lines = h.lines;
+    let n = lines.len();
+    lines.push(if failures == 0 {
+        format!("ALL {n} WEAVER BEHAVIOR TESTS PASS")
+    } else {
+        format!("{failures} FAILURES")
+    });
+    Outcome {
+        passed: failures == 0,
+        lines,
+    }
+}

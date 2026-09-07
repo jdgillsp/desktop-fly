@@ -219,22 +219,49 @@ impl Silk {
         cut
     }
 
-    /// Deposit vibration at the nearest node, if one is within reach.
+    /// Deposit vibration into the silk at `at`: onto the nearest thread
+    /// within reach, shared between its two ends by where along it the
+    /// point lies (a struggle mid-thread shakes both ends). False if no silk
+    /// is near.
     pub fn excite(&mut self, at: Vec2, amount: f32) -> bool {
-        match self.nearest_node(at) {
-            Some((i, d)) if d <= EXCITE_REACH => {
-                self.nodes[i].excite += amount;
+        match self.thread_near(at, None, EXCITE_REACH) {
+            Some((t, _)) => {
+                let th = self.threads[t];
+                let (a, b) = (self.nodes[th.a].pos, self.nodes[th.b].pos);
+                let u = param_along(a, b, at);
+                self.nodes[th.a].excite += amount * (1.0 - u);
+                self.nodes[th.b].excite += amount * u;
                 true
             }
-            _ => false,
+            None => match self.nearest_node(at) {
+                Some((i, d)) if d <= EXCITE_REACH => {
+                    self.nodes[i].excite += amount;
+                    true
+                }
+                _ => false,
+            },
         }
     }
 
-    /// The vibration a leg standing at `p` would feel.
+    /// The vibration a leg standing at `p` would feel: read off the nearest
+    /// thread, interpolated between its ends.
     pub fn excitation_at(&self, p: Vec2) -> f32 {
-        match self.nearest_node(p) {
-            Some((i, d)) if d <= EXCITE_REACH => self.nodes[i].excite,
-            _ => 0.0,
+        if let Some((i, d)) = self.nearest_node(p) {
+            if d <= 2.0 {
+                return self.nodes[i].excite;
+            }
+        }
+        match self.thread_near(p, None, EXCITE_REACH) {
+            Some((t, _)) => {
+                let th = self.threads[t];
+                let (a, b) = (self.nodes[th.a].pos, self.nodes[th.b].pos);
+                let u = param_along(a, b, p);
+                self.nodes[th.a].excite * (1.0 - u) + self.nodes[th.b].excite * u
+            }
+            None => match self.nearest_node(p) {
+                Some((i, d)) if d <= EXCITE_REACH => self.nodes[i].excite,
+                _ => 0.0,
+            },
         }
     }
 
@@ -290,6 +317,94 @@ impl Silk {
         out
     }
 
+    /// Put a free node on thread `t` at the point of it nearest `at`, splitting
+    /// the thread into two of the same kind. This is how a spiral is attached
+    /// to a radius, or a radius to the frame: the new node is returned so the
+    /// line in progress can be fixed to it.
+    pub fn split_thread(&mut self, t: usize, at: Vec2) -> usize {
+        let th = self.threads[t];
+        let (a, b) = (self.nodes[th.a].pos, self.nodes[th.b].pos);
+        let p = project_onto(a, b, at);
+        let m = self.add_node(p, Anchor::Free);
+        self.threads[t] = Thread {
+            a: th.a,
+            b: m,
+            kind: th.kind,
+            rest_len: dist(a, p),
+            tension: th.tension,
+        };
+        self.threads.push(Thread {
+            a: m,
+            b: th.b,
+            kind: th.kind,
+            rest_len: dist(p, b),
+            tension: th.tension,
+        });
+        m
+    }
+
+    /// Remove one thread and any node it leaves holding nothing. Thread and
+    /// node indices are not stable across this call; look things up again.
+    pub fn remove_thread(&mut self, t: usize) {
+        if t < self.threads.len() {
+            self.threads.remove(t);
+            self.prune();
+        }
+    }
+
+    /// The nearest thread to `p` within `r`, optionally of one kind.
+    pub fn thread_near(&self, p: Vec2, kind: Option<ThreadKind>, r: f32) -> Option<(usize, f32)> {
+        self.threads
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| kind.map(|k| t.kind == k).unwrap_or(true))
+            .map(|(i, t)| (i, segment_distance(self.nodes[t.a].pos, self.nodes[t.b].pos, p)))
+            .filter(|(_, d)| *d <= r)
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    }
+
+    /// The point on thread `t` nearest `p`.
+    pub fn point_on_thread(&self, t: usize, p: Vec2) -> Vec2 {
+        let th = self.threads[t];
+        project_onto(self.nodes[th.a].pos, self.nodes[th.b].pos, p)
+    }
+
+    /// A node within `r` of `p`, nearest first. Programs hold positions, not
+    /// indices, because indices move when threads are cut; this is how they
+    /// get an index back for one call.
+    pub fn node_at(&self, p: Vec2, r: f32) -> Option<usize> {
+        self.nearest_node(p).filter(|(_, d)| *d <= r).map(|(i, _)| i)
+    }
+
+    pub fn count_kind(&self, kind: ThreadKind) -> usize {
+        self.threads.iter().filter(|t| t.kind == kind).count()
+    }
+
+    /// Total length of every thread of one kind.
+    pub fn length_of_kind(&self, kind: ThreadKind) -> f32 {
+        self.threads
+            .iter()
+            .filter(|t| t.kind == kind)
+            .map(|t| dist(self.nodes[t.a].pos, self.nodes[t.b].pos))
+            .sum()
+    }
+
+    /// Where the most excited node is, if any node is excited above `min`:
+    /// the modelled localisation readout a sitting spider uses to decide
+    /// which line to run down.
+    pub fn loudest(&self, min: f32) -> Option<(Vec2, f32)> {
+        self.nodes
+            .iter()
+            .filter(|n| n.excite > min)
+            .max_by(|a, b| a.excite.partial_cmp(&b.excite).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|n| (n.pos, n.excite))
+    }
+
+    /// Every node's excitation summed: what the whole web is doing.
+    pub fn total_excitation(&self) -> f32 {
+        self.nodes.iter().map(|n| n.excite).sum()
+    }
+
     /// Threads touching a node.
     pub fn degree(&self, node: usize) -> usize {
         self.threads.iter().filter(|t| t.a == node || t.b == node).count()
@@ -329,6 +444,31 @@ impl Silk {
 
 fn dist(a: Vec2, b: Vec2) -> f32 {
     hypot(a.x - b.x, a.y - b.y)
+}
+
+/// Where along `ab` (0 at `a`, 1 at `b`) the point nearest `p` lies.
+fn param_along(a: Vec2, b: Vec2, p: Vec2) -> f32 {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let l2 = abx * abx + aby * aby;
+    if l2 <= 1e-6 {
+        0.0
+    } else {
+        (((p.x - a.x) * abx + (p.y - a.y) * aby) / l2).clamp(0.0, 1.0)
+    }
+}
+
+/// The point on segment `ab` nearest `p`.
+fn project_onto(a: Vec2, b: Vec2, p: Vec2) -> Vec2 {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let l2 = abx * abx + aby * aby;
+    let t = if l2 <= 1e-6 {
+        0.0
+    } else {
+        (((p.x - a.x) * abx + (p.y - a.y) * aby) / l2).clamp(0.0, 1.0)
+    };
+    Vec2::new(a.x + abx * t, a.y + aby * t)
 }
 
 /// Distance from `p` to the segment `ab`.
@@ -445,6 +585,39 @@ mod tests {
         assert_eq!(s.nodes.len(), 1);
         assert_eq!(s.trailing_anchor(), Some(v(9.0, 9.0)));
         assert_eq!(s.trailing_kind(), Some(ThreadKind::Dragline));
+    }
+
+    #[test]
+    fn splitting_a_thread_makes_a_junction_of_the_same_kind() {
+        let mut s = Silk::new();
+        s.pay_out(v(0.0, 0.0), ThreadKind::Radius);
+        s.attach(v(100.0, 0.0), Anchor::Fixed);
+        s.release();
+        // A spiral arriving at (40, 7) fixes to the radius at (40, 0).
+        let (t, _) = s.thread_near(v(40.0, 7.0), Some(ThreadKind::Radius), 10.0).unwrap();
+        let m = s.split_thread(t, v(40.0, 7.0));
+        assert_eq!(s.nodes[m].pos, v(40.0, 0.0));
+        assert_eq!(s.nodes[m].anchor, Anchor::Free);
+        assert_eq!(s.count_kind(ThreadKind::Radius), 2);
+        assert!((s.length_of_kind(ThreadKind::Radius) - 100.0).abs() < 1e-3);
+        assert_eq!(s.degree(m), 2);
+        assert_eq!(s.node_at(v(41.0, 1.0), 3.0), Some(m));
+        assert!(s.thread_near(v(40.0, 30.0), Some(ThreadKind::Capture), 10.0).is_none());
+        s.remove_thread(0);
+        assert_eq!(s.threads.len(), 1);
+        assert_eq!(s.nodes.len(), 2, "the orphaned end went");
+    }
+
+    #[test]
+    fn the_loudest_node_is_where_the_struggle_is() {
+        let mut s = Silk::new();
+        s.pay_out(v(0.0, 0.0), ThreadKind::Radius);
+        s.attach(v(100.0, 0.0), Anchor::Fixed);
+        s.attach(v(200.0, 0.0), Anchor::Fixed);
+        s.release();
+        assert!(s.loudest(0.01).is_none());
+        s.excite(v(198.0, 2.0), 0.5);
+        assert_eq!(s.loudest(0.01).map(|(p, _)| p), Some(v(200.0, 0.0)));
     }
 
     #[test]

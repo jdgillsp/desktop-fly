@@ -22,6 +22,7 @@
 //! bug → LC11 drive → circuit → pounce → capture — is testable end to end in
 //! `suites::spider_behavior_test` with no window involved.
 
+use crate::arachnid::{step_legs, LegMode};
 use crate::creature::{Body, Proprioception, Substrate, World};
 use crate::habitat::Region;
 use crate::rng::Pcg32;
@@ -63,16 +64,7 @@ pub struct Bug {
     pub age: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct SpiderLeg {
-    /// +1 right, -1 left.
-    pub side: f32,
-    /// Front (0) to back (3).
-    pub rank: usize,
-    pub phase: f32,
-    pub angle: f32,
-    pub lift: f32,
-}
+pub use crate::arachnid::SpiderLeg;
 
 /// Everything a renderer needs this frame.
 #[derive(Debug, Clone)]
@@ -146,19 +138,11 @@ pub struct Spider {
     rng: Pcg32,
 }
 
-const LEG_PHASES: [f32; 8] = [0.0, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0.0];
-
 impl Spider {
     pub fn new(at: Vec2, seed: u64) -> Self {
         let mut rng = Pcg32::new(seed);
         let heading = rng.range(0.0, std::f32::consts::TAU);
-        let legs = std::array::from_fn(|i| SpiderLeg {
-            side: if i % 2 == 0 { -1.0 } else { 1.0 },
-            rank: i / 2,
-            phase: LEG_PHASES[i],
-            angle: 0.0,
-            lift: 0.0,
-        });
+        let legs = crate::arachnid::new_legs();
         Spider {
             attractor: None,
             pos: at,
@@ -807,59 +791,24 @@ impl Spider {
     }
 
     fn update_legs(&mut self, dt: f32) {
+        // The rig is shared with the web builders (`arachnid.rs`); this only
+        // says which of its modes the salticid's state is in.
         let v = self.effective_speed().abs();
         let walking = matches!(self.state, SpiderState::Walking | SpiderState::Stalking) && v > 1.0;
-        if walking {
-            let amp = clamp(0.18 + v * 0.0025, 0.18, 0.45);
-            let stride = (2.0 * amp * 12.0).max(4.0);
-            let freq = clamp(v / stride, 2.5, 9.0);
-            self.gait_phase = (self.gait_phase + freq * dt) % 1.0;
-            let stance_frac = 0.62;
-            let backward = self.backward_timer > 0.0;
-            for leg in self.legs.iter_mut() {
-                let p = (self.gait_phase + leg.phase) % 1.0;
-                if p < stance_frac {
-                    leg.angle = amp * (1.0 - 2.0 * (p / stance_frac));
-                    leg.lift = 0.0;
-                } else {
-                    let s = (p - stance_frac) / (1.0 - stance_frac);
-                    leg.angle = -amp + 2.0 * amp * smoothstep(s);
-                    leg.lift = (s * std::f32::consts::PI).sin() * 0.5;
-                }
-                if backward {
-                    leg.angle = -leg.angle;
-                }
-            }
-        } else if self.state == SpiderState::Grooming {
-            let t = self.time;
-            for leg in self.legs.iter_mut() {
-                if leg.rank == 0 {
-                    // Front legs and palps drawn through the chelicerae.
-                    leg.angle = 0.5 + 0.25 * (t * 18.0 + leg.side * 1.1).sin();
-                    leg.lift = 0.5 + 0.15 * (t * 20.0).sin();
-                } else {
-                    leg.angle += (0.0 - leg.angle) * (8.0 * dt).min(1.0);
-                    leg.lift += (0.0 - leg.lift) * (8.0 * dt).min(1.0);
-                }
-            }
-        } else if self.state == SpiderState::Jumping {
-            // Legs 3 and 4 extend to launch; front legs reach forward.
-            for leg in self.legs.iter_mut() {
-                let (a, l) = if leg.rank >= 2 { (-0.6, 0.2) } else { (0.5, 0.35) };
-                leg.angle += (a - leg.angle) * (14.0 * dt).min(1.0);
-                leg.lift += (l - leg.lift) * (14.0 * dt).min(1.0);
-            }
-        } else if self.state == SpiderState::Abseiling {
-            for leg in self.legs.iter_mut() {
-                leg.angle += (0.15 - leg.angle) * (6.0 * dt).min(1.0);
-                leg.lift += (0.45 - leg.lift) * (6.0 * dt).min(1.0);
+        let mode = if walking {
+            LegMode::Walk {
+                speed: v,
+                backward: self.backward_timer > 0.0,
             }
         } else {
-            for leg in self.legs.iter_mut() {
-                leg.angle += (0.0 - leg.angle) * (10.0 * dt).min(1.0);
-                leg.lift += (0.0 - leg.lift) * (10.0 * dt).min(1.0);
+            match self.state {
+                SpiderState::Grooming => LegMode::Groom { time: self.time },
+                SpiderState::Jumping => LegMode::Launch,
+                SpiderState::Abseiling => LegMode::Hang,
+                _ => LegMode::Rest,
             }
-        }
+        };
+        step_legs(&mut self.legs, &mut self.gait_phase, dt, mode);
     }
 }
 

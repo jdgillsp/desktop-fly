@@ -58,6 +58,17 @@ pub struct RoleManifest {
     /// Baseline for any neuron not matched by a population above.
     pub default_baseline: Baseline,
     pub default_color: [f32; 3],
+    /// Membrane time constants that differ from the integrator's default,
+    /// by role. Empty for every measured creature: the fly's neurons all
+    /// share `LifParams::tau_ms`. An authored node may need its own — the
+    /// weavers' strike node integrates over hundreds of milliseconds, which
+    /// is what lets a slow struggle reach it while a sharp knock goes to the
+    /// giant fiber instead (WEB_PLAN.md §3.1).
+    pub tau_ms: Vec<(RoleId, f32)>,
+    /// Spike thresholds that differ from the integrator's default, by role.
+    /// Empty for every measured creature. The counterpart of a long time
+    /// constant: an averager needs a threshold its own noise cannot reach.
+    pub threshold: Vec<(RoleId, f32)>,
 }
 
 impl RoleManifest {
@@ -147,6 +158,8 @@ pub fn drosophila() -> RoleManifest {
         creature: "drosophila",
         default_baseline: Fixed(0.002), // gf and anything unlisted: silent unless driven
         default_color: [0.55, 0.55, 0.62],
+        tau_ms: Vec::new(),
+        threshold: Vec::new(),
         populations: vec![
             Population {
                 slug: "lc4",
@@ -296,6 +309,59 @@ pub fn salticid() -> RoleManifest {
     m
 }
 
+/// Membrane time constant of the weavers' authored strike node, in ms: an
+/// averager, so that a sustained struggle outweighs a brief burst.
+pub const STRIKE_TAU_MS: f32 = 1000.0;
+/// Its spike threshold, against the default of 1.0. With a 1 s membrane the
+/// node holds its own noise kicks at ~1.1 ± 0.4 (0.0022/ms × 0.42 × 1000),
+/// and the LIF's 400 ms six-fold noise burst lifts that by ~1.8; 4 is clear
+/// of both. A struggle at full vibration rests it at 12 (`lif::VIBRATION_GAIN`).
+pub const STRIKE_THRESHOLD: f32 = 4.0;
+
+/// The shared circuit of the three web-building chimeras (WEB_PLAN.md §3.1).
+///
+/// The fly's manifest minus the wing module and **without LC11**: an orb
+/// weaver hunts by web vibration, not by sight, so the salticid's visual prey
+/// pathway is not lifted across just because it exists. The one authored
+/// node — the **strike** — is a vibration *sense* with no synapses: a stand-in
+/// for the slit sensilla the fly extract has no counterpart for, driven by the
+/// modelled transduction on a slow membrane with its own threshold, so a
+/// sustained struggle accumulates on it. A knock on the web never touches it:
+/// it goes through the fly's measured mechanosensory partners onto the giant
+/// fiber, as the data wires them. That is the amplitude split, and it is one
+/// cool-coloured node with nothing connected to it.
+pub fn weaver() -> RoleManifest {
+    use Baseline::*;
+    use Membership::*;
+    let mut m = drosophila();
+    m.creature = "weaver";
+    m.populations.retain(|p| p.slug != "escw");
+    let at = m
+        .populations
+        .iter()
+        .position(|p| p.slug == "gf")
+        .unwrap_or(m.populations.len());
+    m.populations.insert(
+        at,
+        Population {
+            slug: "strike",
+            label: "strike node - AUTHORED (no such neuron): a web-vibration sense",
+            membership: Role("strike"),
+            bilateral: false,
+            // A 1 s membrane holds fifty times more of its baseline than a
+            // fly neuron does: 0.00015 rests the node at ~0.15, and its own
+            // noise kicks add ~1.1 ± 0.4. The threshold below sits well
+            // above that, so it is silent without the transduction driving
+            // it — the same discipline as LC11 and the pounce node.
+            baseline: Fixed(0.00015),
+            color: [0.60, 0.70, 1.00],
+        },
+    );
+    m.tau_ms = vec![("strike", STRIKE_TAU_MS)];
+    m.threshold = vec![("strike", STRIKE_THRESHOLD)];
+    m
+}
+
 /// *Caenorhabditis elegans*, hermaphrodite.
 ///
 /// 302 neurons, 279 of them with synapses — the only complete, cell-identified
@@ -328,6 +394,8 @@ pub fn c_elegans() -> RoleManifest {
         creature: "c_elegans",
         default_baseline: Fixed(0.0),
         default_color: [0.55, 0.58, 0.62],
+        tau_ms: Vec::new(),
+        threshold: Vec::new(),
         populations: vec![
             Population {
                 slug: "forward",
@@ -592,6 +660,8 @@ pub fn procedural() -> RoleManifest {
         creature: "procedural",
         default_baseline: Baseline::Fixed(0.0),
         default_color: [0.55, 0.58, 0.62],
+        tau_ms: Vec::new(),
+        threshold: Vec::new(),
         populations: Vec::new(),
     }
 }

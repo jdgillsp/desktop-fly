@@ -13,6 +13,12 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use dfcore::CREATURE_IDS;
 
+/// How many contents slots the menu carries. The catalogue for any one
+/// enclosure is at most this long (`PropKind::catalogue`), and fixed slots mean
+/// the menu ids are stable across a creature switch — a menu rebuilt at runtime
+/// would invalidate every id this file is holding.
+pub const CONTENT_SLOTS: usize = 4;
+
 /// What the user picked. Kept as an enum so the app loop stays declarative and
 /// this file owns nothing but presentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +36,31 @@ pub enum TrayCommand {
     ToggleGlass,
     /// Confine the creature to a rendered enclosure, or let it have the screen.
     ToggleHabitat,
+    /// Nudge the habitat view: tilt, turn and size, as (pitch, yaw, zoom)
+    /// deltas in the same units the drag chords use. One menu step is
+    /// deliberately coarse — the chords are the fine control.
+    AdjustView(ViewStep),
+    /// Back to the shipped angles and size.
+    ResetView,
+    /// Add or remove one of the prop in this slot of the current enclosure's
+    /// catalogue.
+    AddProp(usize),
+    RemoveProp(usize),
+    /// Put the enclosure back to the contents it ships with.
+    Restock,
     Quit,
+}
+
+/// One step of the coarse view control. An enum rather than three floats so the
+/// tray does not have to know what a radian is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewStep {
+    TiltUp,
+    TiltDown,
+    TurnLeft,
+    TurnRight,
+    Bigger,
+    Smaller,
 }
 
 pub struct Tray {
@@ -44,6 +74,15 @@ pub struct Tray {
     creatures: Vec<(&'static str, CheckMenuItem)>,
     glass: CheckMenuItem,
     habitat: CheckMenuItem,
+    /// The current view, shown as text so the numbers are legible rather than
+    /// something you can only infer from the picture.
+    view: MenuItem,
+    /// Greyed out when the view already is the default, so the item never
+    /// offers to do nothing.
+    reset_view: MenuItem,
+    /// Add/remove pairs, one per catalogue slot. Retargeted when the enclosure
+    /// changes; disabled when the slot is unused.
+    contents: Vec<(MenuItem, MenuItem)>,
     ids: Vec<(tray_icon::menu::MenuId, TrayCommand)>,
 }
 
@@ -134,6 +173,45 @@ impl Tray {
         let shadow = MenuItem::new("Toggle Shadow", true, None);
         let glass = CheckMenuItem::new("Glass Anatomy (see the circuit)", true, glass_on, None);
         let habitat = CheckMenuItem::new("Habitat (confine to a tank)", true, habitat_on, None);
+
+        // The view controls. Under a submenu because they are six items that
+        // only matter inside a tank, and the top level is already long.
+        let view = MenuItem::new("default view", false, None);
+        let steps = [
+            ("Tilt Up (more overhead)", ViewStep::TiltUp),
+            ("Tilt Down (more side-on)", ViewStep::TiltDown),
+            ("Turn Left", ViewStep::TurnLeft),
+            ("Turn Right", ViewStep::TurnRight),
+            ("Bigger", ViewStep::Bigger),
+            ("Smaller", ViewStep::Smaller),
+        ];
+        let step_items: Vec<(MenuItem, ViewStep)> = steps
+            .iter()
+            .map(|(label, step)| (MenuItem::new(*label, true, None), *step))
+            .collect();
+        let reset_view = MenuItem::new("Reset View", true, None);
+        let view_menu = Submenu::new("View", true);
+        view_menu.append(&view).ok()?;
+        view_menu.append(&PredefinedMenuItem::separator()).ok()?;
+        for (item, _) in &step_items {
+            view_menu.append(item).ok()?;
+        }
+        view_menu.append(&PredefinedMenuItem::separator()).ok()?;
+        view_menu.append(&reset_view).ok()?;
+
+        // The contents controls. Fixed slots, relabelled per enclosure.
+        let contents: Vec<(MenuItem, MenuItem)> = (0..CONTENT_SLOTS)
+            .map(|_| (MenuItem::new("-", false, None), MenuItem::new("-", false, None)))
+            .collect();
+        let restock = MenuItem::new("Restock (default contents)", true, None);
+        let contents_menu = Submenu::new("Contents", true);
+        for (add, remove) in &contents {
+            contents_menu.append(add).ok()?;
+            contents_menu.append(remove).ok()?;
+            contents_menu.append(&PredefinedMenuItem::separator()).ok()?;
+        }
+        contents_menu.append(&restock).ok()?;
+
         let mood = MenuItem::new("getting to know you", false, None);
         let forget = MenuItem::new("Forget Me (reset habituation)", true, None);
         let quit = MenuItem::new("Quit", true, None);
@@ -169,6 +247,15 @@ impl Tray {
         for (id, item) in &creatures {
             ids.push((item.id().clone(), TrayCommand::SelectCreature(id)));
         }
+        for (item, step) in &step_items {
+            ids.push((item.id().clone(), TrayCommand::AdjustView(*step)));
+        }
+        ids.push((reset_view.id().clone(), TrayCommand::ResetView));
+        ids.push((restock.id().clone(), TrayCommand::Restock));
+        for (i, (add, remove)) in contents.iter().enumerate() {
+            ids.push((add.id().clone(), TrayCommand::AddProp(i)));
+            ids.push((remove.id().clone(), TrayCommand::RemoveProp(i)));
+        }
 
         menu.append_items(&[
             &title,
@@ -183,6 +270,8 @@ impl Tray {
             &shadow,
             &glass,
             &habitat,
+            &view_menu,
+            &contents_menu,
             &PredefinedMenuItem::separator(),
             &mood,
             &forget,
@@ -207,6 +296,9 @@ impl Tray {
             creatures,
             glass,
             habitat,
+            view,
+            reset_view,
+            contents,
             ids,
         })
     }
@@ -217,6 +309,38 @@ impl Tray {
 
     pub fn set_habitat(&self, on: bool) {
         self.habitat.set_checked(on);
+    }
+
+    /// The view line, and whether resetting it would do anything.
+    pub fn set_view(&self, text: &str, is_default: bool) {
+        self.view.set_text(text);
+        self.reset_view.set_enabled(!is_default);
+    }
+
+    /// Point the fixed contents slots at the current enclosure's catalogue.
+    ///
+    /// `slots` is one entry per slot: the prop's label, whether another may be
+    /// added, and whether one may be removed. A slot with no entry is blanked
+    /// and disabled rather than hidden — `tray-icon` has no remove-and-reinsert
+    /// that keeps ids stable, and a stale id is a menu item that does the wrong
+    /// thing.
+    pub fn set_contents(&self, slots: &[(String, bool, bool)]) {
+        for (i, (add, remove)) in self.contents.iter().enumerate() {
+            match slots.get(i) {
+                Some((label, can_add, can_remove)) => {
+                    add.set_text(format!("Add {label}"));
+                    add.set_enabled(*can_add);
+                    remove.set_text(format!("Remove {label}"));
+                    remove.set_enabled(*can_remove);
+                }
+                None => {
+                    add.set_text("-");
+                    add.set_enabled(false);
+                    remove.set_text("-");
+                    remove.set_enabled(false);
+                }
+            }
+        }
     }
 
     /// Reflect a creature switch: tick the right item, update the data line.

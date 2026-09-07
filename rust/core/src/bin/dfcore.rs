@@ -44,6 +44,7 @@ fn main() {
         ran = true;
         let r = match creature.id() {
             "salticid" => suites::chimera_test(&brain, seed),
+            "araneus" | "parasteatoda" | "agelenopsis" => suites::weaver_test(&brain, seed),
             "drosophila" => suites::sim_test(&brain, seed),
             other => {
                 eprintln!("no circuit suite for {other}");
@@ -62,6 +63,9 @@ fn main() {
         }
         let r = match creature.id() {
             "salticid" => suites::spider_behavior_test(&brain, seed),
+            "araneus" | "parasteatoda" | "agelenopsis" => {
+                suites::weaver_behavior_test(&brain, seed, creature.id())
+            }
             "drosophila" => suites::behavior_test(&brain, seed),
             other => {
                 eprintln!("no behaviour suite for {other}");

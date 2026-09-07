@@ -61,12 +61,95 @@ pub const DEFAULT_PITCH: f32 = 0.90; // ~51.6 degrees off vertical
 /// box its corner; not so much that the tank becomes a lozenge.
 pub const DEFAULT_YAW: f32 = 0.60; // ~34.4 degrees
 
-/// The habitat camera.
-pub fn habitat() -> Camera {
-    Camera::Tilted {
-        pitch: DEFAULT_PITCH,
-        yaw: DEFAULT_YAW,
+/// How large the tank is drawn, as a multiple of the size the app picks for
+/// the display. 1.0 is that default; the ends are where the tank stops being
+/// worth having — too small to see the animal in, or so large it owns the
+/// screen. `fit_size` still has the last word, so the top of this range simply
+/// means "as big as the display allows".
+pub const MIN_ZOOM: f32 = 0.45;
+pub const MAX_ZOOM: f32 = 2.2;
+/// Straight down is not available here: at pitch 0 the walls project to lines
+/// and the box stops being a box (see `Tilted`). The far end stops short of
+/// edge-on, where the floor collapses to a sliver.
+pub const MIN_PITCH: f32 = 0.20;
+pub const MAX_PITCH: f32 = 1.32;
+/// Yaw is symmetric — turning the tank the other way shows the *other* side
+/// wall, which is a real choice, not a mistake. Zero is allowed, and looks like
+/// a flat elevation; it is the one setting where the tank reads as a backdrop.
+pub const MAX_YAW: f32 = 1.15;
+
+/// The part of the habitat view the user owns: how the camera is angled and how
+/// large the tank is drawn. Split out from [`Camera`] because zoom is not a
+/// camera property at all — the projection is orthographic and the tank is
+/// *built bigger*, which is what makes the creature inside it keep its constant
+/// apparent size (PORT_PLAN.md §8). A perspective dolly would have shrunk the
+/// animal along with its tank.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HabitatView {
+    pub pitch: f32,
+    pub yaw: f32,
+    pub zoom: f32,
+}
+
+impl Default for HabitatView {
+    fn default() -> Self {
+        HabitatView {
+            pitch: DEFAULT_PITCH,
+            yaw: DEFAULT_YAW,
+            zoom: 1.0,
+        }
     }
+}
+
+impl HabitatView {
+    /// The camera this view implies. Always clamped on the way out, so no
+    /// caller can produce a degenerate projection however it got its numbers —
+    /// a restored settings file included.
+    pub fn camera(&self) -> Camera {
+        Camera::Tilted {
+            pitch: self.pitch.clamp(MIN_PITCH, MAX_PITCH),
+            yaw: self.yaw.clamp(-MAX_YAW, MAX_YAW),
+        }
+    }
+
+    pub fn clamped_zoom(&self) -> f32 {
+        self.zoom.clamp(MIN_ZOOM, MAX_ZOOM)
+    }
+
+    /// Fold the numbers back into range and report whether anything actually
+    /// moved — the caller only rebuilds the tank when it did.
+    pub fn adjust(&mut self, d_pitch: f32, d_yaw: f32, d_zoom: f32) -> bool {
+        let before = *self;
+        self.pitch = (self.pitch + d_pitch).clamp(MIN_PITCH, MAX_PITCH);
+        self.yaw = (self.yaw + d_yaw).clamp(-MAX_YAW, MAX_YAW);
+        // Zoom multiplies rather than adds: a fixed step would be a third of
+        // the tank at the small end and a twentieth at the large one.
+        self.zoom = (self.zoom * (1.0 + d_zoom)).clamp(MIN_ZOOM, MAX_ZOOM);
+        *self != before
+    }
+
+    /// Is this the view the app ships with? The tray uses it to grey out
+    /// "Reset View" rather than offering a no-op.
+    pub fn is_default(&self) -> bool {
+        *self == HabitatView::default()
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "tilt {:.0}deg, turn {:.0}deg, size {:.0}%",
+            self.pitch.to_degrees(),
+            self.yaw.to_degrees(),
+            self.clamped_zoom() * 100.0
+        )
+    }
+}
+
+/// The habitat camera at its default angles. The app builds its camera from a
+/// [`HabitatView`] the user owns; this is the shorthand the tests are written
+/// against, and the fixed point they check the adjustable one against.
+#[cfg(test)]
+pub fn habitat() -> Camera {
+    HabitatView::default().camera()
 }
 
 impl Camera {
@@ -253,6 +336,128 @@ impl Camera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default view must reproduce the constants the tank was designed and
+    /// verified against, or making the view adjustable would silently have
+    /// moved everyone's tank.
+    #[test]
+    fn the_default_view_is_the_camera_the_tank_was_built_for() {
+        let v = HabitatView::default();
+        assert!(v.is_default());
+        assert_eq!(v.clamped_zoom(), 1.0);
+        assert_eq!(
+            v.camera(),
+            Camera::Tilted {
+                pitch: DEFAULT_PITCH,
+                yaw: DEFAULT_YAW
+            }
+        );
+        assert_eq!(v.camera(), habitat());
+    }
+
+    /// However hard the user leans on a control, the projection has to stay one
+    /// the rest of the app can use: never edge-on, never straight down (where
+    /// the walls collapse to lines), never a tank of zero size.
+    #[test]
+    fn no_amount_of_adjustment_produces_a_degenerate_view() {
+        for (dp, dy, dz) in [
+            (10.0, 10.0, 10.0),
+            (-10.0, -10.0, -10.0),
+            (0.0, 0.0, -0.99),
+            (1e9, -1e9, 1e9),
+        ] {
+            let mut v = HabitatView::default();
+            // Repeatedly, because zoom is multiplicative and one step is not
+            // enough to reach either end.
+            for _ in 0..64 {
+                v.adjust(dp, dy, dz);
+            }
+            assert!((MIN_PITCH..=MAX_PITCH).contains(&v.pitch), "pitch {}", v.pitch);
+            assert!(v.yaw.abs() <= MAX_YAW, "yaw {}", v.yaw);
+            assert!(
+                (MIN_ZOOM..=MAX_ZOOM).contains(&v.clamped_zoom()),
+                "zoom {}",
+                v.zoom
+            );
+            // The two properties the tank depends on: the ground still has
+            // screen area to un-project a cursor through, and height still
+            // reads as height.
+            let c = v.camera();
+            let (lo, hi) = c.screen_offsets((200.0, 200.0), 0.0, 0.0);
+            assert!(
+                (hi.x - lo.x) > 1.0 && (hi.y - lo.y) > 1.0,
+                "the floor collapsed at pitch {}",
+                v.pitch
+            );
+            let floor = math::transform_point(&c.view(), [0.0, 0.0, 0.0]);
+            let up = math::transform_point(&c.view(), [0.0, 0.0, 10.0]);
+            assert!(up[1] > floor[1], "height stopped going up at pitch {}", v.pitch);
+        }
+    }
+
+    /// `adjust` reports whether anything moved — the app only rebuilds the tank
+    /// when it did, so a control pinned at its limit must not rebuild forever.
+    #[test]
+    fn adjusting_against_a_limit_reports_no_change() {
+        let mut v = HabitatView::default();
+        assert!(v.adjust(0.05, 0.0, 0.0), "a real nudge reported nothing");
+        for _ in 0..200 {
+            v.adjust(1.0, 1.0, 1.0);
+        }
+        assert!(
+            !v.adjust(1.0, 1.0, 1.0),
+            "pinned at the limit, another push still claimed to change something"
+        );
+        assert!(!v.is_default());
+    }
+
+    /// The ground round-trip is what keeps the cursor and the creature agreeing
+    /// about where things are. It has to hold at every angle the user can
+    /// reach, not just at the default the feature shipped with.
+    #[test]
+    fn the_ground_mapping_round_trips_at_every_reachable_angle() {
+        for &pitch in &[MIN_PITCH, 0.5, DEFAULT_PITCH, 1.1, MAX_PITCH] {
+            for &yaw in &[-MAX_YAW, -0.3, 0.0, DEFAULT_YAW, MAX_YAW] {
+                let c = HabitatView { pitch, yaw, zoom: 1.0 }.camera();
+                for p in [Vec2::new(0.0, 0.0), Vec2::new(310.0, -244.0), Vec2::new(-88.0, 402.0)] {
+                    let back = c.unproject_ground(c.project_ground(p));
+                    assert!(
+                        (back.x - p.x).abs() < 1e-2 && (back.y - p.y).abs() < 1e-2,
+                        "pitch {pitch}, yaw {yaw}: ({}, {}) round-tripped to ({}, {})",
+                        p.x, p.y, back.x, back.y
+                    );
+                }
+            }
+        }
+    }
+
+    /// Zoom has to actually change the tank, and `fit_size` has to keep the
+    /// biggest setting on the display — the reason zoom is applied before the
+    /// fit rather than after it.
+    #[test]
+    fn zoom_grows_the_tank_but_never_off_the_display() {
+        let display = (1920.0, 1080.0);
+        let (lo, hi) = (-40.0, 320.0);
+        let base = (700.0, 460.0);
+        let mut last = 0.0;
+        for &z in &[MIN_ZOOM, 0.7, 1.0, 1.5, MAX_ZOOM] {
+            let c = HabitatView { pitch: DEFAULT_PITCH, yaw: DEFAULT_YAW, zoom: z }.camera();
+            let want = (base.0 * z, base.1 * z);
+            let size = c.fit_size(display, want, lo, hi, 24.0);
+            assert!(size.0 >= last, "zoom {z} shrank the tank");
+            last = size.0;
+            let half = (size.0 / 2.0, size.1 / 2.0);
+            let (olo, ohi) = c.screen_offsets(half, lo, hi);
+            assert!(
+                ohi.x - olo.x <= display.0 - 48.0 + 1.0 && ohi.y - olo.y <= display.1 - 48.0 + 1.0,
+                "zoom {z} put a {:.0}x{:.0} tank on a {:.0}x{:.0} display",
+                ohi.x - olo.x, ohi.y - olo.y, display.0, display.1
+            );
+        }
+        // And the ends are genuinely different sizes, not a clamp doing nothing.
+        let small = HabitatView { pitch: DEFAULT_PITCH, yaw: DEFAULT_YAW, zoom: MIN_ZOOM };
+        assert!(small.clamped_zoom() < 0.5);
+    }
 
     /// Free roam must be untouched: same matrix, same view direction, same far
     /// plane, and the identity mapping that lets the fly stand on a real window.

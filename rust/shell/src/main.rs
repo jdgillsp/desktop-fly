@@ -27,6 +27,8 @@ mod runtime;
 mod snapshot;
 mod spiderbody;
 mod spiderrt;
+mod weaverbody;
+mod weaverrt;
 mod tray;
 mod transduction;
 mod wormbody;
@@ -36,8 +38,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dfcore::env::{Rect, ScreenSpace, Senses};
-use camera::Camera;
-use dfcore::{Habitat, HabitatKind, Region, Vec2};
+use camera::{Camera, HabitatView};
+use dfcore::{Habitat, HabitatChord, HabitatKind, PropKind, Region, Vec2};
 use dfplatform::HostSenses;
 
 use runtime::Runtime;
@@ -189,8 +191,23 @@ struct App {
     /// Scratch for the front pane, built separately because it has to be
     /// appended *after* the creature.
     front_mesh: mesh::Mesh,
-    /// The grab chord is down and the user is repositioning the enclosure.
+    /// The grab chord is down and the user is handling the enclosure — moving
+    /// it, turning it or resizing it. Drives the rim highlight, so every
+    /// adjustment gives the same "you have hold of it" feedback.
     grabbing: bool,
+    /// How the user has angled and sized the enclosure. Persisted.
+    view: HabitatView,
+    /// The chord held this frame and last, and where the pointer was when the
+    /// last frame ran — in **screen** units, not ground ones.
+    ///
+    /// Screen matters: the orbit chord changes the camera, and the ground
+    /// position of a stationary pointer changes with it. Feeding a ground delta
+    /// back into the camera would be a loop that runs away the moment the user
+    /// stops moving the mouse.
+    chord: HabitatChord,
+    prev_chord: HabitatChord,
+    last_screen_cursor: Option<Vec2>,
+    chord_from: Option<Vec2>,
 
     gpu: Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)>,
     brain: Option<brain::BrainView>,
@@ -230,6 +247,17 @@ impl App {
             frame_mesh: mesh::Mesh::default(),
             front_mesh: mesh::Mesh::default(),
             grabbing: false,
+            view: {
+                let mut v = HabitatView::default();
+                if let Some((pitch, yaw, zoom)) = persist::load_habitat_view() {
+                    v = HabitatView { pitch, yaw, zoom };
+                }
+                v
+            },
+            chord: HabitatChord::None,
+            prev_chord: HabitatChord::None,
+            last_screen_cursor: None,
+            chord_from: None,
             gpu: None,
             brain: None,
             brain_window: None,
@@ -372,6 +400,7 @@ impl ApplicationHandler for App {
         if self.tray.is_none() {
             eprintln!("WARNING: no tray icon; quit with Task Manager");
         }
+        self.refresh_habitat_menu();
 
         // What the creature already knows about this user.
         *self.rt.habituation_mut() = persist::load(self.rt.creature().id());
@@ -382,7 +411,7 @@ impl ApplicationHandler for App {
 
         // The enclosure exists from the first frame if it was asked for, and
         // the creature starts inside it rather than swimming in from off-stage.
-        self.rebuild_habitat();
+        self.rebuild_habitat(false);
         let (w, h) = self.space.size();
         match &self.habitat {
             Some(h) => {
@@ -590,7 +619,7 @@ impl App {
     /// enclosure, where nothing is registered to anything (camera.rs).
     fn camera(&self) -> Camera {
         match self.habitat {
-            Some(_) => camera::habitat(),
+            Some(_) => self.view.camera(),
             None => Camera::TopDown,
         }
     }
@@ -607,8 +636,13 @@ impl App {
     }
 
     /// Build, move or drop the enclosure to match the current setting, the
-    /// current creature and the current display.
-    fn rebuild_habitat(&mut self) {
+    /// current creature, the current display and the current view.
+    ///
+    /// `keep_place` is the difference between "the world changed under the
+    /// tank" and "the user is adjusting the tank". A display switch should park
+    /// it back in its corner; turning or resizing it must not teleport it out
+    /// from under the pointer that is doing the turning.
+    fn rebuild_habitat(&mut self, keep_place: bool) {
         if !self.args.habitat {
             self.habitat = None;
             return;
@@ -617,21 +651,80 @@ impl App {
         // The tank is placed by where it will *appear*, not by its ground
         // rectangle: under a tilted, yawed camera those are different shapes,
         // and a ground-space placement would hang a corner off the screen.
-        let c = camera::habitat();
+        let c = self.view.camera();
         let display = self.space.size();
+        // Each enclosure has its own proportions — a vivarium is narrow for
+        // its height, a pond a little wider than a tank — applied to one
+        // display-relative default, then to the user's zoom. The zoom is
+        // applied *before* `fit_size`, so the top of its range means "as large
+        // as this display allows" rather than "off the edge".
+        let (fw, fh) = habitatmesh::footprint(kind);
+        let z = self.view.clamped_zoom();
         let want = (
-            (display.0 * 0.40).clamp(320.0, 720.0),
-            (display.1 * 0.44).clamp(240.0, 520.0),
+            (display.0 * 0.40).clamp(320.0, 720.0) * fw * z,
+            (display.1 * 0.44).clamp(240.0, 520.0) * fh * z,
         );
-        let (lo, hi) = (habitatmesh::FLOOR_Z, habitatmesh::top_z());
+        let (lo, hi) = (habitatmesh::FLOOR_Z, habitatmesh::top_z(kind));
         let size = c.fit_size(display, want, lo, hi, 24.0);
-        let region = c.place_lower_right(display, size, lo, hi, 24.0);
+        let region = match (keep_place, &self.habitat) {
+            // Hold the centre, but re-clamp: a turn or a growth changes the
+            // tank's screen footprint, and a tank that was against the edge
+            // would otherwise climb off it.
+            (true, Some(h)) => {
+                c.clamp_on_screen(Region::new(h.region.center, size), display, lo, hi, 24.0)
+            }
+            _ => c.place_lower_right(display, size, lo, hi, 24.0),
+        };
         match &mut self.habitat {
             // Same kind: keep the props where they are and just move the tank,
             // so switching displays does not reset a ball the user watched the
             // creature push into a corner.
             Some(h) if h.kind == kind => h.reshape(region),
-            _ => self.habitat = Some(Habitat::new(kind, region, dfcore::DEFAULT_SEED)),
+            _ => {
+                let mut h = Habitat::new(kind, region, dfcore::DEFAULT_SEED);
+                // A tank the user has arranged comes back as they left it.
+                if let Some(saved) = persist::load_habitat_contents(kind.slug()) {
+                    h.restore(&saved);
+                }
+                self.habitat = Some(h);
+            }
+        }
+    }
+
+    /// Tell the tray what the view is and what the enclosure could hold. Both
+    /// depend on the running creature, so this is called wherever the tank is.
+    fn refresh_habitat_menu(&self) {
+        let Some(t) = &self.tray else { return };
+        t.set_view(
+            &if self.args.habitat {
+                self.view.describe()
+            } else {
+                "habitat off".to_string()
+            },
+            self.view.is_default(),
+        );
+        let slots: Vec<(String, bool, bool)> = match &self.habitat {
+            Some(h) => PropKind::catalogue(h.kind)
+                .iter()
+                .map(|k| {
+                    (
+                        k.label().to_lowercase(),
+                        h.can_add(*k),
+                        h.count(*k) > 0,
+                    )
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        t.set_contents(&slots);
+    }
+
+    /// Persist what the user has arranged: the angles and size, and the props
+    /// as fractions of the tank.
+    fn save_habitat_settings(&self) {
+        persist::save_habitat_view(self.view.pitch, self.view.yaw, self.view.zoom);
+        if let Some(h) = &self.habitat {
+            persist::save_habitat_contents(h.kind.slug(), &h.snapshot());
         }
     }
 
@@ -661,7 +754,7 @@ impl App {
             r.scale = scale as f32;
             r.resize(s, size.width, size.height);
         }
-        self.rebuild_habitat();
+        self.rebuild_habitat(false);
         self.rt.moved_display(self.region());
         println!("moved to display {} ({}x{})", self.monitor_index, size.width, size.height);
     }
@@ -683,7 +776,7 @@ impl App {
         // A koi in a terrarium, or a spider in a fish tank, would be the wrong
         // enclosure for the animal — so the tank is rebuilt from the new
         // creature's substrate, and the creature is placed inside it.
-        self.rebuild_habitat();
+        self.rebuild_habitat(false);
         self.rt.moved_display(self.region());
 
         let had_brain = self.brain.is_some();
@@ -697,12 +790,81 @@ impl App {
             t.set_creature(id, &self.rt.brain_info());
             t.set_mood(&self.rt.habituation().describe());
         }
+        self.refresh_habitat_menu();
         self.last_mood.clear();
         println!(
             "now running the {} ({})",
             self.rt.creature().display_name().to_lowercase(),
             self.rt.brain_info()
         );
+    }
+
+    /// Move, turn or resize the enclosure while a chord is held.
+    ///
+    /// Deliberately not a click-and-drag — the overlay never takes a click
+    /// (HABITAT_PLAN.md §2), and a held modifier gets the same "grab and move"
+    /// feel without putting a hole in the desktop.
+    ///
+    /// Move works from the pointer's absolute position, because the tank should
+    /// end up *under the pointer*. Turn and size work from its motion since the
+    /// last frame, because there is no absolute position an angle could mean —
+    /// and the delta is only taken when the same chord was held last frame, so
+    /// reaching for the keys does not jerk the view by however far the mouse
+    /// happened to be from where it was.
+    fn handle_chord(&mut self) {
+        let chord = if self.habitat.is_some() { self.chord } else { HabitatChord::None };
+        let continuing = chord == self.prev_chord && chord.active();
+        let delta = match (continuing, self.chord_from, self.last_screen_cursor) {
+            (true, Some(a), Some(b)) => Vec2::new(b.x - a.x, b.y - a.y),
+            _ => Vec2::ZERO,
+        };
+        let released = self.prev_chord.active() && !chord.active();
+        self.prev_chord = chord;
+        self.chord_from = self.last_screen_cursor;
+
+        match chord {
+            HabitatChord::Move => {
+                if let (Some(at), Some(h)) = (self.last_env_cursor, self.habitat.as_mut()) {
+                    let want = Region::new(at, h.region.size);
+                    h.reshape(self.view.camera().clamp_on_screen(
+                        want,
+                        self.space.size(),
+                        habitatmesh::FLOOR_Z,
+                        habitatmesh::top_z(h.kind),
+                        12.0,
+                    ));
+                }
+            }
+            // Across the width of a 1080p display is roughly the full range of
+            // each control: fast enough to reach the ends without a second
+            // grab, slow enough to stop where you meant to.
+            HabitatChord::Orbit => {
+                // Pointer up raises the camera, so the tank is seen from
+                // further overhead — which is a *smaller* pitch.
+                if self.view.adjust(-delta.y * 0.0035, delta.x * 0.0030, 0.0) {
+                    self.rebuild_habitat(true);
+                    self.rt.moved_display(self.region());
+                }
+            }
+            HabitatChord::Zoom => {
+                if self.view.adjust(0.0, 0.0, delta.y * 0.0030) {
+                    self.rebuild_habitat(true);
+                    self.rt.moved_display(self.region());
+                }
+            }
+            HabitatChord::None => {}
+        }
+
+        // Writing the settings file on every frame of a drag would be a lot of
+        // disk for a value that is only interesting once the user has settled
+        // on it, so it goes down when they let go.
+        if released {
+            self.save_habitat_settings();
+            self.refresh_habitat_menu();
+            if self.args.habitat {
+                println!("habitat view: {}", self.view.describe());
+            }
+        }
     }
 
     fn tick(&mut self, event_loop: &ActiveEventLoop) {
@@ -722,6 +884,7 @@ impl App {
             match cmd {
                 tray::TrayCommand::Quit => {
                     persist::save(self.rt.creature().id(), self.rt.habituation());
+                    self.save_habitat_settings();
                     event_loop.exit();
                     return;
                 }
@@ -752,7 +915,7 @@ impl App {
                 tray::TrayCommand::ToggleHabitat => {
                     self.args.habitat = !self.args.habitat;
                     persist::save_habitat_choice(self.args.habitat);
-                    self.rebuild_habitat();
+                    self.rebuild_habitat(false);
                     // Whichever way it went, the creature has to end up inside
                     // the new world — otherwise switching the tank on around a
                     // fly at the far corner of the screen leaves it outside its
@@ -761,6 +924,7 @@ impl App {
                     if let Some(t) = &self.tray {
                         t.set_habitat(self.args.habitat);
                     }
+                    self.refresh_habitat_menu();
                     println!(
                         "{}",
                         match &self.habitat {
@@ -768,6 +932,59 @@ impl App {
                             None => "habitat off - free roam".to_string(),
                         }
                     );
+                }
+                tray::TrayCommand::AdjustView(step) => {
+                    // One coarse step each; the chords are the fine control.
+                    let (dp, dy, dz) = match step {
+                        tray::ViewStep::TiltUp => (-0.10, 0.0, 0.0),
+                        tray::ViewStep::TiltDown => (0.10, 0.0, 0.0),
+                        tray::ViewStep::TurnLeft => (0.0, -0.10, 0.0),
+                        tray::ViewStep::TurnRight => (0.0, 0.10, 0.0),
+                        tray::ViewStep::Bigger => (0.0, 0.0, 0.12),
+                        tray::ViewStep::Smaller => (0.0, 0.0, -0.11),
+                    };
+                    if self.view.adjust(dp, dy, dz) {
+                        self.rebuild_habitat(true);
+                        self.rt.moved_display(self.region());
+                        self.save_habitat_settings();
+                    }
+                    self.refresh_habitat_menu();
+                }
+                tray::TrayCommand::ResetView => {
+                    self.view = camera::HabitatView::default();
+                    self.rebuild_habitat(false);
+                    self.rt.moved_display(self.region());
+                    self.save_habitat_settings();
+                    self.refresh_habitat_menu();
+                    println!("habitat view reset: {}", self.view.describe());
+                }
+                tray::TrayCommand::AddProp(slot) | tray::TrayCommand::RemoveProp(slot) => {
+                    let adding = matches!(cmd, tray::TrayCommand::AddProp(_));
+                    if let Some(h) = self.habitat.as_mut() {
+                        let kind = PropKind::catalogue(h.kind).get(slot).copied();
+                        if let Some(k) = kind {
+                            let changed = if adding { h.add(k) } else { h.remove(k) };
+                            if changed {
+                                println!(
+                                    "{} {} - {} prop(s) in the {}",
+                                    if adding { "added" } else { "removed" },
+                                    k.label().to_lowercase(),
+                                    h.props.len(),
+                                    h.kind.label()
+                                );
+                                self.save_habitat_settings();
+                            }
+                        }
+                    }
+                    self.refresh_habitat_menu();
+                }
+                tray::TrayCommand::Restock => {
+                    if let Some(h) = self.habitat.as_mut() {
+                        h.restock();
+                        println!("restocked the {}", h.kind.label());
+                    }
+                    self.save_habitat_settings();
+                    self.refresh_habitat_menu();
                 }
                 tray::TrayCommand::NextDisplay => self.move_to_next_display(),
                 tray::TrayCommand::ToggleBrain => {
@@ -843,10 +1060,14 @@ impl App {
                 }
                 self.rt.sense(&penned, sense_dt);
                 self.last_env_cursor = penned.cursor;
-                self.grabbing = env.grab_held;
+                self.last_screen_cursor = env.cursor;
+                self.chord = env.chord;
+                self.grabbing = env.chord.active();
             } else {
                 self.rt.sense(&env, sense_dt);
                 self.last_env_cursor = env.cursor;
+                self.last_screen_cursor = env.cursor;
+                self.chord = HabitatChord::None;
                 self.grabbing = false;
             }
             if self.args.diag && self.frames < 3 { eprintln!("[diag] B: transduced"); }
@@ -860,18 +1081,7 @@ impl App {
         // Deliberately not a click-and-drag — the overlay never takes a click
         // (HABITAT_PLAN.md §2), and a held modifier gets the same "grab and
         // move" feel without putting a hole in the desktop.
-        if self.grabbing {
-            if let (Some(at), Some(h)) = (self.last_env_cursor, self.habitat.as_mut()) {
-                let want = Region::new(at, h.region.size);
-                h.reshape(camera::habitat().clamp_on_screen(
-                    want,
-                    self.space.size(),
-                    habitatmesh::FLOOR_Z,
-                    habitatmesh::top_z(),
-                    12.0,
-                ));
-            }
-        }
+        self.handle_chord();
 
         let region = self.region();
         // The enclosure moves first, so the creature reacts to where the props
@@ -936,7 +1146,7 @@ impl App {
                 self.frame_mesh
                     .indices
                     .extend(self.front_mesh.indices.iter().map(|i| i + fbase));
-                (&self.frame_mesh, start..end, habitatmesh::FLOOR_Z + 0.9)
+                (&self.frame_mesh, start..end, habitatmesh::shadow_z(h.kind))
             }
             None => {
                 let n = geometry.body.indices.len() as u32;
@@ -994,6 +1204,10 @@ impl App {
         if self.last_state_save.elapsed() >= Duration::from_secs(60) {
             self.last_state_save = Instant::now();
             persist::save(self.rt.creature().id(), self.rt.habituation());
+            // The tank goes down on the same checkpoint: a lily pad nosed into
+            // a corner over an afternoon is exactly the kind of state a kill
+            // would otherwise throw away.
+            self.save_habitat_settings();
         }
 
         if self.last_report.elapsed() >= Duration::from_secs(10) {
@@ -1005,6 +1219,7 @@ impl App {
 
         if self.args.seconds > 0 && self.start.elapsed() >= Duration::from_secs(self.args.seconds) {
             persist::save(self.rt.creature().id(), self.rt.habituation());
+            self.save_habitat_settings();
             event_loop.exit();
         }
     }
@@ -1045,9 +1260,24 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1.0);
         let mut rt = runtime::make(&creature_arg(&argv), dfcore::DEFAULT_SEED);
-        let habitat = argv.iter().any(|a| a == "--habitat");
+        // The habitat view is spelled out on the command line so that an
+        // angle or a size can be judged from a rendered file rather than from
+        // a screenshot of the live overlay — which is how the enclosure itself
+        // was checked (HABITAT_PLAN.md §4).
+        let num = |flag: &str, dflt: f32| {
+            argv.iter()
+                .position(|a| a == flag)
+                .and_then(|i| argv.get(i + 1))
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(dflt)
+        };
+        let habitat = argv.iter().any(|a| a == "--habitat").then(|| camera::HabitatView {
+            pitch: num("--pitch", camera::DEFAULT_PITCH),
+            yaw: num("--yaw", camera::DEFAULT_YAW),
+            zoom: num("--tank", 1.0),
+        });
         // Bigger frame with a tank in it: 320 px is barely wider than the fly.
-        let side = if habitat { 560 } else { 320 };
+        let side = if habitat.is_some() { 560 } else { 320 };
         snapshot::render_to_png(
             rt.as_mut(),
             &path,

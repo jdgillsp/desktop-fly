@@ -22,6 +22,11 @@ use crate::rng::Pcg32;
 use crate::roles::RoleManifest;
 
 /// Fixed parameters of the fly's spiking dynamics (Sim.swift:129-140).
+/// Drive per millisecond onto the strike node at full vibration. With its 1 s
+/// membrane that rests it at 12, three times its threshold, so a struggle at
+/// 0.8 fires it within about half a second and keeps it firing at ~1-2 Hz.
+pub const VIBRATION_GAIN: f32 = 0.012;
+
 #[derive(Debug, Clone, Copy)]
 pub struct LifParams {
     /// exp(-1/20): 20 ms membrane tau at a 1 ms step.
@@ -104,6 +109,9 @@ pub struct LifSim {
     pub lc11_l: Vec<usize>,
     pub lc11_r: Vec<usize>,
     pub pounce: Vec<usize>,
+    /// The weavers' authored strike node (WEB_PLAN.md §3.1). Empty for
+    /// every other creature.
+    pub strike: Vec<usize>,
     ascend_phase: Vec<f32>,
     /// Per-neuron membership flags, so the hot loop avoids `dnaL.contains(i)`.
     is_dna_left: Vec<bool>,
@@ -122,6 +130,9 @@ pub struct LifSim {
     pub gait_drive: f32,
     pub gait_phase: f32,
     pub air_puff: f32,
+    /// Web vibration, 0..1, onto the weavers' authored strike node only.
+    /// Zero for every other creature, whose `strike` group is empty.
+    pub vibration: f32,
     pub activity_scale: f32,
     pub sensory_gate: f32,
 
@@ -137,9 +148,18 @@ pub struct LifSim {
     pub rate_lc11_l: f32,
     pub rate_lc11_r: f32,
     pub rate_pounce: f32,
+    pub rate_strike: f32,
 
     gf_latch: bool,
     pounce_latch: bool,
+    strike_latch: bool,
+    /// Per-neuron spike threshold; `params.threshold` for every neuron of a
+    /// measured creature, so the fly is bit-identical.
+    thresh: Vec<f32>,
+    /// Per-neuron membrane decay per millisecond. Every neuron of a measured
+    /// creature carries `params.decay` exactly, so the fly is bit-identical;
+    /// a manifest may give an authored role its own time constant.
+    decay: Vec<f32>,
     pub sim_ms: i64,
     pub total_spikes: u64,
 
@@ -231,6 +251,7 @@ impl LifSim {
         let sens = take("sens").0;
         let (lc11_l, lc11_r) = take("lc11");
         let pounce = take("pounce").0;
+        let strike = take("strike").0;
         let origins: Vec<crate::creature::Origin> = circuit
             .neurons
             .iter()
@@ -252,6 +273,28 @@ impl LifSim {
             .collect();
 
         let baseline = manifest.baselines(&roles, &mut rng);
+        let decay: Vec<f32> = roles
+            .iter()
+            .map(|r| {
+                manifest
+                    .tau_ms
+                    .iter()
+                    .find(|(slug, _)| *slug == r)
+                    .map(|(_, tau)| (-1.0f32 / tau).exp())
+                    .unwrap_or(params.decay)
+            })
+            .collect();
+        let thresh: Vec<f32> = roles
+            .iter()
+            .map(|r| {
+                manifest
+                    .threshold
+                    .iter()
+                    .find(|(slug, _)| *slug == r)
+                    .map(|(_, t)| *t)
+                    .unwrap_or(params.threshold)
+            })
+            .collect();
 
         // Flattened membership for `Sim::group`, plus the two side-split
         // aliases the fly's readout needs.
@@ -324,6 +367,7 @@ impl LifSim {
             lc11_l,
             lc11_r,
             pounce,
+            strike,
             ascend_phase,
             is_dna_left,
             is_lc11_left,
@@ -335,6 +379,7 @@ impl LifSim {
             gait_drive: 0.0,
             gait_phase: 0.0,
             air_puff: 0.0,
+            vibration: 0.0,
             activity_scale: 1.0,
             sensory_gate: 1.0,
             rate_loom: 0.0,
@@ -348,8 +393,12 @@ impl LifSim {
             rate_lc11_l: 0.0,
             rate_lc11_r: 0.0,
             rate_pounce: 0.0,
+            rate_strike: 0.0,
             gf_latch: false,
             pounce_latch: false,
+            strike_latch: false,
+            decay,
+            thresh,
             sim_ms: 0,
             total_spikes: 0,
             inh_queue: vec![vec![0.0; n]; 5],
@@ -398,6 +447,14 @@ impl LifSim {
         s
     }
 
+    /// Reads and clears the strike-node latch. Always false for every
+    /// creature but the weavers.
+    pub fn consume_strike(&mut self) -> bool {
+        let s = self.strike_latch;
+        self.strike_latch = false;
+        s
+    }
+
     pub fn step(&mut self, ms: i64) {
         if ms <= 0 {
             return;
@@ -432,10 +489,10 @@ impl LifSim {
             for i in 0..n {
                 if self.refr[i] > 0.0 {
                     self.refr[i] -= 1.0;
-                    self.v[i] *= p.decay;
+                    self.v[i] *= self.decay[i];
                     continue;
                 }
-                let mut vi = self.v[i] * p.decay + self.baseline[i] * self.activity_scale;
+                let mut vi = self.v[i] * self.decay[i] + self.baseline[i] * self.activity_scale;
                 if self.rng.f32() < p_noise {
                     vi += p.noise_kick;
                 }
@@ -490,6 +547,14 @@ impl LifSim {
                     self.v[i] += d;
                 }
             }
+            // Web vibration onto the authored strike node (WEB_PLAN.md
+            // §3.1): a sense with no synapses, so this is its only input.
+            if self.vibration > 0.001 {
+                let d = self.vibration * VIBRATION_GAIN * self.sensory_gate;
+                for &i in &self.strike {
+                    self.v[i] += d;
+                }
+            }
             for s in &self.active_stims {
                 if self.sim_ms < s.until_ms {
                     for &i in &s.idx {
@@ -512,7 +577,7 @@ impl LifSim {
             // 5. spike detection — all at once, no within-millisecond cascade
             let mut spiked: Vec<usize> = Vec::new();
             for i in 0..n {
-                if self.refr[i] <= 0.0 && self.v[i] >= p.threshold {
+                if self.refr[i] <= 0.0 && self.v[i] >= self.thresh[i] {
                     self.v[i] = 0.0;
                     self.refr[i] = p.refractory_ms;
                     spiked.push(i);
@@ -538,7 +603,7 @@ impl LifSim {
             // 7. population rates
             let (mut c_loom, mut c_dl, mut c_dr) = (0u32, 0u32, 0u32);
             let (mut c_m, mut c_f, mut c_g, mut c_w) = (0u32, 0u32, 0u32, 0u32);
-            let (mut c_11l, mut c_11r, mut c_p) = (0u32, 0u32, 0u32);
+            let (mut c_11l, mut c_11r, mut c_p, mut c_s) = (0u32, 0u32, 0u32, 0u32);
             for &i in &spiked {
                 match self.roles[i].as_str() {
                     "lc4" | "lplc2" => c_loom += 1,
@@ -564,6 +629,10 @@ impl LifSim {
                     "pounce" => {
                         c_p += 1;
                         self.pounce_latch = true;
+                    }
+                    "strike" => {
+                        c_s += 1;
+                        self.strike_latch = true;
                     }
                     _ => {}
                 }
@@ -598,6 +667,10 @@ impl LifSim {
             if !self.pounce.is_empty() {
                 self.rate_pounce +=
                     (c_p as f32 * 1000.0 / self.pounce.len() as f32 - self.rate_pounce) * a;
+            }
+            if !self.strike.is_empty() {
+                self.rate_strike +=
+                    (c_s as f32 * 1000.0 / self.strike.len() as f32 - self.rate_strike) * a;
             }
 
             if self.collect_spikes && !spiked.is_empty() {

@@ -174,11 +174,11 @@ pub struct EnvSnapshot {
     /// Whether a fullscreen app or presentation is running; the overlay should
     /// hide rather than fight it. No macOS equivalent is needed.
     pub fullscreen_app_active: bool,
-    /// The "grab" chord (Ctrl+Shift) is held: the user is repositioning the
-    /// enclosure. Modifier keys only — they carry no typed content, which is
-    /// what keeps this on the right side of the content-blind rule the other
-    /// senses follow. Nothing reads it outside habitat mode.
-    pub grab_held: bool,
+    /// Which enclosure-adjustment chord is held, if any. Modifier keys only —
+    /// they carry no typed content, which is what keeps this on the right side
+    /// of the content-blind rule the other senses follow. Nothing reads it
+    /// outside habitat mode.
+    pub chord: HabitatChord,
     /// What kind of application is in front — an enum, never a name or a
     /// title, so nothing about *what* the user is doing can leak downstream
     /// (SPIDER_PLAN.md §5).
@@ -186,6 +186,46 @@ pub struct EnvSnapshot {
     /// Build or test outcomes the user chose to report since the last poll,
     /// via `desktopfly notify pass|fail`. Opt-in only: nothing is watched.
     pub build_events: Vec<BuildEvent>,
+}
+
+/// A modifier-only chord for adjusting the enclosure.
+///
+/// The overlay is click-through by contract, so there is no widget to drag and
+/// no scroll wheel to read: adjustment has to come from something that can be
+/// polled without putting a hole in the desktop or looking like a keylogger.
+/// Modifier keys are the whole vocabulary available — they say nothing about
+/// what is being typed — so each control is a *pair* of them, and the pointer
+/// supplies the magnitude. Exactly-matching pairs, so holding all three is not
+/// silently one of the three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HabitatChord {
+    #[default]
+    None,
+    /// Ctrl+Shift — the tank follows the pointer. The original chord.
+    Move,
+    /// Ctrl+Alt — pointer x turns the tank, pointer y tilts the camera.
+    Orbit,
+    /// Shift+Alt — pointer y grows and shrinks the tank on screen.
+    Zoom,
+}
+
+impl HabitatChord {
+    /// Decide the chord from the three modifier states. Order matters only in
+    /// that no two arms can both match; the `!` guards make that true.
+    pub fn from_modifiers(ctrl: bool, shift: bool, alt: bool) -> Self {
+        match (ctrl, shift, alt) {
+            (true, true, false) => HabitatChord::Move,
+            (true, false, true) => HabitatChord::Orbit,
+            (false, true, true) => HabitatChord::Zoom,
+            _ => HabitatChord::None,
+        }
+    }
+
+    /// Whether the user is handling the tank at all — what the rim highlight
+    /// reads, so every adjustment gives the same "you have hold of it" feedback.
+    pub fn active(&self) -> bool {
+        *self != HabitatChord::None
+    }
 }
 
 /// The class of the foreground application. Derived from the process name
