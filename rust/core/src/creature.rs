@@ -287,7 +287,7 @@ impl Connectome {
 
 /// Every creature the engine can run, in menu order. The fly is first because
 /// it is the one with shipped data.
-pub const CREATURE_IDS: [&str; 7] = [
+pub const CREATURE_IDS: [&str; 9] = [
     "drosophila",
     "salticid",
     "c_elegans",
@@ -295,6 +295,8 @@ pub const CREATURE_IDS: [&str; 7] = [
     "araneus",
     "parasteatoda",
     "agelenopsis",
+    "hognose",
+    "sandworm",
 ];
 
 /// Look a creature up by its `id()`. `None` for an id that is not a creature,
@@ -309,7 +311,80 @@ pub fn by_id(id: &str) -> Option<Box<dyn Creature>> {
         "araneus" => Some(Box::new(Weaver::Araneus)),
         "parasteatoda" => Some(Box::new(Weaver::Parasteatoda)),
         "agelenopsis" => Some(Box::new(Weaver::Agelenopsis)),
+        "hognose" => Some(Box::new(Hognose)),
+        "sandworm" => Some(Box::new(Sandworm)),
         _ => None,
+    }
+}
+
+/// Creature #8: a hognose snake, driven by rules (DESERT_PLAN.md).
+///
+/// **There is no snake connectome** — no reptile has a synapse-resolution
+/// wiring diagram at any scale — so this is [`Provenance::Procedural`] on the
+/// koi's terms: a hand-written behaviour model, labelled as such wherever the
+/// app can name it, with no brain window because there is no brain. What the
+/// model keeps of the animal is the theatre *Heterodon* is known for: the
+/// hooded, hissing, closed-mouth bluff, and playing dead when the bluff fails.
+pub struct Hognose;
+
+impl Creature for Hognose {
+    fn id(&self) -> &'static str {
+        "hognose"
+    }
+    fn display_name(&self) -> &'static str {
+        "Hognose snake (procedural)"
+    }
+    fn manifest(&self) -> RoleManifest {
+        crate::roles::procedural()
+    }
+    fn dynamics(&self) -> DynamicsSpec {
+        DynamicsSpec::Lif(LifParams::default())
+    }
+    fn provenance(&self) -> Provenance {
+        Provenance::Procedural {
+            model: "hognose behaviour model".into(),
+            why: "no reptile connectome exists at any scale; a hand-written \
+                  model of the bluff and the death-feint instead (see DESERT_PLAN.md)"
+                .into(),
+        }
+    }
+    fn data_dir(&self) -> &'static str {
+        "hognose"
+    }
+}
+
+/// Creature #9: a sandworm, from *Dune* (DESERT_PLAN.md).
+///
+/// Not merely no connectome: **no animal**. Shai-Hulud is Frank Herbert's
+/// invention, so there is nothing to measure and never will be, which makes
+/// this the most straightforwardly [`Provenance::Procedural`] creature in the
+/// set. The `why` names the book rather than a dataset that might one day
+/// exist, because none might.
+pub struct Sandworm;
+
+impl Creature for Sandworm {
+    fn id(&self) -> &'static str {
+        "sandworm"
+    }
+    fn display_name(&self) -> &'static str {
+        "Sandworm (procedural, fictional)"
+    }
+    fn manifest(&self) -> RoleManifest {
+        crate::roles::procedural()
+    }
+    fn dynamics(&self) -> DynamicsSpec {
+        DynamicsSpec::Lif(LifParams::default())
+    }
+    fn provenance(&self) -> Provenance {
+        Provenance::Procedural {
+            model: "sandworm behaviour model".into(),
+            why: "a fictional animal (Herbert, Dune, 1965): there is nothing to \
+                  measure; a hand-written model of the thumper and the breach"
+                .into(),
+        }
+    }
+    fn data_dir(&self) -> &'static str {
+        "sandworm"
     }
 }
 
@@ -693,6 +768,10 @@ pub enum Substrate {
     /// builds a web between whatever it can anchor to. No flight, no
     /// ballistic jump; a drop on the dragline instead.
     WalkerWeaver,
+    /// Moves on and *under* loose substrate — sand. Ignores window ledges
+    /// (there is nothing to burrow into on a title bar), never flies, never
+    /// jumps, and can be entirely out of sight while still being there.
+    Burrower,
 }
 
 /// The world a body moves through, as the body sees it.
@@ -962,6 +1041,30 @@ mod tests {
             _ => panic!("the koi must be Procedural"),
         }
         assert_eq!(k.provenance().default_origin(), Origin::Authored);
+    }
+
+    /// The two desert animals make the same claim as the koi, and one of
+    /// them is not an animal at all — the label has to say that too.
+    #[test]
+    fn the_desert_creatures_are_labelled_procedural() {
+        for c in [&Hognose as &dyn Creature, &Sandworm] {
+            let p = c.provenance();
+            assert!(!p.is_measured(), "{} must never pass as measured", c.id());
+            let d = p.describe().to_lowercase();
+            assert!(d.contains("procedural") && d.contains("no connectome"), "{d}");
+            for forbidden in ["flywire", "measured", "chimera"] {
+                assert!(!d.contains(forbidden), "'{forbidden}' in {d}");
+            }
+            assert!(c.display_name().to_lowercase().contains("procedural"));
+            assert!(c.manifest().populations.is_empty(), "invented anatomy");
+        }
+        match Sandworm.provenance() {
+            Provenance::Procedural { why, .. } => {
+                assert!(why.to_lowercase().contains("fictional"), "{why}");
+            }
+            _ => panic!("the sandworm must be Procedural"),
+        }
+        assert!(Sandworm.display_name().to_lowercase().contains("fictional"));
     }
 
     /// A creature with no neurons must resolve to an empty manifest rather

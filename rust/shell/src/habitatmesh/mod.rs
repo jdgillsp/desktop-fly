@@ -12,6 +12,7 @@
 //! | `Vivarium` | a tall cross-ventilated acrylic vivarium with cork bark, a twig and a silk retreat | [`vivarium`] |
 //! | `AgarPlate` | a shallow square dish of agar with a bacterial lawn, worm tracks and a label | [`plate`] |
 //! | `Pond` | a stone-coped pond with a dark liner, cobbles, lily pads and floating pellets | [`pond`] |
+//! | `SandTerrarium` | a low glass tank with a deep bed of sand, a cork hide and a water dish | [`terrarium`] |
 //!
 //! ## Draw order is index order
 //!
@@ -47,6 +48,7 @@ mod flycage;
 mod plate;
 mod pond;
 mod prims;
+mod terrarium;
 mod vivarium;
 
 use dfcore::{Habitat, HabitatKind, Vec2};
@@ -71,13 +73,16 @@ pub const FLOOR_Z: f32 = -9.0;
 /// - a petri dish is a centimetre deep; a worm lives on a film of gel, not in
 ///   a room;
 /// - a raised pond is knee-high stone, and its depth is the water column the
-///   fish moves through.
+///   fish moves through;
+/// - a snake's terrarium is long and low: nothing in it climbs, and what
+///   height it has is mostly the sand.
 pub fn wall_height(kind: HabitatKind) -> f32 {
     match kind {
         HabitatKind::FlyCage => 170.0,
         HabitatKind::Vivarium => 230.0,
         HabitatKind::AgarPlate => 18.0,
         HabitatKind::Pond => 92.0,
+        HabitatKind::SandTerrarium => 110.0,
     }
 }
 
@@ -98,8 +103,13 @@ pub fn footprint(kind: HabitatKind) -> (f32, f32) {
         HabitatKind::Vivarium => (0.74, 0.80),
         HabitatKind::AgarPlate => (0.90, 0.90),
         HabitatKind::Pond => (1.08, 1.0),
+        HabitatKind::SandTerrarium => (1.10, 0.86),
     }
 }
+
+/// How deep the bed of sand in the terrarium is. The burrowers sit on top of
+/// it and sink beneath it; the sandworm's ripple runs across it.
+pub const SAND: f32 = 10.0;
 
 /// How thick the layer of agar in the dish is. The worm is on top of it, and
 /// the shadow plane is its surface, not the dish's bottom.
@@ -118,6 +128,7 @@ pub fn creature_lift(kind: HabitatKind, hint: f32) -> f32 {
     match kind {
         HabitatKind::Pond => FLOOR_Z + 12.0 + hint.clamp(0.0, 1.0) * wall_height(kind) * 0.50,
         HabitatKind::AgarPlate => FLOOR_Z + AGAR + 1.2,
+        HabitatKind::SandTerrarium => FLOOR_Z + SAND + 0.6,
         HabitatKind::FlyCage | HabitatKind::Vivarium => FLOOR_Z + 5.0,
     }
 }
@@ -127,6 +138,7 @@ pub fn creature_lift(kind: HabitatKind, hint: f32) -> f32 {
 pub fn shadow_z(kind: HabitatKind) -> f32 {
     match kind {
         HabitatKind::AgarPlate => FLOOR_Z + AGAR + 0.3,
+        HabitatKind::SandTerrarium => FLOOR_Z + SAND + 0.3,
         _ => FLOOR_Z + 0.9,
     }
 }
@@ -277,6 +289,7 @@ pub fn build_back(out: &mut Mesh, h: &Habitat, view: [f32; 3]) {
         HabitatKind::Vivarium => vivarium::back(out, &c),
         HabitatKind::AgarPlate => plate::back(out, &c),
         HabitatKind::Pond => pond::back(out, &c),
+        HabitatKind::SandTerrarium => terrarium::back(out, &c),
     }
 }
 
@@ -296,6 +309,7 @@ pub fn build_front(out: &mut Mesh, h: &Habitat, view: [f32; 3], grabbed: bool) {
         HabitatKind::Vivarium => vivarium::front(out, &c, grabbed),
         HabitatKind::AgarPlate => plate::front(out, &c, grabbed),
         HabitatKind::Pond => pond::front(out, &c, grabbed),
+        HabitatKind::SandTerrarium => terrarium::front(out, &c, grabbed),
     }
 }
 
@@ -493,7 +507,12 @@ mod tests {
     fn the_walls_the_camera_looks_over_are_drawn_in_front() {
         let v = view();
         assert!(v[1] < 0.0, "the camera is expected in front of the tank");
-        for kind in [HabitatKind::FlyCage, HabitatKind::Vivarium, HabitatKind::AgarPlate] {
+        for kind in [
+            HabitatKind::FlyCage,
+            HabitatKind::Vivarium,
+            HabitatKind::AgarPlate,
+            HabitatKind::SandTerrarium,
+        ] {
             let h = tank(kind);
             let mut back = Mesh::default();
             let mut front = Mesh::default();
@@ -689,17 +708,18 @@ mod tests {
         assert_eq!(near(&back), 0, "the pad is drawn behind the fish");
     }
 
-    /// The four enclosures have to look different from one another, or "the
+    /// The enclosures have to look different from one another, or "the
     /// container each animal is kept in" is a claim with no rendering behind
     /// it. Compared by their floors, which are the largest surfaces in view.
     #[test]
-    fn the_four_kinds_look_different() {
+    fn the_kinds_look_different() {
         let floors: Vec<[f32; 4]> = HabitatKind::ALL
             .iter()
             .map(|&k| whole(&tank(k)).verts[0].color)
             .collect();
-        for i in 0..4 {
-            for j in (i + 1)..4 {
+        let n = HabitatKind::ALL.len();
+        for i in 0..n {
+            for j in (i + 1)..n {
                 let d: f32 = (0..3).map(|c| (floors[i][c] - floors[j][c]).abs()).sum();
                 assert!(
                     d > 0.15,
@@ -712,7 +732,10 @@ mod tests {
             }
         }
         // And the pond is the wet one: blue-green, dark.
-        let pond = floors[3];
+        let pond = floors[HabitatKind::ALL
+            .iter()
+            .position(|&k| k == HabitatKind::Pond)
+            .unwrap()];
         assert!(pond[2] > pond[0], "the pond bottom is not blue: {pond:?}");
         // The plate is agar: warm amber.
         let plate = whole(&tank(HabitatKind::AgarPlate));
@@ -726,5 +749,34 @@ mod tests {
             "the agar is not amber: {:?}",
             agar.color
         );
+        // The terrarium's sand is pale and warm, and its surface is where
+        // the burrowers are lifted to.
+        let terr = whole(&tank(HabitatKind::SandTerrarium));
+        let sand = terr
+            .verts
+            .iter()
+            .find(|v| (v.pos[2] - (FLOOR_Z + SAND)).abs() < 0.01)
+            .expect("no sand surface");
+        assert!(sand.color[0] > sand.color[2] + 0.15, "the sand is not warm: {:?}", sand.color);
+        assert!(sand.color[0] + sand.color[1] + sand.color[2] > 1.8, "the sand is dark");
+        assert!(creature_lift(HabitatKind::SandTerrarium, 0.0) > FLOOR_Z + SAND);
+    }
+
+    /// The hide is the one piece of furniture the snake goes to, and it has
+    /// to be an arch it can get *under*: half a tube standing proud of the
+    /// sand, not a log lying on top of it.
+    #[test]
+    fn the_hide_is_an_arch_on_the_sand() {
+        let h = tank(HabitatKind::SandTerrarium);
+        let p = *h.props.iter().find(|p| p.kind == PropKind::Hide).unwrap();
+        let mut only = h.clone();
+        only.props = vec![p];
+        let mut m = Mesh::default();
+        terrarium::prop_mesh(&mut m, &Ctx::new(&only, view()), &p);
+        let (lo, hi) = bounds(&m);
+        let sand = FLOOR_Z + SAND;
+        assert!(hi[2] > sand + p.radius * 0.4, "the hide is flat: top at {}", hi[2]);
+        assert!(lo[2] < sand, "the hide sits on the sand rather than in it");
+        assert!(hi[2] < top_z(h.kind), "the hide pokes out of the tank");
     }
 }

@@ -228,6 +228,25 @@ band, vibration → strike → capture, repair of a cut radius and a rebuild
 after half the web is gone, construction pausing when the walk drive is
 down, and the program never exciting the silk).
 
+## Creatures #8–#9: a hognose snake and a sandworm (Windows build)
+
+`--creature hognose | sandworm`, or the tray. Both are **procedural**, on the
+koi's terms: no reptile has a connectome at any scale, and the sandworm is
+Frank Herbert's, so there is nothing to measure and never will be. Neither
+opens a brain window; the tray says `PROCEDURAL - no connectome`, and the
+sandworm's name says `fictional` too.
+
+The hognose does what the genus is known for: threatened, it spreads a hood
+and mock-strikes with its mouth shut; pressed again, it flips onto its back,
+gapes, and plays dead — committed, until you have left it alone for a while.
+It burrows at night. The sandworm lives under the sand as a moving ripple,
+and comes to a **thumper**: click at a steady beat and it homes on the spot
+and breaches there, rearing and opening its three-lobed mouth. Random clicks
+and double-clicks are not a rhythm. It is afraid of nothing.
+
+Both live in a sand terrarium in habitat mode, with a cork hide the snake
+retreats under. See [DESERT_PLAN.md](DESERT_PLAN.md).
+
 ## What's modeled vs. measured
 
 Honesty section: the connectome gives wiring, not physiology. The LIF

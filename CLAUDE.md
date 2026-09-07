@@ -95,6 +95,15 @@ otherwise.
   the other two). Touching `silk.rs`, `arachnid.rs` or `spider.rs` means
   diffing the salticid suite output byte for byte; `lif.rs` or `roles.rs`
   means diffing the fly's.
+- **Creatures #8 and #9 are procedural** (`DESERT_PLAN.md`): a hognose
+  snake (`hognose`) and a *Dune* sandworm (`sandworm`), on the koi's terms —
+  no connectome, `Provenance::Procedural`, no brain window, and the sandworm
+  is labelled *fictional* as well. They share `Substrate::Burrower` and the
+  `SandTerrarium` enclosure (`shell/src/habitatmesh/terrarium.rs`), whose
+  sand is a block a body can sink under. The snake bluffs (hood, mock
+  strikes) then plays dead, committed; the worm is called by *rhythmic
+  clicks* — a thumper, detected content-blind from click times and
+  positions — and breaches where they land.
 - Coding senses are content-blind by construction: `Foreground` is an enum
   from the process name, and build results arrive only via
   `desktopfly notify pass|fail` over a named pipe. Never add log tailing or

@@ -135,14 +135,20 @@ pub enum HabitatKind {
     /// A stone-rimmed pond: dark bottom, lily pads on the surface, floating
     /// pellets. For a swimmer.
     Pond,
+    /// A low glass tank with a deep bed of sand, a hide, and a water dish:
+    /// what a hognose is kept in. For a burrower — the sand is the point,
+    /// because the animal spends much of its time under it. (The sandworm
+    /// gets the same tank, at a scale the fiction would find insulting.)
+    SandTerrarium,
 }
 
 impl HabitatKind {
-    pub const ALL: [HabitatKind; 4] = [
+    pub const ALL: [HabitatKind; 5] = [
         HabitatKind::FlyCage,
         HabitatKind::Vivarium,
         HabitatKind::AgarPlate,
         HabitatKind::Pond,
+        HabitatKind::SandTerrarium,
     ];
 
     pub fn for_substrate(s: Substrate) -> Self {
@@ -151,6 +157,7 @@ impl HabitatKind {
             Substrate::WalkerJumper | Substrate::WalkerWeaver => HabitatKind::Vivarium,
             Substrate::Crawler => HabitatKind::AgarPlate,
             Substrate::Swimmer => HabitatKind::Pond,
+            Substrate::Burrower => HabitatKind::SandTerrarium,
         }
     }
 
@@ -168,6 +175,7 @@ impl HabitatKind {
             HabitatKind::Vivarium => "vivarium",
             HabitatKind::AgarPlate => "agarplate",
             HabitatKind::Pond => "pond",
+            HabitatKind::SandTerrarium => "terrarium",
         }
     }
 
@@ -177,6 +185,7 @@ impl HabitatKind {
             HabitatKind::Vivarium => "vivarium",
             HabitatKind::AgarPlate => "agar plate",
             HabitatKind::Pond => "pond",
+            HabitatKind::SandTerrarium => "sand terrarium",
         }
     }
 }
@@ -209,6 +218,9 @@ pub enum PropKind {
     LilyPad,
     /// A large rounded river stone on the pond bottom. Scenery.
     Cobble,
+    /// A half-round of cork bark lying on the sand: the hide. Anchored; the
+    /// standing target a snake goes to and rests under.
+    Hide,
 }
 
 impl PropKind {
@@ -237,6 +249,12 @@ impl PropKind {
                 PropKind::Plant,
                 PropKind::Food,
             ],
+            HabitatKind::SandTerrarium => &[
+                PropKind::Hide,
+                PropKind::Cobble,
+                PropKind::Plant,
+                PropKind::Pebble,
+            ],
         }
     }
 
@@ -257,6 +275,7 @@ impl PropKind {
             PropKind::Lawn => 80.0,
             PropKind::LilyPad => 19.0,
             PropKind::Cobble => 13.0,
+            PropKind::Hide => 24.0,
         }
     }
 
@@ -265,7 +284,7 @@ impl PropKind {
     /// would never leave the furniture.
     pub fn max_count(&self) -> usize {
         match self {
-            PropKind::Lawn | PropKind::Dish | PropKind::Bark => 1,
+            PropKind::Lawn | PropKind::Dish | PropKind::Bark | PropKind::Hide => 1,
             PropKind::Twig | PropKind::Food => 2,
             _ => 4,
         }
@@ -295,6 +314,7 @@ impl PropKind {
             PropKind::Lawn => "lawn",
             PropKind::LilyPad => "lilypad",
             PropKind::Cobble => "cobble",
+            PropKind::Hide => "hide",
         }
     }
 
@@ -311,6 +331,7 @@ impl PropKind {
             PropKind::Lawn,
             PropKind::LilyPad,
             PropKind::Cobble,
+            PropKind::Hide,
         ]
         .into_iter()
         .find(|k| k.slug() == s)
@@ -329,6 +350,7 @@ impl PropKind {
             PropKind::Lawn => "Bacterial lawn",
             PropKind::LilyPad => "Lily pad",
             PropKind::Cobble => "Cobble",
+            PropKind::Hide => "Cork hide",
         }
     }
 
@@ -349,7 +371,7 @@ impl PropKind {
     fn rank(&self) -> i32 {
         match self {
             PropKind::Food | PropKind::Fruit | PropKind::Dish | PropKind::Lawn => 2,
-            PropKind::Bark | PropKind::Twig => 1,
+            PropKind::Bark | PropKind::Twig | PropKind::Hide => 1,
             _ => 0,
         }
     }
@@ -454,6 +476,12 @@ impl Habitat {
                 (PropKind::Pebble, 0),
             ],
             HabitatKind::AgarPlate => vec![(PropKind::Lawn, 0)],
+            HabitatKind::SandTerrarium => vec![
+                (PropKind::Hide, 0),
+                (PropKind::Cobble, 0),
+                (PropKind::Plant, 0),
+                (PropKind::Pebble, 0),
+            ],
             HabitatKind::Pond => vec![
                 (PropKind::LilyPad, 1),
                 (PropKind::LilyPad, 0),
@@ -496,6 +524,12 @@ impl Habitat {
             PropKind::Plant | PropKind::Pebble | PropKind::Cobble | PropKind::Dish => Vec2::new(
                 c.x + self.rng.range(-hw * 0.72, hw * 0.72),
                 c.y + self.rng.range(-hh * 0.28, hh * 0.70),
+            ),
+            // In the back half, clear of the middle, where a snake can get
+            // under it without the tank being all hide.
+            PropKind::Hide => Vec2::new(
+                c.x + self.rng.range(-hw * 0.6, hw * 0.6),
+                c.y + self.rng.range(hh * 0.1, hh * 0.6),
             ),
             // Hard against the back wall: it leans on it.
             PropKind::Bark => Vec2::new(
@@ -1076,6 +1110,10 @@ mod tests {
             HabitatKind::AgarPlate
         );
         assert_eq!(HabitatKind::for_substrate(Substrate::Swimmer), HabitatKind::Pond);
+        assert_eq!(
+            HabitatKind::for_substrate(Substrate::Burrower),
+            HabitatKind::SandTerrarium
+        );
         // And only the pond holds water.
         for k in HabitatKind::ALL {
             assert_eq!(k.is_wet(), k == HabitatKind::Pond, "{k:?}");

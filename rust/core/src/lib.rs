@@ -20,11 +20,13 @@ pub mod graded;
 pub mod habitat;
 pub mod habituation;
 pub mod koi;
+pub mod hognose;
 pub mod lif;
 pub mod orb;
 pub mod rng;
 pub mod roles;
 pub mod signals;
+pub mod sandworm;
 pub mod silk;
 pub mod spider;
 pub mod suites;
@@ -34,8 +36,8 @@ pub mod worm;
 
 pub use body::{Fly, Pose, State, FLY_SCALE};
 pub use creature::{
-    by_id, Body, CElegans, Connectome, Creature, Drosophila, DynamicsSpec, GradedParams, Origin,
-    Provenance, Salticid, Sim, Substrate, Weaver, World, CREATURE_IDS,
+    by_id, Body, CElegans, Connectome, Creature, Drosophila, DynamicsSpec, GradedParams, Hognose,
+    Origin, Provenance, Salticid, Sandworm, Sim, Substrate, Weaver, World, CREATURE_IDS,
 };
 pub use data::{BrainData, CircuitFile};
 pub use env::{EnvSnapshot, HabitatChord, Rect, ScreenSpace, Senses};
@@ -52,6 +54,8 @@ pub use spider::{Bug, Spider, SpiderPose, SpiderState};
 pub use koi::{Koi as KoiBody, KoiState};
 pub use cobweb::CobwebProgram;
 pub use funnel::FunnelProgram;
+pub use hognose::{Hognose as HognoseBody, HognoseState};
+pub use sandworm::{Sandworm as SandwormBody, SandwormState};
 pub use orb::OrbProgram;
 pub use weaver::{Move, Op, Weaver as WeaverBody, WeaverPose, WeaverState, WebBug, WebProgram};
 pub use worm::{Worm, WormState};

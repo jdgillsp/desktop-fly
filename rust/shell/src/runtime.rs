@@ -122,6 +122,8 @@ pub fn make(id: &str, seed: u64) -> Box<dyn Runtime> {
         "c_elegans" => Box::new(crate::wormrt::WormRuntime::new(seed)),
         "salticid" => Box::new(crate::spiderrt::SpiderRuntime::new(seed)),
         "koi" => Box::new(crate::koirt::KoiRuntime::new(seed)),
+        "hognose" => Box::new(crate::hognosert::HognoseRuntime::new(seed)),
+        "sandworm" => Box::new(crate::sandwormrt::SandwormRuntime::new(seed)),
         "araneus" => Box::new(crate::weaverrt::WeaverRuntime::new(dfcore::Weaver::Araneus, seed)),
         "parasteatoda" => {
             Box::new(crate::weaverrt::WeaverRuntime::new(dfcore::Weaver::Parasteatoda, seed))
@@ -544,7 +546,12 @@ mod tests {
             shallow - deep
         );
         // A walker has no such freedom; it is on the ground either way.
-        for kind in [HabitatKind::FlyCage, HabitatKind::Vivarium, HabitatKind::AgarPlate] {
+        for kind in [
+            HabitatKind::FlyCage,
+            HabitatKind::Vivarium,
+            HabitatKind::AgarPlate,
+            HabitatKind::SandTerrarium,
+        ] {
             assert_eq!(
                 crate::habitatmesh::creature_lift(kind, 0.0),
                 crate::habitatmesh::creature_lift(kind, 1.0)
@@ -571,6 +578,7 @@ mod tests {
                 "koi" => HabitatKind::Pond,
                 "c_elegans" => HabitatKind::AgarPlate,
                 "salticid" | "araneus" | "parasteatoda" | "agelenopsis" => HabitatKind::Vivarium,
+                "hognose" | "sandworm" => HabitatKind::SandTerrarium,
                 _ => HabitatKind::FlyCage,
             };
             let got = HabitatKind::for_substrate(make(id, 1).substrate());
