@@ -34,19 +34,39 @@ const Z: f32 = 2.4;
 /// so the tank's surface hides it.
 const BURY_DEPTH: f32 = 9.0;
 
-/// Half-width at body fraction `t`. A blunt head, a slightly narrower neck,
-/// a stout body and a short tail — hognoses are heavy-bodied snakes.
+/// Half-width at body fraction `t`. A broad, blunt head that is wider than
+/// the neck behind it, a stout body, and a short tail. An adult western
+/// hognose is about twelve times as long as it is wide at midbody, which is
+/// heavy for a snake and slim for anything else; the head is a little over
+/// a body-width across.
 fn radius_at(t: f32) -> f32 {
-    if t < 0.06 {
-        2.3 + 0.4 * (t / 0.06)
+    if t < 0.04 {
+        1.9 + 0.9 * (t / 0.04).sqrt()
+    } else if t < 0.08 {
+        2.8
     } else if t < 0.14 {
-        2.7 - 0.6 * ((t - 0.06) / 0.08)
+        2.8 - 1.0 * ((t - 0.08) / 0.06)
     } else if t < 0.55 {
-        2.1 + 0.9 * ((t - 0.14) / 0.41).sqrt()
+        1.8 + 0.6 * ((t - 0.14) / 0.41).sqrt()
     } else {
         let u = (t - 0.55) / 0.45;
-        3.0 * (1.0 - u).powf(1.4) + 0.35
+        2.4 * (1.0 - u).powf(1.4) + 0.3
     }
+}
+
+/// How many spine points the raised forebody spans, and how high the head
+/// comes off the ground at full lift. Hognoses raise the head and the first
+/// fifth of the body when they bluff, the way a cobra does, though nothing
+/// like as far.
+const LIFT_SEGMENTS: usize = 6;
+const LIFT_HEIGHT: f32 = 6.0;
+
+fn lift_at(i: usize, lift: f32) -> f32 {
+    if i >= LIFT_SEGMENTS {
+        return 0.0;
+    }
+    let u = 1.0 - i as f32 / LIFT_SEGMENTS as f32;
+    LIFT_HEIGHT * lift * u * u
 }
 
 /// The hood: the neck spreads sideways and flattens. Strongest a little
@@ -167,10 +187,13 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
         let t = i as f32 / (n - 1) as f32;
         let (_, nrm) = frame(i);
         let p = spine[i];
-        let r = radius_at(t);
+        // Inflation swells the body behind the head, not the head itself.
+        let swell = 1.0 + 0.22 * snake.puff * (t * 6.0).min(1.0);
+        let r = radius_at(t) * swell;
         let spread = hood_at(t, snake.hood);
         let w = r + spread;
         let h = r * (1.0 - 0.45 * (spread / 1.5).min(1.0));
+        let zc = z0 + lift_at(i, snake.head_lift);
         let c = body_color(t, roll, glass);
         for k in 0..RING {
             let a = std::f32::consts::TAU * k as f32 / RING as f32;
@@ -178,7 +201,7 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
             let pos = [
                 p.x + nrm[0] * w * ca,
                 p.y + nrm[1] * w * ca,
-                z0 + h * sa,
+                zc + h * sa,
             ];
             let nx = nrm[0] * ca / w.max(1e-3);
             let ny = nrm[1] * ca / w.max(1e-3);
@@ -206,11 +229,15 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
     // --- the snout: closed with a fan whose tip is *raised* — the upturned
     // rostral scale that names the animal. Rolled over, it points down.
     let head = spine[0];
+    // `frame` runs head-to-tail, so its tangent points *down* the body;
+    // everything on the head wants the other way.
     let (tan, nrm) = frame(0);
+    let tan = [-tan[0], -tan[1]];
+    let zh = z0 + lift_at(0, snake.head_lift);
     let snout = [
         head.x + tan[0] * 2.4,
         head.y + tan[1] * 2.4,
-        z0 + 1.3 * (1.0 - 2.0 * roll),
+        zh + 1.3 * (1.0 - 2.0 * roll),
     ];
     {
         let tip = out.verts.len() as u32;
@@ -276,16 +303,16 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
     if !glass && roll > 0.3 {
         let open = (roll - 0.3) / 0.7;
         let w = 2.0 * open;
-        let root = [head.x + tan[0] * 1.0, head.y + tan[1] * 1.0, z0 + 0.5];
+        let root = [head.x + tan[0] * 1.0, head.y + tan[1] * 1.0, zh + 0.5];
         let a = [
             snout[0] + tan[0] * 1.4 * open + nrm[0] * w,
             snout[1] + tan[1] * 1.4 * open + nrm[1] * w,
-            z0 + 0.6,
+            zh + 0.6,
         ];
         let b = [
             snout[0] + tan[0] * 1.4 * open - nrm[0] * w,
             snout[1] + tan[1] * 1.4 * open - nrm[1] * w,
-            z0 + 0.6,
+            zh + 0.6,
         ];
         fan(out, root, &[a, b], [MOUTH[0], MOUTH[1], MOUTH[2], fade]);
     }
@@ -294,9 +321,9 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
     if !glass && roll < 0.6 {
         for side in [-1.0f32, 1.0] {
             let e = [
-                head.x + nrm[0] * side * 2.0 + tan[0] * 0.6,
-                head.y + nrm[1] * side * 2.0 + tan[1] * 0.6,
-                z0 + radius_at(0.0) * 0.7,
+                head.x + nrm[0] * side * 2.2 + tan[0] * 0.6,
+                head.y + nrm[1] * side * 2.2 + tan[1] * 0.6,
+                zh + radius_at(0.0) * 0.7,
             ];
             let r = 0.55;
             quad(
@@ -365,12 +392,22 @@ mod tests {
         let s = snake();
         let mut m = Mesh::default();
         build_frame(&mut m, &s, false);
-        let head = s.spine[0];
-        let tail = s.spine[s.spine.len() - 1];
-        let length = head.dist(tail);
-        let width = 2.0 * max_across(&m, &s, s.spine.len() * 10);
+        // Length along the spine (it is curved), width as twice the widest
+        // midbody ring measured from its own spine point.
+        let n = s.spine.len();
+        let length: f32 = (1..n).map(|i| s.spine[i].dist(s.spine[i - 1])).sum();
+        let mut widest: f32 = 0.0;
+        for i in 4..n - 2 {
+            let c = s.spine[i];
+            for k in i * 10..i * 10 + 10 {
+                let v = m.verts[k].pos;
+                widest = widest.max(((v[0] - c.x).powi(2) + (v[1] - c.y).powi(2)).sqrt());
+            }
+        }
+        let width = 2.0 * widest;
         let ratio = length / width.max(1e-3);
-        assert!((5.0..14.0).contains(&ratio), "length:width {ratio:.1}:1");
+        assert!((9.0..16.0).contains(&ratio), "length:width {ratio:.1}:1 (real: about 12:1)");
+        let _ = max_across;
     }
 
     /// The hood has to show from above, or the bluff is a snake standing still.
@@ -458,6 +495,44 @@ mod tests {
         assert!(b.verts.len() > a.verts.len());
     }
 
+    /// The head is distinct: broader than the neck behind it.
+    #[test]
+    fn the_head_is_broader_than_the_neck() {
+        assert!(radius_at(0.06) > radius_at(0.14) * 1.3);
+        assert!(radius_at(0.35) > radius_at(0.14), "the body is stouter than the neck");
+    }
+
+    /// Bluffing, the head comes off the ground and the body swells.
+    #[test]
+    fn the_bluff_lifts_the_head_and_inflates_the_body() {
+        let mut calm = snake();
+        let mut bluff = snake();
+        bluff.head_lift = 1.0;
+        bluff.puff = 1.0;
+        let mut a = Mesh::default();
+        let mut b = Mesh::default();
+        build_frame(&mut a, &calm, false);
+        build_frame(&mut b, &bluff, false);
+        let head_top = |m: &Mesh| (0..10).map(|k| m.verts[k].pos[2]).fold(f32::MIN, f32::max);
+        assert!(head_top(&b) > head_top(&a) + 4.0, "the head did not rise");
+        // The tail is still on the ground.
+        let n = calm.spine.len();
+        // (Its ring's mean z is its centreline; the swell changes the ring's
+        // size but not where it sits.)
+        let tail = |m: &Mesh| ((n - 1) * 10..n * 10).map(|k| m.verts[k].pos[2]).sum::<f32>() / 10.0;
+        assert!((tail(&a) - tail(&b)).abs() < 0.05);
+        // And midbody is wider.
+        let mid = 10;
+        let c = calm.spine[mid];
+        let width = |m: &Mesh| {
+            (mid * 10..mid * 10 + 10)
+                .map(|k| ((m.verts[k].pos[0] - c.x).powi(2) + (m.verts[k].pos[1] - c.y).powi(2)).sqrt())
+                .fold(0.0f32, f32::max)
+        };
+        assert!(width(&b) > width(&a) * 1.15, "no inflation");
+        calm.puff = 0.0;
+    }
+
     #[test]
     fn the_snout_is_upturned() {
         let s = snake();
@@ -490,3 +565,4 @@ mod tests {
         assert!(saw_saddle && saw_ground);
     }
 }
+

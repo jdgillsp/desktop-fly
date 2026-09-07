@@ -190,13 +190,14 @@ pub fn build_frame(out: &mut Mesh, worm: &SandwormBody, glass: bool) {
     // Close the tail.
     {
         let tail = spine[n - 1];
+        // `frame`'s tangent runs head-to-tail, so this is behind the tail.
         let (tan, _) = frame(n - 1);
         let tip = out.verts.len() as u32;
         let c = if glass { GlassPalette::SHELL } else { HIDE };
         let r = radius_at(1.0);
         out.verts.push(Vertex {
-            pos: [tail.x - tan[0] * r * 1.2, tail.y - tan[1] * r * 1.2, z0 + r * squash],
-            normal: [-tan[0], -tan[1], 0.0],
+            pos: [tail.x + tan[0] * r * 1.2, tail.y + tan[1] * r * 1.2, z0 + r * squash],
+            normal: [tan[0], tan[1], 0.0],
             color: c,
         });
         let last = ring_base + ((n - 1) * RING) as u32;
@@ -207,14 +208,18 @@ pub fn build_frame(out: &mut Mesh, worm: &SandwormBody, glass: bool) {
         }
     }
 
-    // --- the mouth: three lobes hinged on the head ring, opening outward
-    // with the gape; a throat behind them; teeth around the rim.
+    // --- the maw. In the books the mouth is a vast round opening ringed
+    // with crystal teeth — not the films' lobes. The head end flares into a
+    // rim that widens with the gape, the throat behind it is dark and
+    // recessed, and the teeth stand around the rim, leaning inward when the
+    // mouth is shut and standing out from it when it is open.
     {
         let head = spine[0];
+        // `frame`'s tangent runs head-to-tail; the maw faces the other way.
         let (tan, nrm) = frame(0);
+        let tan = [-tan[0], -tan[1]];
         let r = radius_at(0.0);
         let zc = z0 + r * squash + rear_lift(0, worm.rear);
-        // The head's own forward axis, tilted up by the rear.
         let lift = if worm.rear > 0.0 {
             (rear_lift(0, worm.rear) - rear_lift(1, worm.rear)) / 3.4
         } else {
@@ -222,98 +227,103 @@ pub fn build_frame(out: &mut Mesh, worm: &SandwormBody, glass: bool) {
         };
         let fl = (1.0 + lift * lift).sqrt();
         let fwd = [tan[0] / fl, tan[1] / fl, lift / fl];
+        let upv = [-fwd[2] * nrm[1], fwd[2] * nrm[0], fwd[0] * nrm[1] - fwd[1] * nrm[0]];
+        let radial = |ang: f32| -> [f32; 3] {
+            let (sn, cs) = ang.sin_cos();
+            [
+                nrm[0] * cs + upv[0] * sn,
+                nrm[1] * cs + upv[1] * sn,
+                upv[2] * sn,
+            ]
+        };
         let gape = worm.gape;
-        // Throat: a dark disc just inside the head ring.
+        let rim_r = r * (0.92 + 0.35 * gape);
+        // Vertical radius follows the squash so a submerged head is flat.
+        let vr = squash;
+        let at = |d: [f32; 3], rad: f32, along: f32| -> [f32; 3] {
+            [
+                head.x + fwd[0] * along + d[0] * rad,
+                head.y + fwd[1] * along + d[1] * rad,
+                zc + fwd[2] * along + d[2] * rad * vr,
+            ]
+        };
+        const MAW: usize = 18;
+        // The flared rim: a short cone from the head ring out to the rim.
+        let rim_c = if glass { GlassPalette::SHELL } else { HIDE };
+        let rb = out.verts.len() as u32;
+        for k in 0..MAW {
+            let ang = std::f32::consts::TAU * k as f32 / MAW as f32;
+            let d = radial(ang);
+            out.verts.push(Vertex {
+                pos: at(d, r, 0.0),
+                normal: d,
+                color: rim_c,
+            });
+            out.verts.push(Vertex {
+                pos: at(d, rim_r, 1.2 + 0.8 * gape),
+                normal: d,
+                color: rim_c,
+            });
+        }
+        for k in 0..MAW as u32 {
+            let k2 = (k + 1) % MAW as u32;
+            let (a, b) = (rb + k * 2, rb + k2 * 2);
+            out.indices.extend_from_slice(&[a, a + 1, b, b, a + 1, b + 1]);
+        }
+        // The throat: a dark disc recessed into the head, so the mouth reads
+        // as a hole and not a lid. Recesses further as it opens.
         let throat_c = if glass { GlassPalette::SHELL_DENSE } else { THROAT };
+        let depth = -(0.6 + 2.2 * gape);
         let tb = out.verts.len() as u32;
         out.verts.push(Vertex {
-            pos: [head.x + fwd[0] * 0.4, head.y + fwd[1] * 0.4, zc + fwd[2] * 0.4],
+            pos: at([0.0, 0.0, 0.0], 0.0, depth),
             normal: fwd,
             color: throat_c,
         });
-        const LOBE_SEG: usize = 12;
-        for k in 0..LOBE_SEG {
-            let a = std::f32::consts::TAU * k as f32 / LOBE_SEG as f32;
-            let (sa, ca) = a.sin_cos();
-            // A radial basis perpendicular to fwd: nrm, and fwd x nrm.
-            let upv = [-fwd[2] * nrm[1], fwd[2] * nrm[0], fwd[0] * nrm[1] - fwd[1] * nrm[0]];
-            let rr = r * 0.85;
+        for k in 0..MAW {
+            let ang = std::f32::consts::TAU * k as f32 / MAW as f32;
+            let d = radial(ang);
             out.verts.push(Vertex {
-                pos: [
-                    head.x + fwd[0] * 0.4 + nrm[0] * rr * ca + upv[0] * rr * sa,
-                    head.y + fwd[1] * 0.4 + nrm[1] * rr * ca + upv[1] * rr * sa,
-                    zc + fwd[2] * 0.4 + upv[2] * rr * sa,
-                ],
+                pos: at(d, rim_r * 0.92, depth + 0.3),
                 normal: fwd,
                 color: throat_c,
             });
         }
-        for k in 0..LOBE_SEG as u32 {
-            let k2 = (k + 1) % LOBE_SEG as u32;
+        for k in 0..MAW as u32 {
+            let k2 = (k + 1) % MAW as u32;
             out.indices.extend_from_slice(&[tb, tb + 1 + k, tb + 1 + k2]);
         }
-        // Three lobes, each a fan of two triangles hinged on the rim, swung
-        // out by the gape. Closed, they meet at a point ahead of the head.
-        let lobe_c = if glass { GlassPalette::SHELL } else { HIDE };
-        let reach = r * 1.5;
-        for lobe in 0..3 {
-            let a0 = std::f32::consts::TAU * lobe as f32 / 3.0;
-            let mid = a0 + std::f32::consts::PI / 3.0;
-            let upv = [-fwd[2] * nrm[1], fwd[2] * nrm[0], fwd[0] * nrm[1] - fwd[1] * nrm[0]];
-            let radial = |ang: f32| -> [f32; 3] {
-                let (s, c) = ang.sin_cos();
-                [
-                    nrm[0] * c + upv[0] * s,
-                    nrm[1] * c + upv[1] * s,
-                    upv[2] * s,
-                ]
-            };
-            let hinge = |ang: f32| -> [f32; 3] {
-                let d = radial(ang);
-                [
-                    head.x + fwd[0] * 0.6 + d[0] * r,
-                    head.y + fwd[1] * 0.6 + d[1] * r,
-                    zc + fwd[2] * 0.6 + d[2] * r,
-                ]
-            };
-            // The tip swings from "closed, ahead on the axis" to "open, out
-            // along the lobe's own radial".
-            let d = radial(mid);
-            let out_k = gape * 1.1;
-            let ahead = reach * (1.0 - gape * 0.6);
-            let tip = [
-                head.x + fwd[0] * ahead + d[0] * r * (0.2 + out_k),
-                head.y + fwd[1] * ahead + d[1] * r * (0.2 + out_k),
-                zc + fwd[2] * ahead + d[2] * r * (0.2 + out_k),
-            ];
-            let h0 = hinge(a0);
-            let h1 = hinge(a0 + std::f32::consts::TAU / 3.0);
-            let hm = hinge(mid);
-            let nrm3 = [d[0] * 0.5 + fwd[0], d[1] * 0.5 + fwd[1], d[2] * 0.5 + fwd[2]];
-            tri(out, [h0, hm, tip], nrm3, lobe_c);
-            tri(out, [hm, h1, tip], nrm3, lobe_c);
-            // Teeth along each lobe's inner edge: small pale triangles.
-            if !glass {
-                for k in 0..4 {
-                    let u = (k as f32 + 0.5) / 4.0;
-                    let ang = a0 + u * std::f32::consts::TAU / 3.0;
-                    let base = hinge(ang);
-                    let dr = radial(ang);
-                    let inward = 0.55 + gape * 0.9;
-                    let t2 = [
-                        base[0] + fwd[0] * 0.9 - dr[0] * inward,
-                        base[1] + fwd[1] * 0.9 - dr[1] * inward,
-                        base[2] + fwd[2] * 0.9 - dr[2] * inward,
+        // Crystal teeth: long, pale, in two staggered rows around the rim,
+        // pointing inward and forward; the gape swings them outward.
+        if !glass {
+            for row in 0..2 {
+                let count = MAW;
+                let base_along = 1.0 + 0.8 * gape - row as f32 * 0.9;
+                let len = if row == 0 { 2.6 } else { 1.8 };
+                for k in 0..count {
+                    let ang = std::f32::consts::TAU * (k as f32 + row as f32 * 0.5) / count as f32;
+                    let d = radial(ang);
+                    // Root on the rim, tip leaning toward the axis (shut) or
+                    // standing forward (open).
+                    let root_rad = rim_r * (0.98 - row as f32 * 0.12);
+                    let inward = len * (0.85 - 0.75 * gape);
+                    let forward = len * (0.35 + 0.65 * gape);
+                    let root = at(d, root_rad, base_along);
+                    let tip = at(d, root_rad - inward, base_along + forward);
+                    let side = [
+                        -d[1] * 0.28 + fwd[0] * 0.0,
+                        d[0] * 0.28,
+                        0.0,
                     ];
-                    let side = [dr[1] * 0.3, -dr[0] * 0.3, 0.0];
+                    let n3 = [d[0] * 0.6 + fwd[0], d[1] * 0.6 + fwd[1], d[2] * 0.6 + fwd[2]];
                     tri(
                         out,
                         [
-                            [base[0] - side[0], base[1] - side[1], base[2]],
-                            [base[0] + side[0], base[1] + side[1], base[2]],
-                            t2,
+                            [root[0] - side[0], root[1] - side[1], root[2]],
+                            [root[0] + side[0], root[1] + side[1], root[2]],
+                            tip,
                         ],
-                        fwd,
+                        n3,
                         TOOTH,
                     );
                 }
@@ -400,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gape_opens_the_lobes() {
+    fn the_gape_opens_a_round_maw_ringed_with_teeth() {
         let mut shut = worm();
         shut.surface = 1.0;
         shut.gape = 0.0;
@@ -412,18 +422,27 @@ mod tests {
         build_frame(&mut a, &shut, false);
         build_frame(&mut b, &open, false);
         assert_eq!(a.verts.len(), b.verts.len());
-        // Open lobes reach further *from the axis* than shut ones, which
-        // reach further forward along it.
+        let body = shut.spine.len() * 12 + 1;
+        // The rim flares wider as it opens, measured across the axis.
         let head = shut.spine[0];
         let (tx, ty) = (shut.heading.cos(), shut.heading.sin());
         let spread = |m: &Mesh| {
             m.verts
                 .iter()
-                .skip(shut.spine.len() * 12 + 1)
+                .skip(body)
                 .map(|v| (-(v.pos[0] - head.x) * ty + (v.pos[1] - head.y) * tx).abs())
                 .fold(0.0f32, f32::max)
         };
-        assert!(spread(&b) > spread(&a) * 1.15, "lobes did not open");
+        assert!(spread(&b) > spread(&a) * 1.2, "the maw did not flare");
+        // Teeth: a ring of them, pale, and many more than three lobes.
+        let teeth = |m: &Mesh| m.verts.iter().skip(body).filter(|v| v.color == TOOTH).count() / 3;
+        assert!(teeth(&a) >= 30, "only {} teeth", teeth(&a));
+        // The throat is a dark recess behind the rim: further back along the
+        // axis than any rim vertex when open.
+        let along = |v: &Vertex| (v.pos[0] - head.x) * tx + (v.pos[1] - head.y) * ty;
+        let throat_min = b.verts.iter().skip(body).filter(|v| v.color == THROAT).map(along).fold(f32::MAX, f32::min);
+        let rim_min = b.verts.iter().skip(body).filter(|v| v.color != THROAT && v.color != TOOTH).map(along).fold(f32::MAX, f32::min);
+        assert!(throat_min < rim_min - 1.0, "the throat is not recessed: {throat_min} vs {rim_min}");
     }
 
     #[test]

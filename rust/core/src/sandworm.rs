@@ -15,6 +15,12 @@
 //!   sand; the worm homes on it. The runtime turns regular clicks into that
 //!   signal and hands it over as `pursuit` plus the world's attractor, and
 //!   the body goes to it and *breaches* there: rears, gapes, then settles.
+//!   In the books the worm **swallows** the thumper, and the pounding stops.
+//!   [`Sandworm::swallowed`] is raised at the moment of the breach over a
+//!   lure; the runtime reads it and forgets the beats, so a new call is
+//!   needed for the next visit. Fremen also know that *regular* footsteps
+//!   call a worm and walk without rhythm to avoid it — so a cursor moving
+//!   at a steady pace is a weak lure too, and an erratic one is nothing.
 //! * **It is not afraid of anything.** No startle. The only thing that sends
 //!   it down is the tray's escape test (a hard `escape`), which it obeys
 //!   because every runtime must.
@@ -69,6 +75,9 @@ pub struct Sandworm {
     breach_cooldown: f32,
     /// Where it was called to, if anywhere. Cleared when reached.
     pub lure: Option<Vec2>,
+    /// Raised for one step when the worm breaches over its lure: it has
+    /// eaten the thumper. The runtime clears the rhythm on seeing it.
+    pub swallowed: bool,
     pub time: f32,
 
     path: Vec<Vec2>,
@@ -102,6 +111,7 @@ impl Sandworm {
             pending_turn: 0.0,
             breach_cooldown: rng.range(10.0, 25.0),
             lure: None,
+            swallowed: false,
             time: rng.range(0.0, 100.0),
             path: vec![tail, at],
             arc: vec![0.0, start],
@@ -224,6 +234,7 @@ impl Body for Sandworm {
         self.time += dt;
         self.state_timer -= dt;
         self.breach_cooldown = (self.breach_cooldown - dt).max(0.0);
+        self.swallowed = false;
 
         if drives.escape {
             self.dive();
@@ -295,6 +306,8 @@ impl Body for Sandworm {
             if d < 30.0 {
                 if !matches!(self.state, SandwormState::Breach | SandwormState::Cruise) {
                     self.breach();
+                    self.swallowed = true;
+                    self.lure = None;
                 }
             } else if matches!(self.state, SandwormState::Submerged | SandwormState::Cruise) {
                 let to = (l.y - self.pos.y).atan2(l.x - self.pos.x);
@@ -462,6 +475,27 @@ mod tests {
         assert!(max_rear > 0.7, "no rear: {max_rear}");
         assert!(max_gape > 0.7, "no gape: {max_gape}");
         assert!(w.surface > 0.5 || w.state == SandwormState::Dive, "never surfaced");
+    }
+
+    /// Reaching the thumper eats it: the body says so once, and drops the
+    /// lure on its own even if the runtime kept the rhythm alive.
+    #[test]
+    fn breaching_over_the_thumper_swallows_it() {
+        let mut w = submerged(23);
+        let lure = Vec2::new(20.0, 0.0);
+        w.heading = 0.0;
+        let mut wd = world();
+        wd.attractor = Some(lure);
+        let mut d = drives();
+        d.pursuit = 1.0;
+        let mut ate = 0;
+        for _ in 0..600 {
+            w.step(1.0 / 60.0, &d, &wd);
+            if w.swallowed {
+                ate += 1;
+            }
+        }
+        assert_eq!(ate, 1, "swallowed {ate} times");
     }
 
     /// And when the rhythm stops, so does the interest.

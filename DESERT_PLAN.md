@@ -90,9 +90,41 @@ fades as the animal learns you.
 Habituation is kept but never driven: there is nothing for a sandworm to
 learn about you, and the mood line says so honestly rather than being absent.
 
+## 4a. Fidelity pass
+
+A second pass, checked against the animal and the books rather than against
+"reads as a snake":
+
+**Hognose.** Proportions slimmed to a real western hognose's ~12:1 with a
+head broader than its neck (`the_head_is_broader_than_the_neck`). The bluff
+now raises the head and forebody off the ground (`head_lift`) and inflates
+the body in pulses at the cadence of the hisses (`puff`), which is the
+visible half of a hiss the app cannot make. The death act opens with two
+seconds of writhing (`writhe`) during which it rolls, then goes limp; acts
+last 18–35 s, the short end of the real minutes. At an amble it sometimes
+switches to a **rectilinear** creep, slow and nearly straight, the way
+heavy-bodied snakes do. Still not modelled: musking, the head-first peek
+before righting, a thermal gradient with a hide at each end.
+
+**Sandworm.** The mouth is now the books' **round maw ringed with crystal
+teeth**, two staggered rows leaning inward when shut and standing out when
+open, over a dark recessed throat — not the films' lobes. The worm
+**swallows the thumper**: `swallowed` is raised at the breach over the lure
+and the runtime forgets the beats, so it takes a fresh rhythm to call it
+again. And the **sandwalk**: a cursor moving at a steady pace for two
+seconds is a weak regular tread and a lure; erratic movement calls nothing.
+Not modelled: water as poison (the terrarium's dish is furniture the body
+does not know about), sandtrout, spice.
+
+**A bug found on the way.** The body builders' `frame()` tangent runs
+head-to-tail, so both heads were being built *backwards into the neck* —
+which is why the first hognose looked to have a tiny head. Fixed in both;
+the koi's `koibody.rs` uses the same convention and may have the same
+problem, and was left alone.
+
 ## 5. Verification
 
-- `cargo test --workspace` (core: 164, shell: 128 at the time of writing).
+- `cargo test --workspace` (core: 171, shell: 132 at the time of writing).
 - The fly's `--simtest --behaviortest` output is byte-identical to the
   parent commit's — neither `lif.rs` nor `roles.rs` is touched.
 - `--snapshot` for both, with and without `--habitat`.

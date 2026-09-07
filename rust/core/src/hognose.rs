@@ -27,7 +27,14 @@
 //!
 //! Locomotion is lateral undulation: unlike the koi's carangiform wave, the
 //! amplitude is nearly uniform along the body — the whole animal throws the
-//! same S-curves, and the head steers by following them. The centreline
+//! same S-curves, and the head steers by following them. At an amble it
+//! sometimes switches to **rectilinear** crawling, the straight caterpillar
+//! creep heavy-bodied snakes use, with the body nearly straight.
+//!
+//! The bluff is more than a hood: the animal raises its head and forebody
+//! ([`Hognose::head_lift`]), inflates and deflates as it hisses
+//! ([`Hognose::puff`]), and the death act begins with a bout of writhing
+//! ([`Hognose::writhe`]) before the flop. The centreline
 //! follows the head's recorded path, as the worm's and the koi's do, because
 //! a body of fixed length cannot be turned by moving one end without
 //! retracing its track.
@@ -78,6 +85,16 @@ pub struct Hognose {
     pub buried: f32,
     /// Tongue flick envelope, 0..1.
     pub tongue: f32,
+    /// Head and forebody raised off the ground, 0..1. Part of the bluff.
+    pub head_lift: f32,
+    /// Body inflation, 0..1. Pulses with the hissing during the bluff.
+    pub puff: f32,
+    /// Writhing envelope, 0..1: the thrashing that opens the death act.
+    pub writhe: f32,
+    /// Seconds into the current death act.
+    act_time: f32,
+    /// Rectilinear creep this bout, rather than undulation.
+    rectilinear: bool,
     pub state_timer: f32,
     /// Heading change still owed to the current manoeuvre, in radians.
     pending_turn: f32,
@@ -122,6 +139,11 @@ impl Hognose {
             belly_up: 0.0,
             buried: 0.0,
             tongue: 0.0,
+            head_lift: 0.0,
+            puff: 0.0,
+            writhe: 0.0,
+            act_time: 0.0,
+            rectilinear: false,
             state_timer: rng.range(3.0, 7.0),
             pending_turn: 0.0,
             bluff_cooldown: 0.0,
@@ -184,9 +206,15 @@ impl Hognose {
                 ty /= l;
             }
             let travelling = (std::f32::consts::TAU * (self.phase - s / WAVELENGTH)).sin();
-            // Playing dead: the body goes limp into a loose, static curl.
+            // Playing dead: first a writhe — fast, irregular thrashing that
+            // grows along the body — then a limp, static curl.
+            let thrash = self.writhe
+                * ((s * 7.0 + self.time * 13.0).sin() + 0.6 * (s * 11.0 - self.time * 9.0).sin())
+                * 3.5;
             let limp = self.belly_up * (s * 2.4).sin() * 5.0;
-            let offset = self.wave_amplitude(s) * travelling * (1.0 - self.belly_up) + limp;
+            let offset = self.wave_amplitude(s) * travelling * (1.0 - self.belly_up)
+                + limp
+                + thrash;
             // The mock strike carries the front of the body forward and back.
             let lunge = strike_reach * (1.0 - s * 4.0).max(0.0);
             self.spine[i] = Vec2::new(
@@ -258,7 +286,10 @@ impl Hognose {
 
     pub fn play_dead(&mut self) {
         self.state = HognoseState::PlayDead;
-        self.state_timer = self.rng.range(8.0, 15.0);
+        // Real acts last minutes; this is the short end of that, because
+        // the desktop is not a field.
+        self.state_timer = self.rng.range(18.0, 35.0);
+        self.act_time = 0.0;
         self.hood = 0.0;
         self.strike = 0.0;
         self.speed = 0.0;
@@ -356,6 +387,8 @@ impl Body for Hognose {
                         self.state = HognoseState::Slither;
                         self.state_timer = self.rng.range(3.0, 7.0);
                         self.pending_turn = self.rng.range(-1.4, 1.4);
+                        // Now and then an amble is a rectilinear creep.
+                        self.rectilinear = self.rng.f32() < 0.3;
                     }
                 }
             }
@@ -384,10 +417,27 @@ impl Body for Hognose {
         } else {
             self.strike += (0.0 - self.strike) * (8.0 * dt).min(1.0);
         }
+        // The death act: a couple of seconds of writhing during which it
+        // rolls over, then limp. Rights itself slowly and a little reluctantly.
+        if self.state == HognoseState::PlayDead {
+            self.act_time += dt;
+        }
+        let writhing = self.state == HognoseState::PlayDead && self.act_time < 2.2;
+        let writhe_t = if writhing { 1.0 - (self.act_time / 2.2) * 0.5 } else { 0.0 };
+        self.writhe += (writhe_t - self.writhe) * (9.0 * dt).min(1.0);
         let over = if self.state == HognoseState::PlayDead { 1.0 } else { 0.0 };
-        // Flops over fast; rights itself slowly and a little reluctantly.
-        let roll_rate = if over > self.belly_up { 2.2 } else { 1.1 };
+        let roll_rate = if over > self.belly_up { 1.4 } else { 1.1 };
         self.belly_up += (over - self.belly_up) * (roll_rate * dt).min(1.0);
+        // Head up and body inflated while bluffing; the puff pulses at the
+        // rate of the hisses, which are long exhalations.
+        let lift_t = if self.state == HognoseState::Bluff { 1.0 } else { 0.0 };
+        self.head_lift += (lift_t - self.head_lift) * (4.0 * dt).min(1.0);
+        let puff_t = if self.state == HognoseState::Bluff {
+            0.55 + 0.45 * (self.time * 2.6).sin()
+        } else {
+            0.0
+        };
+        self.puff += (puff_t - self.puff) * (5.0 * dt).min(1.0);
         let under = if self.state == HognoseState::Burrow { 1.0 } else { 0.0 };
         self.buried += (under - self.buried) * (0.8 * dt).min(1.0);
         // Tongue: flicks in little bursts while resting or slithering, hangs
@@ -404,7 +454,9 @@ impl Body for Hognose {
 
         // --- locomotion.
         let target = match self.state {
-            HognoseState::Slither => 11.0 + drives.walk_drive * 7.0,
+            HognoseState::Slither => {
+                if self.rectilinear { 4.5 } else { 11.0 + drives.walk_drive * 7.0 }
+            }
             HognoseState::Rest => 0.0,
             HognoseState::Bluff => 0.0,
             HognoseState::PlayDead => 0.0,
@@ -418,6 +470,8 @@ impl Body for Hognose {
         // bluffing one holds its posture. Only the limp act and the burrow
         // straighten it (the act lays its own curl over the spine).
         let beat_target = match self.state {
+            // Creeping, the body is nearly straight.
+            HognoseState::Slither if self.rectilinear => 0.18,
             HognoseState::Slither | HognoseState::Rest | HognoseState::Bluff => 1.0,
             HognoseState::PlayDead | HognoseState::Burrow => 0.0,
         };
@@ -563,6 +617,46 @@ mod tests {
         assert!(max_strike > 0.6, "no mock strike: {max_strike}");
         assert!(max_speed < 3.0, "a bluffing snake stands its ground: {max_speed}");
         assert_ne!(h.state, HognoseState::PlayDead, "one fright is not a failed bluff");
+        assert!(h.head_lift > 0.9, "the head is not raised: {}", h.head_lift);
+    }
+
+    /// The hiss is silent here, but the inflation that goes with it is not:
+    /// the body must visibly swell and subside while bluffing, and be at
+    /// rest otherwise.
+    #[test]
+    fn a_bluffing_snake_puffs_in_pulses() {
+        let mut h = slithering(31);
+        run(&mut h, 1.0, &drives());
+        assert!(h.puff < 0.05);
+        h.threaten(Some(Vec2::new(100.0, 0.0)));
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for _ in 0..240 {
+            h.step(1.0 / 60.0, &drives(), &world());
+            if h.state == HognoseState::Bluff {
+                lo = lo.min(h.puff);
+                hi = hi.max(h.puff);
+            }
+        }
+        assert!(hi > 0.8, "never inflates: {hi}");
+        assert!(hi - lo > 0.4, "does not pulse: {lo}..{hi}");
+    }
+
+    /// The other gait. A rectilinear creep is slow and nearly straight.
+    #[test]
+    fn a_rectilinear_creep_is_slow_and_straight() {
+        let mut h = slithering(37);
+        h.rectilinear = true;
+        run(&mut h, 4.0, &drives());
+        assert!(h.speed < 6.0, "creeping too fast: {}", h.speed);
+        assert!(h.beat < 0.3, "still undulating: {}", h.beat);
+        let start = h.position();
+        run(&mut h, 3.0, &drives());
+        assert!(h.position().dist(start) > 8.0, "not moving at all");
+        // And undulating, it throws real curves.
+        let mut u = slithering(37);
+        u.rectilinear = false;
+        run(&mut u, 4.0, &drives());
+        assert!(u.beat > 0.9);
     }
 
     /// A threat that keeps coming *after* the bluff is what tips it over.
@@ -574,8 +668,16 @@ mod tests {
         run(&mut h, 1.5, &drives());
         h.threaten(Some(Vec2::new(60.0, 0.0)));
         assert_eq!(h.state, HognoseState::PlayDead);
-        run(&mut h, 1.5, &drives());
+        // It writhes first, rolling over as it does, then goes limp.
+        let mut max_writhe: f32 = 0.0;
+        for _ in 0..60 {
+            h.step(1.0 / 60.0, &drives(), &world());
+            max_writhe = max_writhe.max(h.writhe);
+        }
+        assert!(max_writhe > 0.7, "no writhing: {max_writhe}");
+        run(&mut h, 3.0, &drives());
         assert!(h.belly_up > 0.8, "not on its back: {}", h.belly_up);
+        assert!(h.writhe < 0.1, "still thrashing once limp: {}", h.writhe);
         assert!(h.hood < 0.1, "the hood goes down when it dies: {}", h.hood);
         // Poke it again: it stays dead.
         h.threaten(Some(Vec2::new(20.0, 0.0)));
@@ -583,7 +685,7 @@ mod tests {
         // And it does not get up while the threat is still present.
         let mut nervous = drives();
         nervous.nervous = 0.8;
-        run(&mut h, 16.0, &nervous);
+        run(&mut h, 36.0, &nervous);
         assert_eq!(h.state, HognoseState::PlayDead, "got up under a standing threat");
         // Left alone, it eventually rights itself.
         run(&mut h, 6.0, &drives());
