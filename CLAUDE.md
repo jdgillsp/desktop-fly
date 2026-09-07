@@ -75,15 +75,26 @@ otherwise.
   through `PropKind::catalogue` and fixed tray slots; angles and a normalised
   prop arrangement persist in `settings.json`. A resize *carries* props — never
   restock on resize, or a held zoom reshuffles the tank every frame.
-- **Silk** (`WEB_PLAN.md`, Phase 0 built): `rust/core/src/silk.rs` is a
-  graph of threads with a *trailing line* — `pay_out` before a jump or a
-  descent, `attach` to close a thread and carry on, `release` to let go. The
-  salticid's dragline is that line and nothing else; the planned web-building
-  species (orb, gumfoot tangle, sheet-and-funnel) lay their webs as the path
-  they walk, through the same three calls. Their construction programs are
-  **procedural and labelled so**; the weavers share one chimera circuit with
-  LC11 dropped and one authored `strike` node. Touching `silk.rs` or
-  `spider.rs` means diffing the salticid suite output byte for byte.
+- **Silk and the web builders** (`WEB_PLAN.md`, all phases built):
+  `rust/core/src/silk.rs` is a graph of threads with a *trailing line* —
+  `pay_out` before a jump or a descent, `attach` to close a thread and carry
+  on, `release` to let go. The salticid's dragline and its corner retreat are
+  that line; creatures #5–#7 (`araneus`, `parasteatoda`, `agelenopsis`) lay
+  their webs as the path they walk through the same calls, each from its
+  family's literature (`orb.rs`, `cobweb.rs`, `funnel.rs`), on one chassis
+  (`weaver.rs`) and the shared leg rig (`arachnid.rs`). The three share one
+  chimera circuit, `data/weaver/` from `etl_weaver.py`: the fly's extract
+  minus the wings, **no LC11**, and one authored neuron with **no synapses**
+  (`strike`, a vibration sense; the manifest gives it `tau_ms` and
+  `threshold` overrides — the only per-role overrides in the sim, and every
+  measured creature's are empty so the fly is bit-identical). The
+  construction programs are **procedural and labelled so** in
+  `Provenance::Chimera.procedural`. The programs never write to the sim; the
+  brain gates *whether* the animal moves, the program says *where the thread
+  goes*. Suites: `dfcore --creature araneus --simtest --behaviortest` (and
+  the other two). Touching `silk.rs`, `arachnid.rs` or `spider.rs` means
+  diffing the salticid suite output byte for byte; `lif.rs` or `roles.rs`
+  means diffing the fly's.
 - Coding senses are content-blind by construction: `Foreground` is an enum
   from the process name, and build results arrive only via
   `desktopfly notify pass|fail` over a named pipe. Never add log tailing or
@@ -146,6 +157,7 @@ trust the compiler, not single-file diagnostics.
 | `other`+sensory (16) | strongest sensory partners | wind/tap input; electrically boosted onto GF | `sim.airPuff`, taps |
 | `lc11` *(chimera only)* | LC11 (127) | small-object input → pursuit, head orient (L−R readout, modelled) | `BrainSignals.pursuit`, `prey_bias` |
 | `pounce` *(chimera only, AUTHORED)* | — (1 node, 127 authored edges from LC11) | pounce, if a bug is in range | `BrainSignals.pounce` |
+| `strike` *(web builders only, AUTHORED)* | — (1 node, **0 edges**; 1 s membrane, threshold 4; input `sim.vibration`) | go to the loudest point of the web (localisation is a modelled readout) | `BrainSignals.strike` |
 
 Whole-population rate → `BrainSignals.arousal` (spontaneous-takeoff gate,
 flight effort). Only fly #1 has the brain; extra flies use legacy

@@ -89,6 +89,9 @@ struct Args {
     glass: bool,
     /// Confine the creature to a rendered enclosure.
     habitat: bool,
+    /// Whether the user ever said so (flag or saved choice). If not, the
+    /// creature's own preference decides: a web builder starts in a tank.
+    habitat_explicit: bool,
     /// Frame cap. A background pet does not need 60 fps, and Spike 0 measured
     /// ~8% of a core just to clear and present a full-screen overlay -- so the
     /// frame rate is most of the idle cost. See `--fps`.
@@ -143,6 +146,7 @@ fn parse_args() -> Args {
         // Off unless asked for: free roam stays the default, and an existing
         // install is unaffected by this feature existing.
         habitat: a.iter().any(|x| x == "--habitat") || persist::load_habitat_choice().unwrap_or(false),
+        habitat_explicit: a.iter().any(|x| x == "--habitat") || persist::load_habitat_choice().is_some(),
         fps: a
             .iter()
             .position(|x| x == "--fps")
@@ -224,9 +228,12 @@ struct App {
 }
 
 impl App {
-    fn new(args: Args) -> Self {
+    fn new(mut args: Args) -> Self {
         let space = ScreenSpace::new(Rect::new(0, 0, 1920, 1080));
         let rt = runtime::make(&args.creature, dfcore::DEFAULT_SEED);
+        if !args.habitat_explicit && rt.prefers_habitat() {
+            args.habitat = true;
+        }
         App {
             args,
             window: None,

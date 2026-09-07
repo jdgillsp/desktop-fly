@@ -174,7 +174,59 @@ Its own suites: `dfcore --creature salticid --simtest` (14 circuit checks:
 the giant fiber still fires 4 ms after an abrupt loom; LC11 ignores looms;
 the pounce node is silent at rest and under looms, fires only under
 small-object drive, and never fires the giant fiber) and `--behaviortest`
-(14 end-to-end checks, including bug → LC11 → pounce → capture).
+(15 end-to-end checks, including bug → LC11 → pounce → capture, and the
+silk retreat it spins in a corner and sleeps in).
+
+## Creatures #5–#7: three spiders that build webs (Windows build)
+
+<p align="center">
+  <img src="assets/windows-araneus.png" width="240" alt="The garden cross spider mid capture-spiral in a vivarium">
+  <img src="assets/windows-parasteatoda.png" width="240" alt="The house spider's gumfoot tangle under the lid">
+  <img src="assets/windows-agelenopsis.png" width="240" alt="The grass spider's funnel and sheet">
+</p>
+
+Three more species, `--creature araneus | parasteatoda | agelenopsis`, each
+building the web its family builds, **as the path it walks**: the spider
+goes to an anchor, pays out a line, walks, fixes it, and the thread it just
+laid is the web. The sequences are the ethology literature's, at a
+compressed tempo (an orb takes the animal about an hour; here about five
+minutes of walking):
+
+| species | web | the program (WEB_PLAN.md §5) | catches by |
+|---|---|---|---|
+| *Araneus diadematus*, garden cross spider | orb, rebuilt daily | exploration → bridge → proto-hub → frame → radii into the largest gap → auxiliary spiral out → sticky capture spiral in, cutting the scaffold as it goes (Zschokke & Vollrath 1995; Zschokke 1996) | struggle on a radius → a run down that radius; a drop on the dragline when threatened |
+| *Parasteatoda tepidariorum*, house spider | gumfoot tangle, standing | retreat → tangle in bouts with returns home → sheet, alternating → tensioned lines to the floor with a sticky foot (Benjamin & Zschokke 2003); grows nightly | a bug on the floor touches a foot, the line snaps up with it |
+| *Agelenopsis*, grass spider | sheet with a funnel, standing | funnel → alternating support threads and sheet filling over sessions (Rojas 2011) — the sheet thickens rather than being rebuilt | a shake anywhere on the sheet → the fastest rush in the app; a threat means into the funnel, never a drop |
+
+**They share one labelled chimera circuit**, `data/weaver/` (663 neurons,
+17,922 measured edges): the fly's looming, escape, steering, walking,
+grooming and backing-up modules and its 16 mechanosensory partners, with
+**no LC11** — these animals hunt by vibration, not by sight — and exactly
+**one authored neuron with no synapses**: the strike node, a vibration
+*sense* the fly extract has no counterpart for, driven by the modelled
+transduction on a slow membrane with its own threshold. A knock on the web
+(a cursor lunge, a click) never touches it; it goes through the measured
+wind pathway to the giant fiber, and the spider drops. The **construction
+program has no neurons in it at all**, and the tray and brain window say so:
+*"…authored strike node; orb web construction program: PROCEDURAL, no
+neurons"*. See [`WEB_PLAN.md`](WEB_PLAN.md) and
+[`data/weaver/PROVENANCE.md`](data/weaver/PROVENANCE.md).
+
+Webs start inside a vivarium (the tray's *Habitat*; on by default for these
+three). On the open desktop a web hangs in a box under the widest window
+edge that has room below it; move that window and the threads fixed to it
+are cut, and the spider repairs or starts over. A fast cursor sweep through
+silk cuts it too.
+
+Their suites: `dfcore --creature araneus --simtest` (the strike node is
+silent for 12 s of rest across seeds, fires within 1 s of a sustained
+struggle, has zero synapses so nothing reaches the giant fiber from it; a
+tap and an abrupt loom still fire the giant fiber within ~10 ms) and
+`--behaviortest` (10 checks for the orb weaver, 8 for the others: a full orb
+in under ten minutes of body time with the radius count in the species
+band, vibration → strike → capture, repair of a cut radius and a rebuild
+after half the web is gone, construction pausing when the walk drive is
+down, and the program never exciting the silk).
 
 ## What's modeled vs. measured
 
@@ -191,7 +243,13 @@ carry it); and for the chimera, the **small-object size tuning** presented to
 LC11 (the lobula is outside the extract), the **head-orientation readout**
 of LC11's left−right rate, and the **authored pounce node** — 1 neuron and
 127 edges out of 790 neurons and 26,237 edges, counted by the data, not by
-a constant.
+a constant. For the web builders: the **strike node** — 1 authored neuron
+with 0 edges out of 663 neurons and 17,922 edges, with its own 1 s membrane
+and threshold; the **vibration transduction** (silk excitation under the
+legs and across the web → that node's input); the **prey localisation
+readout** (the loudest node of the silk is where the spider goes); and the
+**web construction programs**, which are procedural motor programs with no
+neurons in them, labelled PROCEDURAL wherever the creature is named.
 
 ## License & citation
 

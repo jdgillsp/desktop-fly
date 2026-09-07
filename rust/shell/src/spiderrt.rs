@@ -286,6 +286,8 @@ impl Runtime for SpiderRuntime {
         self.spider.terrain.clear();
         self.spider.ledge = None;
         self.spider.silk.clear();
+        self.spider.retreat = None;
+        self.spider.retreat_built = false;
         self.spider.pos = region.clamp_inside(self.spider.pos, 40.0);
     }
     fn status(&self) -> String {

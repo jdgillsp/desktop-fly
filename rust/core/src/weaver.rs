@@ -46,6 +46,13 @@ pub const STICK_RADIUS: f32 = 4.0;
 pub const DUSK: (f32, f32) = (19.0, 22.0);
 /// A web older than this at dusk gets rebuilt (seconds of body time).
 pub const REBUILD_AGE: f32 = 6.0 * 3600.0;
+/// In free roam a web does not span the whole display: it hangs in a box
+/// this size, under a window's top edge when one is wide enough.
+pub const FREE_ROAM_WEB: (f32, f32) = (560.0, 440.0);
+/// A region no bigger than this is an enclosure and is used whole.
+pub const ENCLOSURE_MAX: f32 = 1000.0;
+/// A ledge must be at least this wide to hang a web from.
+pub const LEDGE_MIN_WIDTH: f32 = 220.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeaverState {
@@ -311,6 +318,12 @@ pub struct Weaver {
     pub backward_timer: f32,
     strike_cooldown: f32,
 
+    /// Where the current web was planned: the enclosure, or a box on the
+    /// desktop under a window edge (WEB_PLAN.md §6).
+    pub build_region: Option<Region>,
+    /// The window edge the web hangs from, if any. When it moves or closes
+    /// the threads on it are cut, and the animal repairs or starts again.
+    pub anchor_ledge: Option<Ledge>,
     /// Local hour, for dusk; set by the runtime from the senses.
     pub hour: f32,
     /// Seconds since the web was last completed.
@@ -361,6 +374,8 @@ impl Weaver {
             escape_cooldown: 0.0,
             backward_timer: 0.0,
             strike_cooldown: 0.0,
+            build_region: None,
+            anchor_ledge: None,
             hour: 12.0,
             web_age: 0.0,
             was_complete: false,
@@ -455,6 +470,81 @@ impl Weaver {
         self.target = None;
         self.walk_target = None;
         self.set_state(WeaverState::Eating);
+    }
+
+    /// Where to plan a web. An enclosure is used whole. On the open desktop
+    /// the web is a box hung under the widest window edge that leaves room
+    /// below it, or centred if there is none — never the whole screen.
+    pub fn choose_build_region(region: Region, ledges: &[Ledge]) -> (Region, Option<Ledge>) {
+        let (w, h) = region.size;
+        if w <= ENCLOSURE_MAX && h <= ENCLOSURE_MAX {
+            return (region, None);
+        }
+        let bw = FREE_ROAM_WEB.0.min(w - 40.0);
+        let bh = FREE_ROAM_WEB.1.min(h - 40.0);
+        let lo = region.min();
+        let hi = region.max();
+        let mut best: Option<Ledge> = None;
+        for l in ledges {
+            let width = l.x1 - l.x0;
+            if width < LEDGE_MIN_WIDTH || l.y - bh < lo.y + 20.0 || l.y > hi.y - 10.0 {
+                continue;
+            }
+            if best.map(|b| width > b.x1 - b.x0).unwrap_or(true) {
+                best = Some(*l);
+            }
+        }
+        match best {
+            Some(l) => {
+                let cx = ((l.x0 + l.x1) * 0.5).clamp(lo.x + bw * 0.5 + 10.0, hi.x - bw * 0.5 - 10.0);
+                let width = (l.x1 - l.x0).min(bw);
+                (
+                    Region::new(Vec2::new(cx, l.y - bh * 0.5), (width, bh)),
+                    Some(l),
+                )
+            }
+            None => (Region::new(region.center, (bw, bh)), None),
+        }
+    }
+
+    /// Plan (or re-plan) the web in a region chosen from the world.
+    fn replan(&mut self, region: Region) {
+        let (build, ledge) = Self::choose_build_region(region, &self.terrain);
+        self.build_region = Some(build);
+        self.anchor_ledge = ledge;
+        let mut r = Pcg32::new(self.rng.next_u32() as u64);
+        self.program.reset(build, &mut r);
+        self.current = None;
+    }
+
+    /// The window edge the web hangs from moved or closed: cut every thread
+    /// fixed on it, and only those. Returns how many went.
+    fn check_anchor_ledge(&mut self) -> usize {
+        let Some(l) = self.anchor_ledge else { return 0 };
+        let still = self
+            .terrain
+            .iter()
+            .any(|c| c.id == l.id && (c.y - l.y).abs() < 3.0 && c.x0 <= l.x0 + 3.0 && c.x1 >= l.x1 - 3.0);
+        if still {
+            return 0;
+        }
+        let fixed: Vec<Vec2> = self
+            .silk
+            .nodes
+            .iter()
+            .filter(|n| n.anchor == Anchor::Fixed && (n.pos.y - l.y).abs() < 20.0)
+            .map(|n| n.pos)
+            .collect();
+        let mut cut = 0;
+        for p in fixed {
+            cut += self.silk.cut_near(p, 3.0);
+        }
+        self.anchor_ledge = None;
+        self.current = None;
+        if cut > 0 && self.program.on_damage(&self.silk) {
+            self.begin_rebuild();
+        }
+        cut
     }
 
     /// Turn toward and step toward `to`. True once there.
@@ -567,6 +657,15 @@ impl Weaver {
         self.feed_timer = (self.feed_timer - dt).max(0.0);
         self.strike_cooldown = (self.strike_cooldown - dt).max(0.0);
         self.live_nervous = signals.map(|s| s.nervous).unwrap_or(0.0);
+
+        // The world decides where the web goes: the first frame, and after
+        // every rebuild, the program is planned in a region chosen from the
+        // enclosure or the window edges.
+        if self.build_region.is_none() {
+            self.replan(region);
+        }
+        self.check_anchor_ledge();
+        let region = self.build_region.unwrap_or(region);
 
         self.update_bugs(dt, region);
         self.silk.step(dt);
@@ -931,8 +1030,7 @@ impl Weaver {
                 // Take the web down thread by thread, walking to each.
                 if self.silk.threads.is_empty() {
                     self.silk.clear();
-                    let mut rng_seed = Pcg32::new(self.rng.next_u32() as u64);
-                    self.program.reset(region, &mut rng_seed);
+                    self.build_region = None;
                     self.set_state(WeaverState::Building);
                 } else {
                     let here = self.pos;
@@ -1275,6 +1373,80 @@ mod tests {
             }
         }
         assert!(snapped, "bug at {:?} stuck {}", w.prey[0].pos, w.prey[0].stuck);
+    }
+
+    #[test]
+    fn free_roam_hangs_the_web_under_a_wide_window_edge_and_an_enclosure_is_used_whole() {
+        let tank = Region::centered((720.0, 520.0));
+        let (r, l) = Weaver::choose_build_region(tank, &[]);
+        assert_eq!(r, tank);
+        assert!(l.is_none());
+        let display = Region::centered((2560.0, 1440.0));
+        let (r, l) = Weaver::choose_build_region(display, &[]);
+        assert!(l.is_none());
+        assert!(r.size.0 < 700.0 && r.size.1 < 500.0, "never the whole screen: {:?}", r.size);
+        assert_eq!(r.center, display.center);
+        let narrow = Ledge { y: 300.0, x0: 0.0, x1: 100.0, id: 1 };
+        let wide = Ledge { y: 200.0, x0: -400.0, x1: 200.0, id: 2 };
+        let (r, l) = Weaver::choose_build_region(display, &[narrow, wide]);
+        assert_eq!(l.map(|l| l.id), Some(2), "the wide one");
+        assert!((r.max().y - 200.0).abs() < 1e-3, "hangs from the edge: top at {}", r.max().y);
+        assert!(r.size.0 <= 600.0);
+    }
+
+    #[test]
+    fn a_moved_window_edge_cuts_only_the_threads_fixed_on_it() {
+        let display = Region::centered((2560.0, 1440.0));
+        let ledge = Ledge { y: 220.0, x0: -420.0, x1: 240.0, id: 9 };
+        let mut rng = Pcg32::new(5);
+        let program = crate::orb::OrbProgram::new(display, &mut rng);
+        let mut w = Weaver::new(Species::Araneus, Vec2::ZERO, 5, Box::new(program));
+        w.terrain = vec![ledge];
+        let mut s = BrainSignals::new();
+        s.walk_drive = 0.6;
+        let mut t = 0.0;
+        while !w.web_complete() && t < 900.0 {
+            w.update(DT, display, None, Some(s));
+            t += DT;
+        }
+        assert!(w.web_complete(), "{}", w.program.stage());
+        assert_eq!(w.anchor_ledge.map(|l| l.id), Some(9));
+        let top = w.build_region.unwrap().max().y;
+        assert!((top - 220.0).abs() < 1e-3);
+        let on_ledge: Vec<Vec2> = w
+            .silk
+            .nodes
+            .iter()
+            .filter(|n| n.anchor == Anchor::Free || n.anchor == Anchor::Fixed)
+            .filter(|n| n.anchor == Anchor::Fixed && (n.pos.y - 220.0).abs() < 20.0)
+            .map(|n| n.pos)
+            .collect();
+        assert!(!on_ledge.is_empty(), "something is fixed on the edge");
+        let touching = w
+            .silk
+            .threads
+            .iter()
+            .filter(|t| {
+                on_ledge.iter().any(|p| {
+                    let (a, b) = (w.silk.nodes[t.a].pos, w.silk.nodes[t.b].pos);
+                    (a.x - p.x).abs() < 1e-3 && (a.y - p.y).abs() < 1e-3
+                        || (b.x - p.x).abs() < 1e-3 && (b.y - p.y).abs() < 1e-3
+                })
+            })
+            .count();
+        let before = w.silk.threads.len();
+        // The window moves down.
+        w.terrain = vec![Ledge { y: 100.0, ..ledge }];
+        w.update(DT, display, None, Some(s));
+        let after = w.silk.threads.len();
+        assert_eq!(before - after, touching, "only the threads on the edge went: {before} -> {after}, {touching} touched it");
+        assert!(w.anchor_ledge.is_none());
+        assert!(
+            matches!(w.state, WeaverState::Eating) || w.program.stage() == "repairing",
+            "state {:?} stage {}",
+            w.state,
+            w.program.stage()
+        );
     }
 
     #[test]

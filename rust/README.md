@@ -66,6 +66,18 @@ only — never a title — which makes the spider sit tighter and look around
 more while you work. The brain window colours the authored node cool and
 draws it larger; nothing invented is allowed to look measured.
 
+**The web builders** (`araneus`, `parasteatoda`, `agelenopsis`) are the
+chimeras of `../WEB_PLAN.md`: one shared circuit in `../data/weaver/` (the
+fly's modules minus the wings, no LC11, and one authored neuron with no
+synapses — a vibration sense), one body chassis (`core/src/weaver.rs`) on
+the eight-leg rig the salticid also uses (`core/src/arachnid.rs`), and three
+construction programs (`orb.rs`, `cobweb.rs`, `funnel.rs`) that lay their
+webs as the path the spider walks, on the silk model in `core/src/silk.rs`.
+The programs are procedural — no neurons — and every label says so. They
+start in a vivarium; on the open desktop the web hangs under a window edge
+and is cut when that window moves. One runtime serves all three
+(`shell/src/weaverrt.rs`); the looks differ in `shell/src/weaverbody.rs`.
+
 **Frame rate.** The default is 30 fps, not 60. Spike 0 measured ~8% of a core
 just to clear and present a full-screen overlay, so frame rate is a real part
 of a background pet's idle cost. Measured here: 60 fps costs 15% of one core,
@@ -87,7 +99,8 @@ target/release/dfcore.exe --simtest        # circuit invariants
 target/release/dfcore.exe --behaviortest   # 17 end-to-end sim -> body checks
 target/release/dfcore.exe --simtest --seed 1337   # any seed must pass
 target/release/dfcore.exe --creature salticid --simtest       # the chimera's 14 circuit checks
-target/release/dfcore.exe --creature salticid --behaviortest  # 14 sim -> spider body checks
+target/release/dfcore.exe --creature salticid --behaviortest  # 15 sim -> spider body checks
+target/release/dfcore.exe --creature araneus --simtest --behaviortest       # the web builders (also parasteatoda, agelenopsis)
 target/release/winprobe.exe --terrain      # what the fly can walk on right now
 target/release/senses.exe                  # one second of live desktop senses
 target/release/desktopfly.exe --creature salticid --snapshot s.png --zoom 5   # a close look

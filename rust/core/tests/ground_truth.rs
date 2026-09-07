@@ -229,7 +229,7 @@ fn all_spider_behavior_checks_pass() {
     for l in &r.lines {
         println!("{l}");
     }
-    assert_eq!(r.lines.len(), 15, "14 checks plus the summary line");
+    assert_eq!(r.lines.len(), 16, "15 checks plus the summary line");
     assert!(r.passed, "spider behaviour test failed");
 }
 

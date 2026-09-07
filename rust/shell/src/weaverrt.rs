@@ -183,6 +183,9 @@ impl Runtime for WeaverRuntime {
     fn substrate(&self) -> dfcore::Substrate {
         dfcore::creature::Body::substrate(&self.body)
     }
+    fn prefers_habitat(&self) -> bool {
+        true
+    }
     fn sim(&self) -> Option<&dyn Sim> {
         self.sim.as_ref().map(|s| s as &dyn Sim)
     }
@@ -323,10 +326,12 @@ impl Runtime for WeaverRuntime {
         self.body.prey.clear();
         let mut rng = dfcore::rng::Pcg32::new(self.seed ^ 0x5e1f ^ (region.size.0 as u64));
         self.body.program = program_for(self.creature, region, &mut rng);
+        // The body picks where in the new world the web goes on its next
+        // frame (an enclosure whole, or a box under a window edge).
+        self.body.build_region = None;
+        self.body.anchor_ledge = None;
         self.body.pos = region.clamp_inside(self.body.pos, 40.0);
-        if self.body.state != WeaverState::Sitting {
-            self.body.pos = region.clamp_inside(self.body.pos, 40.0);
-        }
+        let _ = WeaverState::Sitting;
     }
     fn status(&self) -> String {
         format!(

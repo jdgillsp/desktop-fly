@@ -40,6 +40,13 @@ pub const CAPTURE_RADIUS: f32 = 22.0;
 pub const PREY_RANGE: f32 = 620.0;
 /// Bugs drift off after this long, caught or not.
 pub const BUG_LIFETIME: f32 = 45.0;
+/// A corner this close while walking is where the retreat goes.
+pub const RETREAT_FIND: f32 = 60.0;
+/// How far from the retreat the spider still walks home to sleep.
+pub const RETREAT_REACH: f32 = 320.0;
+/// Attachments in the retreat's little tent of silk, and seconds each.
+pub const RETREAT_STEPS: u8 = 7;
+pub const RETREAT_STEP_SECS: f32 = 0.55;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpiderState {
@@ -54,6 +61,10 @@ pub enum SpiderState {
     Abseiling,
     Grooming,
     Sleeping,
+    /// Walking home to the silk retreat at dusk (WEB_PLAN.md §5.4).
+    Homing,
+    /// Spinning the retreat: a small tent of dense silk in a corner.
+    Spinning,
 }
 
 /// A small moving thing the spider can see, and catch.
@@ -134,6 +145,16 @@ pub struct Spider {
     /// A posture bias on the same command rates, not a new behaviour.
     pub settled: bool,
 
+    /// The corner the spider has picked for its silk retreat, once it has
+    /// walked close to one; where it goes to sleep from then on. Phidippus
+    /// spins a "pup tent" in a crevice to rest and moult in (WEB_PLAN.md
+    /// §5.4). None until a corner has been found, and the sleep path is
+    /// then exactly what it always was.
+    pub retreat: Option<Vec2>,
+    pub retreat_built: bool,
+    retreat_step: u8,
+    retreat_timer: f32,
+
     live_nervous: f32,
     rng: Pcg32,
 }
@@ -178,6 +199,10 @@ impl Spider {
             captured: 0,
             target: None,
             settled: false,
+            retreat: None,
+            retreat_built: false,
+            retreat_step: 0,
+            retreat_timer: 0.0,
             live_nervous: 0.0,
             rng,
         }
@@ -408,6 +433,11 @@ impl Spider {
                 }
                 if matches!(self.state, SpiderState::Walking | SpiderState::Stalking) {
                     self.update_walk(dt, region);
+                } else if self.state == SpiderState::Homing {
+                    self.pos.x += self.heading.cos() * self.speed * dt;
+                    self.pos.y += self.heading.sin() * self.speed * dt;
+                } else if self.state == SpiderState::Spinning {
+                    self.update_spinning(dt);
                 }
             }
         }
@@ -459,6 +489,43 @@ impl Spider {
             return;
         }
         if s.sleep {
+            // With a retreat within reach, sleep happens there: walk home,
+            // spin the tent the first time, then sleep in it. Without one
+            // (or too far from it) the animal sleeps where it is, exactly as
+            // it always did.
+            if matches!(self.state, SpiderState::Sleeping | SpiderState::Spinning) {
+                return;
+            }
+            if let Some(r) = self.retreat {
+                let d = hypot(r.x - self.pos.x, r.y - self.pos.y);
+                if self.state != SpiderState::Homing && d > 4.0 && d < RETREAT_REACH {
+                    self.set_state(SpiderState::Homing);
+                    self.ledge = None;
+                    self.target = None;
+                    self.backward_timer = 0.0;
+                    self.speed = 0.0;
+                    return;
+                }
+                if self.state == SpiderState::Homing {
+                    if d > 4.0 {
+                        let want = (r.y - self.pos.y).atan2(r.x - self.pos.x);
+                        self.heading += angle_diff(self.heading, want) * (8.0 * dt).min(1.0);
+                        self.speed = 40.0;
+                        return;
+                    }
+                    self.pos = r;
+                    self.speed = 0.0;
+                    if self.retreat_built {
+                        self.set_state(SpiderState::Sleeping);
+                    } else {
+                        self.set_state(SpiderState::Spinning);
+                        self.retreat_step = 0;
+                        self.retreat_timer = 0.0;
+                        self.silk.pay_out(r, ThreadKind::Retreat);
+                    }
+                    return;
+                }
+            }
             if self.state != SpiderState::Sleeping {
                 self.set_state(SpiderState::Sleeping);
                 self.speed = 0.0;
@@ -466,7 +533,10 @@ impl Spider {
                 self.target = None;
             }
             return;
-        } else if self.state == SpiderState::Sleeping {
+        } else if matches!(self.state, SpiderState::Sleeping | SpiderState::Spinning | SpiderState::Homing) {
+            if self.state == SpiderState::Spinning {
+                self.silk.release();
+            }
             self.set_state(SpiderState::Grooming);
             return;
         }
@@ -660,6 +730,23 @@ impl Spider {
             self.pos.x += self.heading.cos() * v * dt;
             self.pos.y += self.heading.sin() * v * dt;
             self.pos = region.clamp_inside(self.pos, 20.0);
+            // A corner passed close by is a crevice: that is where the
+            // retreat will be. Chosen once; no randomness, so the walk is
+            // bit-identical whether or not a corner is ever found.
+            if self.retreat.is_none() && self.state == SpiderState::Walking {
+                let lo = region.min();
+                let hi = region.max();
+                for (cx, cy) in [(lo.x, lo.y), (hi.x, lo.y), (lo.x, hi.y), (hi.x, hi.y)] {
+                    if hypot(cx - self.pos.x, cy - self.pos.y) < RETREAT_FIND {
+                        let inset = 24.0;
+                        self.retreat = Some(Vec2::new(
+                            if cx < region.center.x { cx + inset } else { cx - inset },
+                            if cy < region.center.y { cy + inset } else { cy - inset },
+                        ));
+                        break;
+                    }
+                }
+            }
             if self.state == SpiderState::Walking {
                 let candidates: Vec<Ledge> = self
                     .terrain
@@ -760,6 +847,41 @@ impl Spider {
         self.z = 0.0;
     }
 
+    /// The retreat: a little tent of dense silk, one attachment every half
+    /// second around the corner the spider chose, then sleep inside it.
+    fn update_spinning(&mut self, dt: f32) {
+        let Some(r) = self.retreat else {
+            self.set_state(SpiderState::Sleeping);
+            return;
+        };
+        self.retreat_timer += dt;
+        if self.retreat_timer < RETREAT_STEP_SECS {
+            return;
+        }
+        self.retreat_timer = 0.0;
+        if self.retreat_step < RETREAT_STEPS {
+            let a = self.retreat_step as f32 * 0.95;
+            let p = Vec2::new(r.x + a.cos() * 9.0, r.y + a.sin() * 7.0);
+            let anchor = if self.retreat_step % 3 == 0 {
+                crate::silk::Anchor::Fixed
+            } else {
+                crate::silk::Anchor::Free
+            };
+            self.silk.attach(p, anchor);
+            self.retreat_step += 1;
+        } else {
+            match self.silk.node_at(r, 2.0) {
+                Some(n) => self.silk.attach_to(n),
+                None => {
+                    self.silk.attach(r, crate::silk::Anchor::Fixed);
+                }
+            }
+            self.silk.release();
+            self.retreat_built = true;
+            self.set_state(SpiderState::Sleeping);
+        }
+    }
+
     fn update_head(&mut self, dt: f32) {
         // With nothing to look at, the head drifts back to centre.
         let idle = self.target.is_none() && self.live_nervous < 0.4;
@@ -777,7 +899,7 @@ impl Spider {
         let target = match self.state {
             SpiderState::Stalking => 0.8,
             SpiderState::Jumping => 0.0,
-            SpiderState::Sleeping => 0.6,
+            SpiderState::Sleeping | SpiderState::Spinning => 0.6,
             _ => {
                 if self.live_nervous > 0.4 || self.feed_timer > 0.0 {
                     0.9
@@ -803,6 +925,7 @@ impl Spider {
         } else {
             match self.state {
                 SpiderState::Grooming => LegMode::Groom { time: self.time },
+                SpiderState::Spinning => LegMode::Groom { time: self.time * 0.7 },
                 SpiderState::Jumping => LegMode::Launch,
                 SpiderState::Abseiling => LegMode::Hang,
                 _ => LegMode::Rest,

@@ -112,6 +112,9 @@ pub struct WeaverMeshes {
     chelicera: Mesh,
     spinneret: Mesh,
     bug: Mesh,
+    /// One capsule of unit length, scaled per thread: a web is a thousand
+    /// of these a frame, and building each afresh was the frame budget.
+    line: Mesh,
     leg_segments: Vec<[Mesh; 3]>,
 }
 
@@ -138,6 +141,7 @@ impl WeaverMeshes {
             chelicera: mesh::capsule(0.38, 1.8, 6, 8),
             spinneret: mesh::capsule(0.22, 3.2, 5, 6),
             bug: mesh::sphere(0.85, 6, 8),
+            line: mesh::capsule(0.45, 1.0, 2, 3),
             leg_segments,
         }
     }
@@ -398,13 +402,17 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
         let len = (dx * dx + dy * dy).sqrt();
         if len > 1.0 {
             // Thicker than the salticid's dragline: a web is hundreds of
-            // sub-pixel lines, and at 0.22 they alias into dust.
-            let line = mesh::capsule(0.45, len, 2, 3);
+            // sub-pixel lines, and at 0.22 they alias into dust. The unit
+            // capsule is stretched along its axis; its end caps stretch
+            // too, invisibly at this radius.
             let m = math::mul(
                 math::translate((seg.a.x + seg.b.x) * 0.5, (seg.a.y + seg.b.y) * 0.5, 3.0),
-                math::rotate_z(dy.atan2(dx) - std::f32::consts::FRAC_PI_2),
+                math::mul(
+                    math::rotate_z(dy.atan2(dx) - std::f32::consts::FRAC_PI_2),
+                    math::scale(1.0, len, 1.0),
+                ),
             );
-            emit(out, &line, &m, silk_color(seg.kind, seg.excite, glass));
+            emit(out, &meshes.line, &m, silk_color(seg.kind, seg.excite, glass));
         }
     }
 
@@ -514,6 +522,41 @@ mod tests {
         let mut with = Mesh::default();
         build_frame(&mut with, &meshes, &w, &w.pose(), true);
         assert!(with.verts.len() > bare.verts.len());
+    }
+
+    /// The frame budget with a whole orb on screen (WEB_PLAN.md Phase 7):
+    /// build the web body-only, then time the geometry for sixty frames. A
+    /// thousand capsules from one cached unit mesh have to stay well inside
+    /// a 33 ms frame even in a debug build.
+    #[test]
+    fn a_finished_orb_builds_its_geometry_inside_the_frame_budget() {
+        use dfcore::{OrbProgram, Region};
+        let tank = Region::centered((720.0, 520.0));
+        let mut rng = dfcore::rng::Pcg32::new(3);
+        let program = OrbProgram::new(tank, &mut rng);
+        let mut w = WeaverBody::new(Species::Araneus, Vec2::ZERO, 3, Box::new(program));
+        let mut s = dfcore::BrainSignals::new();
+        s.walk_drive = 0.6;
+        let mut t = 0.0;
+        while !w.web_complete() && t < 900.0 {
+            w.update(1.0 / 60.0, tank, None, Some(s));
+            t += 1.0 / 60.0;
+        }
+        assert!(w.silk.threads.len() > 800, "{} threads", w.silk.threads.len());
+        let meshes = WeaverMeshes::build(Species::Araneus);
+        let mut m = Mesh::default();
+        let start = std::time::Instant::now();
+        for _ in 0..60 {
+            build_frame(&mut m, &meshes, &w, &w.pose(), true);
+        }
+        let per_frame = start.elapsed().as_secs_f32() * 1000.0 / 60.0;
+        eprintln!(
+            "orb geometry: {} threads, {} verts, {:.2} ms per frame (debug build)",
+            w.silk.threads.len(),
+            m.verts.len(),
+            per_frame
+        );
+        assert!(per_frame < 20.0, "{per_frame:.1} ms per frame is over budget");
     }
 
     #[test]

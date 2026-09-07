@@ -1162,6 +1162,44 @@ pub fn spider_behavior_test(data: &BrainData, seed: u64) -> Outcome {
         (max_yaw > 0.3, format!("max |head_yaw| {max_yaw:.2} rad over 20 s"))
     });
 
+    h.body_check("a corner passed by becomes the retreat; sleep spins it and happens in it", || {
+        let lo = BOUNDS.min();
+        let mut sp = Spider::new(Vec2::new(lo.x + 40.0, lo.y + 40.0), seed);
+        sp.state = SpiderState::Walking;
+        sp.speed = 20.0;
+        sp.heading = 0.8;
+        for _ in 0..30 {
+            sp.update(DT, BOUNDS, None, Some(walk));
+        }
+        let Some(r) = sp.retreat else {
+            return (false, "no retreat chosen near the corner".to_string());
+        };
+        // Wander off a little, then dusk.
+        for _ in 0..120 {
+            sp.update(DT, BOUNDS, None, Some(walk));
+        }
+        let mut night = BrainSignals::new();
+        night.sleep = true;
+        let (mut homed, mut spun) = (false, false);
+        for _ in 0..(40.0 / DT) as usize {
+            sp.update(DT, BOUNDS, None, Some(night));
+            homed |= sp.state == SpiderState::Homing;
+            spun |= sp.state == SpiderState::Spinning;
+            if sp.state == SpiderState::Sleeping {
+                break;
+            }
+        }
+        let at_home = crate::util::hypot(sp.pos.x - r.x, sp.pos.y - r.y) < 6.0;
+        let threads = sp.silk.count_kind(crate::silk::ThreadKind::Retreat);
+        (
+            sp.state == SpiderState::Sleeping && homed && spun && at_home && threads >= 6 && sp.silk.trailing_anchor().is_none(),
+            format!(
+                "retreat at ({:.0},{:.0}); homed={homed} spun={spun} asleep={} there={at_home}, {threads} retreat threads",
+                r.x, r.y, sp.state == SpiderState::Sleeping
+            ),
+        )
+    });
+
     let failures = h.failures;
     let mut lines = h.lines;
     let n = lines.len();

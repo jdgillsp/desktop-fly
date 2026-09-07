@@ -332,6 +332,8 @@ fn silk_color(kind: ThreadKind, glass: bool) -> [f32; 4] {
     let base = if glass { LINE_COLOR } else { [0.75, 0.75, 0.72, 0.6] };
     if kind.is_sticky() {
         [base[0], base[1], base[2], (base[3] * 1.35).min(1.0)]
+    } else if kind == ThreadKind::Retreat {
+        [base[0], base[1], base[2], (base[3] * 1.6).min(1.0)]
     } else {
         base
     }

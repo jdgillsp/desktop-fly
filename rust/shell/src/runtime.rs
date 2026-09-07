@@ -58,6 +58,13 @@ pub trait Runtime {
     fn vertical_hint(&self) -> f32 {
         0.0
     }
+    /// Whether this creature would rather start inside an enclosure when
+    /// the user has never said either way. A web builder would: a web on
+    /// the open desktop hangs off whatever window edge it can find, which is
+    /// the feature, but not the first thing to show someone.
+    fn prefers_habitat(&self) -> bool {
+        false
+    }
 
     fn sim(&self) -> Option<&dyn Sim>;
     fn sim_mut(&mut self) -> Option<&mut dyn Sim>;

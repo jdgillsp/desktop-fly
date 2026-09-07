@@ -5,8 +5,9 @@
 `HABITAT_PLAN.md` (the enclosure, which is where webs start) and
 `PORT_PLAN.md` §6 (what may and may not be claimed about a creature).*
 
-**Status:** Phase 0 — the silk substrate — is built and verified (§9). Every
-later phase is planned, not started.
+**Status:** all seven phases built and verified on Windows, 2026-09-06 (§9).
+One design in §3.1 did not survive contact with the circuit and was
+replaced; §9.1 says what the seeds said and what was done instead.
 
 ## 0. TL;DR
 
@@ -116,9 +117,14 @@ the program, not the wiring. So:
   partners drive GF, and GF is escape. That is *correct* for a large
   vibration — an orb weaver hit by something big drops from the hub on its
   dragline — and wrong for a struggling fly. So the amplitude split is where
-  the one authored node lives: **`strike`**, a node with authored edges from
-  the mechanosensory population, that integrates *sustained, small-amplitude*
-  excitation and, above threshold, is the body's cue to go to the prey. Its
+  the one authored node lives: **`strike`**. *As first planned* it had
+  authored edges from the mechanosensory population and integrated their
+  sustained input. **That design was tried and dropped on 2026-09-06 —
+  §9.1.** As built, the strike node has **no synapses at all**: it is an
+  authored vibration *sense*, the stand-in for slit sensilla the fly
+  extract has no counterpart for, driven only by the modelled transduction,
+  on a 1 s membrane with its own threshold. A knock never touches it; it
+  goes through the measured wind pathway to GF as the data wires it. Its
   provenance is cool-coloured in the brain window exactly as `pounce` is.
 - **Localising the prey** — which radius, which gumfoot line — is a modelled
   readout of per-leg excitation, in the same category as the salticid's
@@ -330,7 +336,10 @@ line on a `Silk`; the shell draws whatever the silk holds. **Gate met:** the
 salticid's `--simtest --behaviortest` output and both its snapshots are
 byte-identical to the parent commit; the fly's likewise. §9 has the numbers.
 
-### Phase 1 — plumbing (3–4 days)
+*Phases 1–7 below were all built on 2026-09-06; each heading keeps its
+plan, and §9 records what was actually done and measured.*
+
+### Phase 1 — plumbing (3–4 days) — ✅ done 2026-09-06
 
 `arachnid.rs` leg rig extracted with the salticid byte-identical; the weaver
 circuit from the ETL with its in-degree report read (**gate:** in-circuit
@@ -340,7 +349,7 @@ already is for the fly, and the strike node's authored in-degree is reported);
 *Araneus* in the snapshot path **before** any program is written, to run the
 creep filter on the body alone.
 
-### Phase 2 — the orb weaver (6–8 days) — the shippable milestone
+### Phase 2 — the orb weaver (6–8 days) — the shippable milestone — ✅ done 2026-09-06
 
 `orb.rs` with the eight stages of §5.1; `weaverrt.rs`; vibration
 transduction; drop-and-climb on threat; prey by vibration; daily rebuild.
@@ -351,32 +360,32 @@ spider reaches the site along *that* radius within 2 s; a loom at the hub →
 GF → drop on the dragline, no snap on return; a cut through half the radii →
 repair or early rebuild; the program never writes a sim input.
 
-### Phase 3 — the gumfoot weaver (5–6 days)
+### Phase 3 — the gumfoot weaver (5–6 days) — ✅ done 2026-09-06
 
 `cobweb.rs` per §5.2, the snapping gumfoot line, additive nightly building.
 **Scenarios:** tangle exists before sheet; the spider returns to the retreat
 between tangle bouts; a bug on the floor touching a foot is lifted and caught;
 the web survives a day boundary and grows.
 
-### Phase 4 — the funnel weaver (5–6 days)
+### Phase 4 — the funnel weaver (5–6 days) — ✅ done 2026-09-06, with the source caveat in §9.2
 
 **Gate before coding:** a primary source for agelenid construction, cited in
 §12. Then `funnel.rs`, the rush, the thickening sheet. **Scenarios:** sheet
 density rises monotonically with crossings; strike → rush speed is the
 app-wide maximum and the return goes into the funnel; threat never drops.
 
-### Phase 5 — the salticid's retreat (2 days)
+### Phase 5 — the salticid's retreat (2 days) — ✅ done 2026-09-06
 
 §5.4. **Gate:** the salticid suite output changes only by the new scenario's
 lines; everything above them is byte-identical.
 
-### Phase 6 — free-roam anchors (3–4 days)
+### Phase 6 — free-roam anchors (3–4 days) — ✅ done 2026-09-06
 
 Ledges and screen edges as anchors; window movement as damage; the tray's
 habitat default per creature. **Scenario:** an orb spanning two ledges loses
 the threads on a ledge that moves, and only those.
 
-### Phase 7 — rendering and budget (3–4 days)
+### Phase 7 — rendering and budget (3–4 days) — ✅ done 2026-09-06, capsules kept (measured, §9.2)
 
 Line pipeline; excitation as a glow that travels; `--snapshot` for each
 weaver mid-build checked into `assets/`; a thirty-second run of the orb
@@ -422,6 +431,112 @@ weaver mid-capture-spiral at the 30 fps budget on the reference machine.
   from the habitat or from ledges (Phases 2 and 6). The silk has no consumer
   that lays more than one thread yet; the tests are what prove it can.
 
+### 9.1 The strike node, and what the seeds said
+
+The §3.1 design — authored edges from the fly's 16 mechanosensory partners
+onto a slow-membrane strike node — was built first and run across seeds.
+It failed in both directions, and not by a margin tuning could close:
+
+- **It inherited the partners' resting rate.** Those partners get random
+  baselines per neuron (`Baseline::Range`, as every `other` neuron does),
+  so at some seeds they rest loud and the strike node fired at 0.5–1.7 Hz
+  with nothing in the web; at others it was silent. The LIF's periodic
+  noise burst (every 15–40 s, six times the noise for 400 ms) reached it
+  at every seed once its membrane was 250 ms or longer.
+- **It inherited their coupling to the giant fiber.** The same partners
+  drive GF through the electrically boosted wind pathway, so any vibration
+  strong enough to work the strike node fired GF at some seeds too. The
+  measured wiring simply says a wind-neuron volley is an escape cue, and
+  no authored weight on a second target changes that.
+
+Weights of 20, 11, 9, 8, 12, 4 and 3 synapses and membranes of 250 ms and
+1 s were tried (the numbers are in the commit history). What was done
+instead is the honest reading of the failure: **the prey channel and the
+threat channel are different senses in a spider, and only the threat one
+exists in the extract.** So:
+
+- The strike node has **no synapses**. It is an authored *sensory* neuron —
+  a stand-in for slit sensilla — driven by a new simulator input,
+  `sim.vibration`, from the modelled transduction alone (`lif::VIBRATION_GAIN`
+  0.012 per ms at full drive).
+- It has a **1 s membrane and a threshold of 4** (`roles::STRIKE_TAU_MS`,
+  `STRIKE_THRESHOLD`), the first per-role overrides the simulator has; every
+  measured creature's override lists are empty and the fly is bit-identical.
+  With that membrane its own noise kicks hold it at ~1.1 ± 0.4 and the burst
+  adds ~1.8; 4 is clear of both, and a struggle at 0.8 rests it at 9.6.
+- Knocks — a click, a cursor lunge — go where they always went, through the
+  measured partners to GF.
+
+Measured over six seeds after the change (`dfcore --creature araneus
+--simtest --seed N`): strike silent through 12 s of rest at every seed;
+first strike spike 186–259 ms into a struggle, 6–7 spikes in 3 s; GF spikes
+during the struggle 0 at five seeds and 2 at one (its own spontaneous rate —
+the channel has no path to it, which the suite now asserts structurally);
+tap → GF at 8–10 ms; abrupt loom → GF at 4 ms.
+
+### 9.2 What was built, per phase
+
+- **Phase 1.** `arachnid.rs` (the leg rig; salticid byte-identical);
+  `Provenance::Chimera { procedural }` and its label test; `Weaver` creature
+  enum with three ids; `Substrate::WalkerWeaver` (a vivarium); the weaver
+  manifest without `escw` or `lc11`; `etl_weaver.py` — which reads the
+  fly's *shipped* extract rather than the raw Codex dumps, because the
+  dumps are not on this machine and every measured element is then
+  provably a row of `data/circuit.json`: 662 measured neurons, 17,922
+  measured edges, 1 authored neuron, 0 authored edges. The static glass
+  *Araneus* passed the creep filter as a small brown spider.
+- **Phase 2.** `orb.rs` and `weaver.rs`. A full orb in **287 s** of body
+  time under a steady walk drive: 35 radii, 799 capture segments, the
+  scaffold gone, the spider sitting head-down at the hub. Repair re-lays a
+  radius in ~5 s; twelve wide cuts through the capture zone trigger a
+  rebuild, which the spider does by taking the old web down thread by
+  thread. `weaverrt.rs` serves all three species; a fast cursor sweep cuts
+  silk, a slow pass stirs it.
+- **Phase 3.** `cobweb.rs`. Tangle before sheet; the spider goes home
+  between every bout (a `dwell` on a `Move`, added for this); four gumfoot
+  lines to the floor; a bug walking the floor into a foot is lifted and
+  caught; a night adds a tangle bout and two lines; a cut line is re-laid;
+  the retreat gone is the one thing that starts over.
+- **Phase 4.** `funnel.rs`. The gate was a primary source: Rojas (2011) is
+  it, and only its abstract and section titles are readable outside the
+  paywall. The program follows what they say — a funnel, then *two
+  alternating behaviours*, support threads and filling in the sheet,
+  *repeated over sessions* — and the shape of the filling path (a meander
+  toward the thinnest part of the sheet) is this program's own, said so in
+  the file. Sheet density rises monotonically; the rush peaks above 400
+  units/s; a threat sends it into the funnel and never drops it.
+- **Phase 5.** The salticid's retreat, in `spider.rs`: a corner passed
+  within 60 units while walking becomes the retreat (no random draw, so
+  the walk is bit-identical whether or not one is found); at the sleep
+  signal it walks home if within 320 units, spins a seven-attachment tent
+  the first time, and sleeps in it. The salticid suite gained exactly one
+  line and its count; everything above it is byte-identical.
+- **Phase 6.** `Weaver::choose_build_region`: an enclosure is used whole; on
+  the open desktop the web is a 560 × 440 box hung under the widest window
+  edge with room below it, or centred, never the whole screen. When that
+  edge moves or closes, the threads fixed on it — and only those — are
+  cut, and the program repairs or rebuilds. The weavers start in a
+  vivarium unless the user has ever set the habitat toggle
+  (`Runtime::prefers_habitat`).
+- **Phase 7.** Measured before deciding: a finished orb of 1,435 threads
+  costs **0.16 ms per frame** of geometry in release (2.85 ms in debug),
+  once the thread capsule is one cached unit mesh scaled per segment rather
+  than built afresh a thousand times a frame. The line pipeline is
+  therefore not built; the thread radius went from 0.22 to 0.45 so the web
+  does not alias into dust; excitation glows through `silk_color`. Live in
+  a vivarium the orb weaver held 29 fps at the 30 fps cap. Six snapshots
+  are in `assets/` (`windows-araneus.png` etc., glass and literal).
+
+### 9.3 Verification
+
+- `cargo test --workspace --exclude dfplatform`: 142 core tests, 12
+  ground-truth tests, 99 shell tests, all green.
+- Fly `--simtest --behaviortest`: byte-identical to before the work.
+- Salticid: byte-identical except the one added line and the summary count.
+- Weavers: all circuit checks pass on six seeds; 10/8/8 behaviour checks.
+- Fly and salticid snapshots byte-identical; weaver snapshots checked by eye
+  through the real camera and mesh builders, in and out of the vivarium.
+
 ## 10. Decisions taken 2026-09-06
 
 1. **Reading (B):** the web is the walked path.
@@ -441,6 +556,26 @@ weaver mid-capture-spiral at the 30 fps budget on the reference machine.
 9. **The salticid's dragline moves onto the silk model now** (Phase 0), so
    there is one line implementation, checked by byte identity, rather than
    two that drift.
+
+### Decisions taken later the same day, while building
+
+10. **The strike node is a synapse-free authored sense**, not a connective
+    (§9.1). The mechanosensory partners are the threat channel; the prey
+    channel does not exist in the extract and is not pretended to.
+11. **The simulator gains per-role `tau_ms` and `threshold` overrides**,
+    used by exactly one node. Every measured creature's lists are empty and
+    the fly's suite is byte-identical, which is the test.
+12. **The weaver circuit is derived from the shipped fly extract**, not the
+    raw dumps, so its provenance chain is one step and reproducible here.
+13. **Webs lie in the ground plane, in and out of the vivarium.** A
+    vertical orb strung between the tank's walls would need silk in three
+    dimensions; a horizontal orb reads as an orb, and the funnel and the
+    tangle are horizontal in life anyway. Lifting the web to mid-height
+    in the tank is a rendering decision left open.
+14. **Capsules stay** (Phase 7), because the measurement said the line
+    pipeline would buy nothing the budget needs.
+15. **The funnel weaver ships on the abstract of its primary source**, with
+    the inferred part named in the file and here, rather than not at all.
 
 ## 11. Risks
 
@@ -483,6 +618,14 @@ and §8 Phase 4 gates on fixing that.
   safety line: jump-stabilizing silk of salticids.* Journal of the Royal
   Society Interface 10: 20130572. — the dragline as an in-air stabiliser.
   https://royalsocietypublishing.org/doi/abs/10.1098/rsif.2013.0572
-- Agelenidae, family accounts (secondary; **not sufficient to code from**):
+- Rojas, A. (2011). *Sheet-web construction by Melpomene sp. (Araneae:
+  Agelenidae).* Journal of Arachnology 39(1): 189–193. — the primary source
+  for agelenid sheet building: two alternating behaviours, support threads
+  and filling in the sheet, over several sessions; sections on a bee-line
+  movement and a sheet-filling movement. Abstract and section titles read;
+  full text paywalled (§9.2, Phase 4).
+  https://bioone.org/journals/The-Journal-of-Arachnology/volume-39/issue-1/Hi10-34.1/
+- Agelenidae, family accounts (secondary): the funnel, the waiting posture,
+  the non-sticky entangling sheet, the speed of the rush.
   https://www.inaturalist.org/taxa/47345-Agelenidae ,
   https://en.wikipedia.org/wiki/Agelena
