@@ -41,12 +41,39 @@ use crate::transduction::Transduction;
 /// One frame's worth of geometry: the body, and the connectome inside it when
 /// the glass register is on.
 pub struct Geometry<'a> {
+    /// Animal vertex prefix, excluding silk and prey emitted after it.
+    pub inspection_vertices: Option<usize>,
     pub body: &'a Mesh,
     pub neurons: Option<&'a Mesh>,
 }
 
+/// Animal-only inspection points. Silk and prey follow the animal prefix;
+/// an optional radius selects a close detail such as the hognose head.
+pub fn inspection_points<'a>(
+    mesh: &'a Mesh,
+    at: Vec2,
+    radius: Option<f32>,
+    vertex_count: Option<usize>,
+    lift: f32,
+) -> impl Iterator<Item = [f32; 3]> + 'a {
+    mesh.verts
+        .iter()
+        .take(vertex_count.unwrap_or(mesh.verts.len()))
+        .filter(move |v| {
+            radius.is_none_or(|r| (v.pos[0] - at.x).powi(2) + (v.pos[1] - at.y).powi(2) <= r * r)
+        })
+        .map(move |v| [v.pos[0], v.pos[1], v.pos[2] + lift])
+}
+
 pub trait Runtime {
     fn creature(&self) -> &dyn Creature;
+    fn inspection_radius(&self) -> Option<f32> {
+        None
+    }
+    /// A tighter head/hood view where the runtime has an identifiable head.
+    fn head_inspection_radius(&self) -> Option<f32> {
+        None
+    }
     /// How this animal meets the world. Read off the *body*, which is where
     /// `Substrate` is defined, so there is no second answer to drift from it.
     /// Habitat mode is the first thing to branch on it: a swimmer gets water.
@@ -95,13 +122,20 @@ pub trait Runtime {
     /// Step the brain at 1 kHz and the body once. `region` is the world's
     /// edge — the display in free roam, the enclosure in habitat mode — and
     /// `attractor` is a prop worth going to look at, if there is one.
-    fn tick(
-        &mut self,
-        dt: f32,
-        region: Region,
-        cursor: Option<Vec2>,
-        attractor: Option<Vec2>,
-    );
+    fn tick(&mut self, dt: f32, region: Region, cursor: Option<Vec2>, attractor: Option<Vec2>);
+
+    /// Habitat activities are authored body behavior, separate from neural data.
+    fn habitat_tick(&mut self, dt: f32, h: &mut dfcore::Habitat, cursor: Option<Vec2>) {
+        self.tick(dt, h.region, cursor, h.target().map(|t| t.pos));
+    }
+    fn offer(&mut self, _at: Vec2) -> bool {
+        false
+    }
+    fn stop_interaction(&mut self) {}
+    fn care_state(&self) -> Option<f32> {
+        None
+    }
+    fn restore_care(&mut self, _value: f32) {}
 
     /// Build this frame's geometry from the current body state.
     fn build(&mut self, glass: bool) -> Geometry<'_>;
@@ -131,13 +165,18 @@ pub fn make(id: &str, seed: u64) -> Box<dyn Runtime> {
         "koi" => Box::new(crate::koirt::KoiRuntime::new(seed)),
         "hognose" => Box::new(crate::hognosert::HognoseRuntime::new(seed)),
         "sandworm" => Box::new(crate::sandwormrt::SandwormRuntime::new(seed)),
-        "araneus" => Box::new(crate::weaverrt::WeaverRuntime::new(dfcore::Weaver::Araneus, seed)),
-        "parasteatoda" => {
-            Box::new(crate::weaverrt::WeaverRuntime::new(dfcore::Weaver::Parasteatoda, seed))
-        }
-        "agelenopsis" => {
-            Box::new(crate::weaverrt::WeaverRuntime::new(dfcore::Weaver::Agelenopsis, seed))
-        }
+        "araneus" => Box::new(crate::weaverrt::WeaverRuntime::new(
+            dfcore::Weaver::Araneus,
+            seed,
+        )),
+        "parasteatoda" => Box::new(crate::weaverrt::WeaverRuntime::new(
+            dfcore::Weaver::Parasteatoda,
+            seed,
+        )),
+        "agelenopsis" => Box::new(crate::weaverrt::WeaverRuntime::new(
+            dfcore::Weaver::Agelenopsis,
+            seed,
+        )),
         _ => Box::new(FlyRuntime::new(seed)),
     }
 }
@@ -299,6 +338,7 @@ impl Runtime for FlyRuntime {
             }
         }
         Geometry {
+            inspection_vertices: None,
             body: &self.frame_mesh,
             neurons: if self.has_neurons {
                 Some(&self.neuron_mesh)
@@ -370,6 +410,20 @@ mod tests {
     use super::*;
     use dfcore::CREATURE_IDS;
 
+    #[test]
+    fn inspection_ignores_appended_web_and_retains_head_height() {
+        let mut mesh = Mesh::default();
+        for pos in [[1.0, 2.0, 8.0], [4.0, 2.0, 5.0], [100.0, 90.0, 0.0]] {
+            let mut v: crate::mesh::Vertex = bytemuck::Zeroable::zeroed();
+            v.pos = pos;
+            mesh.verts.push(v);
+        }
+        let animal: Vec<_> = inspection_points(&mesh, Vec2::ZERO, None, Some(2), 10.0).collect();
+        assert_eq!(animal, vec![[1.0, 2.0, 18.0], [4.0, 2.0, 15.0]]);
+        let head: Vec<_> = inspection_points(&mesh, Vec2::ZERO, Some(3.0), Some(2), 10.0).collect();
+        assert_eq!(head, vec![[1.0, 2.0, 18.0]]);
+    }
+
     /// The tray picker's contract, end to end: every listed creature builds a
     /// runtime, that runtime reports the id it was asked for, and it produces
     /// geometry. This is the code path `SelectCreature` takes, so a creature
@@ -397,7 +451,10 @@ mod tests {
                 "{id} rendered nothing"
             );
             assert!(
-                g.body.indices.iter().all(|&i| (i as usize) < g.body.verts.len()),
+                g.body
+                    .indices
+                    .iter()
+                    .all(|&i| (i as usize) < g.body.verts.len()),
                 "{id} produced out-of-range indices"
             );
 
@@ -523,10 +580,12 @@ mod tests {
             for hint in [0.0f32, 1.0] {
                 let lift = crate::habitatmesh::creature_lift(kind, hint);
                 let g = rt.build(false);
-                let (lo, hi) = g.body.verts.iter().map(|v| v.pos[2] + lift).fold(
-                    (f32::MAX, f32::MIN),
-                    |(a, b), z| (a.min(z), b.max(z)),
-                );
+                let (lo, hi) = g
+                    .body
+                    .verts
+                    .iter()
+                    .map(|v| v.pos[2] + lift)
+                    .fold((f32::MAX, f32::MIN), |(a, b), z| (a.min(z), b.max(z)));
                 assert!(
                     lo >= floor,
                     "{id} at hint {hint} sinks to {lo:.1}, below the tank floor {floor:.1}"

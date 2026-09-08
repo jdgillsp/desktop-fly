@@ -43,6 +43,7 @@ const AMBIENT_BUG_SECS: (f32, f32) = (35.0, 90.0);
 use dfcore::weaver::program_for;
 
 pub struct WeaverRuntime {
+    habitat: Option<dfcore::Habitat>,
     creature: Species,
     sim: Option<LifSim>,
     brain_points: Option<BrainPointsFile>,
@@ -74,6 +75,7 @@ impl WeaverRuntime {
         let mut rng = dfcore::rng::Pcg32::new(seed ^ 0x5e1f);
         let program = program_for(species, &dfcore::Anchors::enclosure(region), &mut rng);
         let mut rt = WeaverRuntime {
+            habitat: None,
             sim: None,
             brain_points: None,
             signals: SignalBuilder::new(),
@@ -98,10 +100,16 @@ impl WeaverRuntime {
         };
         match dfcore::data::load_for(rt.creature.data_dir()) {
             Ok(brain) => {
-                let mut sim =
-                    LifSim::with_params(&brain.circuit, seed, LifParams::default(), rt.creature.manifest());
+                let mut sim = LifSim::with_params(
+                    &brain.circuit,
+                    seed,
+                    LifParams::default(),
+                    rt.creature.manifest(),
+                );
                 sim.collect_spikes = true;
-                let authored = (0..sim.n).filter(|&i| sim.origin(i) == Origin::Authored).count();
+                let authored = (0..sim.n)
+                    .filter(|&i| sim.origin(i) == Origin::Authored)
+                    .count();
                 println!(
                     "{} ({}) - circuit {}n/{}e, {authored} authored neuron(s); web program: PROCEDURAL",
                     rt.creature.provenance().describe(),
@@ -113,7 +121,9 @@ impl WeaverRuntime {
                 rt.sim = Some(sim);
                 rt.brain_points = Some(brain.points);
             }
-            Err(e) => eprintln!("no weaver data ({e}) - run etl_weaver.py; the spider runs brainless"),
+            Err(e) => {
+                eprintln!("no weaver data ({e}) - run etl_weaver.py; the spider runs brainless")
+            }
         }
         rt
     }
@@ -149,7 +159,10 @@ impl WeaverRuntime {
         let s = self.scatter();
         let (at, vel) = if grounded {
             let x = region.center.x + (s * 2.0 - 1.0) * (hw - 30.0);
-            (Vec2::new(x, region.center.y - hh + 6.0), Vec2::new(if s < 0.5 { 30.0 } else { -30.0 }, 0.0))
+            (
+                Vec2::new(x, region.center.y - hh + 6.0),
+                Vec2::new(if s < 0.5 { 30.0 } else { -30.0 }, 0.0),
+            )
         } else {
             let side = (self.scatter() * 4.0) as u32;
             let along = self.scatter() * 2.0 - 1.0;
@@ -164,7 +177,10 @@ impl WeaverRuntime {
                 region.center.y + (self.scatter() - 0.5) * hh,
             );
             let d = hypot(to.x - at.x, to.y - at.y).max(1.0);
-            (at, Vec2::new((to.x - at.x) / d * 55.0, (to.y - at.y) / d * 55.0))
+            (
+                at,
+                Vec2::new((to.x - at.x) / d * 55.0, (to.y - at.y) / d * 55.0),
+            )
         };
         self.body.spawn_bug(at, vel, grounded);
     }
@@ -185,6 +201,20 @@ impl Runtime for WeaverRuntime {
     }
     fn prefers_habitat(&self) -> bool {
         true
+    }
+    fn habitat_changed(&mut self, habitat: Option<&dfcore::Habitat>) {
+        self.habitat = habitat.cloned();
+        let mode_changed = self.body.habitat_world.is_some() != habitat.is_some();
+        self.body.desktop_mode = habitat.is_none();
+        self.body.habitat_world = habitat.map(dfcore::Anchors::habitat);
+        if mode_changed {
+            self.body.build_region = None;
+        }
+    }
+    fn habitat_tick(&mut self, dt: f32, h: &mut dfcore::Habitat, cursor: Option<Vec2>) {
+        self.habitat = Some(h.clone());
+        self.body.habitat_world = Some(dfcore::Anchors::habitat(h));
+        self.tick(dt, h.region, cursor, h.target().map(|t| t.pos));
     }
     fn sim(&self) -> Option<&dyn Sim> {
         self.sim.as_ref().map(|s| s as &dyn Sim)
@@ -209,6 +239,21 @@ impl Runtime for WeaverRuntime {
     }
     fn scare(&mut self) {
         self.trans.trigger_scare();
+    }
+
+    fn offer(&mut self, at: Vec2) -> bool {
+        if self.body.prey.len() >= 3 {
+            return false;
+        }
+        self.body.spawn_bug(
+            at,
+            Vec2::new(18.0, 7.0),
+            self.creature.id() == "parasteatoda",
+        );
+        true
+    }
+    fn stop_interaction(&mut self) {
+        self.body.prey.clear();
     }
 
     fn sense(&mut self, env: &EnvSnapshot, dt: f32) {
@@ -289,20 +334,32 @@ impl Runtime for WeaverRuntime {
             signals = Some(s);
         }
         self.body.update(dt, region, cursor, signals);
+        crate::webspace::step(&mut self.body, self.habitat.as_ref(), dt);
         self.flash_spikes((-dt * 7.0).exp());
     }
 
     fn build(&mut self, glass: bool) -> Geometry<'_> {
+        crate::webspace::step(&mut self.body, self.habitat.as_ref(), 0.0);
         let pose = self.body.pose();
-        weaverbody::build_frame(&mut self.frame_mesh, &self.meshes, &self.body, &pose, glass);
+        let inspection_vertices =
+            weaverbody::build_frame(&mut self.frame_mesh, &self.meshes, &self.body, &pose, glass);
         self.has_neurons = false;
         if glass {
             if let Some(sim) = self.sim.as_ref() {
-                weaverbody::build_neuron_field(&mut self.neuron_mesh, sim, &self.body_flash, &self.body, &pose);
+                weaverbody::build_neuron_field(
+                    &mut self.neuron_mesh,
+                    sim,
+                    &self.body_flash,
+                    &self.body,
+                    &pose,
+                );
+                let count = self.neuron_mesh.verts.len();
+                crate::webspace::place_body(&mut self.neuron_mesh, count, &self.body);
                 self.has_neurons = true;
             }
         }
         Geometry {
+            inspection_vertices: Some(inspection_vertices),
             body: &self.frame_mesh,
             neurons: if self.has_neurons {
                 Some(&self.neuron_mesh)
@@ -313,12 +370,14 @@ impl Runtime for WeaverRuntime {
     }
 
     fn position(&self) -> Vec2 {
-        self.body.pos
+        self.body.spatial_pos.map_or(self.body.pos, |p| Vec2::new(p[0],p[1]))
     }
     fn place(&mut self, at: Vec2) {
         self.body.pos = at;
     }
     fn moved_display(&mut self, region: Region) {
+        self.body.spatial_pos = None;
+        self.body.navigation = None;
         // The anchors moved out from under the web: start over in the new
         // box. (Phase 6 makes this per-anchor.)
         self.region = region;
@@ -326,7 +385,8 @@ impl Runtime for WeaverRuntime {
         self.body.silk.clear();
         self.body.prey.clear();
         let mut rng = dfcore::rng::Pcg32::new(self.seed ^ 0x5e1f ^ (region.size.0 as u64));
-        self.body.program = program_for(self.creature, &dfcore::Anchors::enclosure(region), &mut rng);
+        self.body.program =
+            program_for(self.creature, &dfcore::Anchors::enclosure(region), &mut rng);
         // The body picks where in the new world the web goes on its next
         // frame (an enclosure whole, or a box under a window edge).
         self.body.build_region = None;
@@ -358,18 +418,24 @@ impl Runtime for WeaverRuntime {
         let mut frames = 0;
         while self.body.program.progress() < 0.8 && frames < 40_000 {
             self.body.update(1.0 / 60.0, region, None, Some(s));
+            crate::webspace::step(&mut self.body,self.habitat.as_ref(),1.0/60.0);
             frames += 1;
         }
         for _ in 0..walking_frames {
             self.body.update(1.0 / 60.0, region, None, Some(s));
+            crate::webspace::step(&mut self.body,self.habitat.as_ref(),1.0/60.0);
         }
+        for _ in 0..120 { crate::webspace::step(&mut self.body,self.habitat.as_ref(),1.0/60.0); }
         let at = self.body.pos;
         if let Some((t, _)) = self.body.silk.thread_near(
             Vec2::new(at.x + 60.0, at.y + 30.0),
             Some(dfcore::ThreadKind::Capture),
             40.0,
         ) {
-            let p = self.body.silk.point_on_thread(t, Vec2::new(at.x + 60.0, at.y + 30.0));
+            let p = self
+                .body
+                .silk
+                .point_on_thread(t, Vec2::new(at.x + 60.0, at.y + 30.0));
             self.body.spawn_bug(p, Vec2::ZERO, false);
             let n = self.body.prey.len() - 1;
             self.body.prey[n].stuck = true;

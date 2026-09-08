@@ -17,9 +17,9 @@
 use dfcore::{LifSim, Origin, ThreadKind, Weaver as Species, WeaverBody, WeaverPose, WeaverState};
 
 use crate::brain::AUTHORED_COLOR;
-use crate::flybody::{GlassPalette, NeuronLayout};
+use crate::flybody::{finish, setae, tapered_limb, GlassPalette, NeuronLayout};
 use crate::math::{self, Mat4};
-use crate::mesh::{self, Mesh, Vertex};
+use crate::mesh::{self, Material, Mesh, Vertex};
 
 const BUG_COLOR: [f32; 4] = [0.55, 0.55, 0.50, 0.9];
 const LINE_COLOR: [f32; 4] = [0.80, 0.85, 0.92, 0.55];
@@ -108,6 +108,9 @@ pub struct WeaverMeshes {
     look: Look,
     cephalothorax: Mesh,
     abdomen: Mesh,
+    abdomen_setae: Mesh,
+    head_setae: Mesh,
+    palp: Mesh,
     eye: Mesh,
     chelicera: Mesh,
     spinneret: Mesh,
@@ -127,17 +130,20 @@ impl WeaverMeshes {
             .iter()
             .map(|&(_, _, _, femur, tibia, tarsus)| {
                 [
-                    mesh::capsule(r, femur, 6, 8),
-                    mesh::capsule(r * 0.85, tibia, 6, 8),
-                    mesh::capsule(r * 0.65, tarsus, 6, 8),
+                    tapered_limb(r, femur, 0.20),
+                    tapered_limb(r * 0.85, tibia, 0.28),
+                    tapered_limb(r * 0.65, tarsus, 0.48),
                 ]
             })
             .collect();
         WeaverMeshes {
             look,
-            cephalothorax: mesh::sphere(look.ceph.0, 12, 16),
-            abdomen: mesh::sphere(look.abd.0, 24, 32),
-            eye: mesh::sphere(0.38, 6, 8),
+            cephalothorax: mesh::sphere(look.ceph.0, 36, 56),
+            abdomen: mesh::sphere(look.abd.0, 72, 96),
+            abdomen_setae: setae(look.abd.0, 410, 0.27),
+            head_setae: setae(look.ceph.0, 240, 0.22),
+            palp: mesh::capsule(0.20, 1.6, 5, 6),
+            eye: finish(mesh::sphere(0.38, 20, 28), Material::EYE),
             chelicera: mesh::capsule(0.38, 1.8, 6, 8),
             spinneret: mesh::capsule(0.22, 3.2, 5, 6),
             bug: mesh::sphere(0.85, 6, 8),
@@ -151,9 +157,22 @@ fn emit_painted(out: &mut Mesh, src: &Mesh, m: &Mat4, paint: impl Fn([f32; 3]) -
     let base = out.verts.len() as u32;
     for v in &src.verts {
         out.verts.push(Vertex {
+            texcoord: v.texcoord,
             pos: math::transform_point(m, v.pos),
-            normal: math::transform_dir(m, v.normal),
-            color: paint(v.pos),
+            normal: math::transform_normal(m, v.normal),
+            color: {
+                let mut c = paint(v.pos);
+                let p = v.pos;
+                let grain = 0.91
+                    + 0.09
+                        * ((p[0] * 19.1 + p[1] * 13.7).sin() * (p[2] * 21.3 - p[0] * 9.2).sin())
+                            .abs();
+                for k in 0..3 {
+                    c[k] *= grain;
+                }
+                c
+            },
+            material: v.material,
         });
     }
     out.indices.extend(src.indices.iter().map(|i| i + base));
@@ -168,9 +187,19 @@ fn emit(out: &mut Mesh, src: &Mesh, m: &Mat4, color: [f32; 4]) {
     let base = out.verts.len() as u32;
     for v in &src.verts {
         out.verts.push(Vertex {
+            texcoord: v.texcoord,
             pos: math::transform_point(m, v.pos),
-            normal: math::transform_dir(m, v.normal),
+            normal: math::transform_normal(m, v.normal),
             color,
+            material: if color == GlassPalette::SHELL
+                || color == GlassPalette::SHELL_DENSE
+                || color == GlassPalette::LIMB
+                || color == GlassPalette::WING
+            {
+                Material::GLASS
+            } else {
+                v.material
+            },
         });
     }
     out.indices.extend(src.indices.iter().map(|i| i + base));
@@ -189,7 +218,11 @@ fn root_of(pose: &WeaverPose) -> Mat4 {
 /// Thread colour by kind and excitation. The capture spiral is the one kind
 /// a viewer should be able to pick out; a vibrating thread glows.
 pub fn silk_color(kind: ThreadKind, excite: f32, glass: bool) -> [f32; 4] {
-    let base = if glass { LINE_COLOR } else { [0.78, 0.78, 0.74, 0.62] };
+    let base = if glass {
+        LINE_COLOR
+    } else {
+        [0.78, 0.78, 0.74, 0.62]
+    };
     let mut c = match kind {
         ThreadKind::Capture => [base[0], base[1] * 0.98, base[2], (base[3] * 1.35).min(1.0)],
         ThreadKind::Gumfoot => [base[0], base[1], base[2] * 0.9, (base[3] * 1.3).min(1.0)],
@@ -206,7 +239,13 @@ pub fn silk_color(kind: ThreadKind, excite: f32, glass: bool) -> [f32; 4] {
     c
 }
 
-pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: &WeaverPose, glass: bool) {
+pub fn build_frame(
+    out: &mut Mesh,
+    meshes: &WeaverMeshes,
+    w: &WeaverBody,
+    pose: &WeaverPose,
+    glass: bool,
+) -> usize {
     out.verts.clear();
     out.indices.clear();
     let look = &meshes.look;
@@ -222,12 +261,21 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
             GlassPalette::LIMB,
         )
     } else {
-        (look.body, look.abd_color, look.leg, [0.05, 0.05, 0.06, 1.0], look.band)
+        (
+            look.body,
+            look.abd_color,
+            look.leg,
+            [0.05, 0.05, 0.06, 1.0],
+            look.band,
+        )
     };
 
     // --- cephalothorax ---
     let head = math::mul(root, math::translate(0.0, 1.6, body_z));
-    let ceph_m = math::mul(head, math::scale(look.ceph.1[0], look.ceph.1[1], look.ceph.1[2]));
+    let ceph_m = math::mul(
+        head,
+        math::scale(look.ceph.1[0], look.ceph.1[1], look.ceph.1[2]),
+    );
     if glass || w.species != Species::Agelenopsis {
         emit(out, &meshes.cephalothorax, &ceph_m, c_body);
     } else {
@@ -242,6 +290,9 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
                 c_body
             }
         });
+    }
+    if !glass {
+        emit(out, &meshes.head_setae, &ceph_m, look.band);
     }
     // Eight small eyes in two rows; the front-middle pair a touch larger.
     let ry = look.ceph.0 * look.ceph.1[1];
@@ -262,17 +313,36 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
         emit(
             out,
             &meshes.eye,
-            &math::mul(head, math::mul(math::translate(*x, ry * *y, *z), math::scale(*s, *s, *s))),
+            &math::mul(
+                head,
+                math::mul(math::translate(*x, ry * *y, *z), math::scale(*s, *s, *s)),
+            ),
             c_eye,
         );
     }
     for side in [-1.0f32, 1.0] {
         emit(
             out,
+            &meshes.palp,
+            &math::mul(
+                head,
+                math::trs(
+                    [side * 1.0, ry * 1.05, -0.55],
+                    [0.15, 0.0, -side * 0.3],
+                    [1.0; 3],
+                ),
+            ),
+            c_leg,
+        );
+        emit(
+            out,
             &meshes.chelicera,
             &math::mul(
                 head,
-                math::mul(math::translate(side * 0.55, ry * 0.95, -1.1), math::rotate_x(0.35)),
+                math::mul(
+                    math::translate(side * 0.55, ry * 0.95, -1.1),
+                    math::rotate_x(0.35),
+                ),
             ),
             c_chel,
         );
@@ -303,17 +373,35 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
                 // a bar across the front third.
                 Species::Araneus => {
                     let d = |cx: f32, cy: f32| ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
-                    let dots = [(0.0, 0.55), (0.0, 0.25), (0.0, -0.05), (0.0, -0.35), (-0.32, 0.22), (0.32, 0.22), (-0.2, 0.42), (0.2, 0.42)];
-                    if dots.iter().any(|&(cx, cy)| d(cx, cy) < 0.11) {
+                    let dots = [
+                        (0.0, 0.55),
+                        (0.0, 0.25),
+                        (0.0, -0.05),
+                        (0.0, -0.35),
+                        (-0.32, 0.22),
+                        (0.32, 0.22),
+                        (-0.2, 0.42),
+                        (0.2, 0.42),
+                    ];
+                    if dots
+                        .iter()
+                        .any(|&(cx, cy)| d(cx, cy) < 0.095 + 0.017 * (x * 73.0 + y * 51.0).sin())
+                    {
                         mark
                     } else {
-                        c_abd
+                        // Scalloped dark folium surrounds the cross, with warm outer flanks.
+                        let edge = 0.48 + 0.10 * (y * 16.0).cos();
+                        if x.abs() < edge {
+                            [0.34, 0.22, 0.13, 1.0]
+                        } else {
+                            c_abd
+                        }
                     }
                 }
                 // Chevrons: dark bands that bow toward the rear.
                 Species::Parasteatoda => {
                     let v = y + 0.35 * x.abs();
-                    let f = (v * 7.0).fract();
+                    let f = (v * 5.0).rem_euclid(1.0);
                     if (0.0..0.28).contains(&f) && x.abs() < 0.7 {
                         mark
                     } else {
@@ -324,7 +412,7 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
                 Species::Agelenopsis => {
                     if x.abs() < 0.22 {
                         [0.66, 0.58, 0.44, 1.0]
-                    } else if x.abs() < 0.5 {
+                    } else if x.abs() < 0.5 || ((y + 0.5 * x.abs()) * 5.0).rem_euclid(1.0) < 0.18 {
                         mark
                     } else {
                         c_abd
@@ -332,6 +420,9 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
                 }
             }
         });
+    }
+    if !glass {
+        emit(out, &meshes.abdomen_setae, &abd_m, look.band);
     }
     if look.spinnerets {
         for side in [-1.0f32, 1.0] {
@@ -355,7 +446,11 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
     for (i, leg) in w.legs.iter().enumerate() {
         let (ax, ayy, yaw_off, femur, tibia, tarsus) = look.legs[leg.rank];
         let side = leg.side;
-        let base_yaw = if side > 0.0 { yaw_off } else { std::f32::consts::PI - yaw_off };
+        let base_yaw = if side > 0.0 {
+            yaw_off
+        } else {
+            std::f32::consts::PI - yaw_off
+        };
         let lift = pose.legs[i].1 - 0.30 * pose.crouch;
         let angle = pose.legs[i].0;
         let leg_root = math::mul(
@@ -367,7 +462,10 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
             ),
         );
         let segs = &meshes.leg_segments[leg.rank];
-        let femur_m = math::mul(leg_root, math::mul(math::translate(femur / 2.0, 0.0, 0.0), lie_along_x));
+        let femur_m = math::mul(
+            leg_root,
+            math::mul(math::translate(femur / 2.0, 0.0, 0.0), lie_along_x),
+        );
         if glass {
             emit(out, &segs[0], &femur_m, c_leg);
         } else {
@@ -375,9 +473,16 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
         }
         let knee = math::mul(
             leg_root,
-            math::trs([femur, 0.0, 0.0], [0.0, 0.85 + 0.25 * pose.crouch, -0.22 * side], [1.0; 3]),
+            math::trs(
+                [femur, 0.0, 0.0],
+                [0.0, 0.85 + 0.25 * pose.crouch, -0.22 * side],
+                [1.0; 3],
+            ),
         );
-        let tibia_m = math::mul(knee, math::mul(math::translate(tibia / 2.0, 0.0, 0.0), lie_along_x));
+        let tibia_m = math::mul(
+            knee,
+            math::mul(math::translate(tibia / 2.0, 0.0, 0.0), lie_along_x),
+        );
         if glass {
             emit(out, &segs[1], &tibia_m, c_leg);
         } else {
@@ -390,12 +495,32 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
         emit(
             out,
             &segs[2],
-            &math::mul(ankle, math::mul(math::translate(tarsus / 2.0, 0.0, 0.0), lie_along_x)),
+            &math::mul(
+                ankle,
+                math::mul(math::translate(tarsus / 2.0, 0.0, 0.0), lie_along_x),
+            ),
             c_leg,
         );
     }
 
+    let inspection_vertices = out.verts.len();
+    crate::webspace::place_body(out, inspection_vertices, w);
+
     // --- silk: every thread, and the line in progress ---
+    if let Some(spider) = w.spatial_pos {
+        for (a,b,kind,excite) in w.silk.spatial_segments(spider) {
+            let len = ((b[0]-a[0]).powi(2)+(b[1]-a[1]).powi(2)+(b[2]-a[2]).powi(2)).sqrt();
+            if len < 0.1 { continue; }
+            let color = silk_color(kind,excite,glass);
+            let at = |u: f32| {
+                std::array::from_fn(|k| a[k]+(b[k]-a[k])*u)
+            };
+            crate::habitatmesh::silk_tube(out,at(0.0),at(1.0),0.16,5,false,color);
+        }
+        if let Some(a)=w.navigation.as_ref().and_then(|n|n.safety_anchor) {
+            crate::habitatmesh::silk_tube(out,a,spider,0.12,5,false,silk_color(ThreadKind::Dragline,0.0,glass));
+        }
+    } else {
     for seg in w.silk.segments(pose.pos) {
         let dx = seg.b.x - seg.a.x;
         let dy = seg.b.y - seg.a.y;
@@ -412,39 +537,58 @@ pub fn build_frame(out: &mut Mesh, meshes: &WeaverMeshes, w: &WeaverBody, pose: 
                     math::scale(1.0, len, 1.0),
                 ),
             );
-            emit(out, &meshes.line, &m, silk_color(seg.kind, seg.excite, glass));
+            emit(
+                out,
+                &meshes.line,
+                &m,
+                silk_color(seg.kind, seg.excite, glass),
+            );
         }
     }
 
+    }
     // --- bugs: three drifting points each; a stuck one shivers in place ---
     for b in &w.prey {
+        let at = if w.spatial_pos.is_some() { w.silk.spatial_at(b.pos).unwrap_or([b.pos.x,b.pos.y,3.0]) }
+            else { [b.pos.x,b.pos.y,3.0] };
         let t = b.age * 9.0;
         let spread = if b.stuck { 0.8 + 1.4 * b.struggle } else { 2.2 };
         for k in 0..3 {
             let ph = t + k as f32 * 2.1;
             let m = math::translate(
-                b.pos.x + ph.cos() * spread,
-                b.pos.y + (ph * 1.3).sin() * spread,
-                3.0 + (ph * 0.7).sin() * 0.8,
+                at[0] + ph.cos() * spread,
+                at[1] + (ph * 1.3).sin() * spread,
+                at[2] + (ph * 0.7).sin() * 0.8,
             );
             emit(out, &meshes.bug, &m, BUG_COLOR);
         }
     }
 
     if pose.state == WeaverState::Sleeping {
-        for v in out.verts.iter_mut() {
+        for v in out.verts.iter_mut().take(inspection_vertices) {
             v.pos[2] -= 0.5;
         }
     }
+    inspection_vertices
 }
 
 /// The circuit inside the glass body; the authored strike node cool and
 /// larger, as in the brain window.
-pub fn build_neuron_field(out: &mut Mesh, sim: &LifSim, flash: &[f32], w: &WeaverBody, pose: &WeaverPose) {
+pub fn build_neuron_field(
+    out: &mut Mesh,
+    sim: &LifSim,
+    flash: &[f32],
+    w: &WeaverBody,
+    pose: &WeaverPose,
+) {
     out.verts.clear();
     out.indices.clear();
     let root = root_of(pose);
-    let mood = if w.state == WeaverState::Sleeping { 0.45 } else { 1.0 };
+    let mood = if w.state == WeaverState::Sleeping {
+        0.45
+    } else {
+        1.0
+    };
     let body_z = BODY_Z - 2.0 * pose.crouch;
     let look = Look::of(w.species);
     let (ar, asc, ay) = look.abd;
@@ -479,12 +623,15 @@ pub fn build_neuron_field(out: &mut Mesh, sim: &LifSim, flash: &[f32], w: &Weave
         let b = out.verts.len() as u32;
         for (dx, dy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             out.verts.push(Vertex {
+                texcoord: [0.0; 4],
                 pos: [centre[0] + dx * radius, centre[1] + dy * radius, centre[2]],
                 normal: [0.0, 0.0, 1.0],
                 color: col,
+                material: Material::MATTE,
             });
         }
-        out.indices.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+        out.indices
+            .extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
     }
 }
 
@@ -504,7 +651,10 @@ mod tests {
                 build_frame(&mut m, &meshes, &w, &w.pose(), glass);
                 assert!(m.indices.iter().all(|&i| (i as usize) < m.verts.len()));
                 let capsule_verts = mesh::capsule(0.4, 5.0, 6, 8).verts.len();
-                assert!(m.verts.len() > 24 * capsule_verts / 2, "{sp:?} has too little leg geometry");
+                assert!(
+                    m.verts.len() > 24 * capsule_verts / 2,
+                    "{sp:?} has too little leg geometry"
+                );
             }
         }
     }
@@ -542,7 +692,11 @@ mod tests {
             w.update(1.0 / 60.0, tank, None, Some(s));
             t += 1.0 / 60.0;
         }
-        assert!(w.silk.threads.len() > 800, "{} threads", w.silk.threads.len());
+        assert!(
+            w.silk.threads.len() > 800,
+            "{} threads",
+            w.silk.threads.len()
+        );
         let meshes = WeaverMeshes::build(Species::Araneus);
         let mut m = Mesh::default();
         let start = std::time::Instant::now();
@@ -556,7 +710,10 @@ mod tests {
             m.verts.len(),
             per_frame
         );
-        assert!(per_frame < 20.0, "{per_frame:.1} ms per frame is over budget");
+        assert!(
+            per_frame < 20.0,
+            "{per_frame:.1} ms per frame is over budget"
+        );
     }
 
     #[test]

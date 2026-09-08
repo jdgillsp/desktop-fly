@@ -27,6 +27,7 @@ use dfcore::{
     circadian_activity, BrainSignals, Creature, EnvSnapshot, Habituation, HognoseBody, Sim, Vec2,
 };
 
+use crate::hognoseasset::HognoseAsset;
 use crate::hognosebody;
 use crate::mesh::Mesh;
 use crate::runtime::{Geometry, Runtime};
@@ -39,6 +40,7 @@ pub struct HognoseRuntime {
     snake: HognoseBody,
     habituation: Habituation,
     frame_mesh: Mesh,
+    authored_skin: Option<&'static HognoseAsset>,
 
     prev_cursor: Option<Vec2>,
     threat: f32,
@@ -51,6 +53,8 @@ pub struct HognoseRuntime {
     pending_tempo: f32,
     pending_sleepy: bool,
     activity: f32,
+    body_warmth: f32,
+    seek_warm: bool,
 }
 
 impl HognoseRuntime {
@@ -69,6 +73,17 @@ impl HognoseRuntime {
             snake: HognoseBody::new(Vec2::ZERO, seed),
             habituation: Habituation::new(),
             frame_mesh: Mesh::default(),
+            authored_skin: if std::env::var_os("DESKTOPFLY_PROCEDURAL_HOGNOSE").is_some() {
+                None
+            } else {
+                match HognoseAsset::embedded() {
+                    Ok(asset) => Some(asset),
+                    Err(error) => {
+                        eprintln!("Authored hognose unavailable; using procedural skin: {error}");
+                        None
+                    }
+                }
+            },
             prev_cursor: None,
             threat: 0.0,
             threat_ema: 0.0,
@@ -78,6 +93,8 @@ impl HognoseRuntime {
             pending_tempo: 1.0,
             pending_sleepy: false,
             activity: 1.0,
+            body_warmth: 0.5,
+            seek_warm: true,
         }
     }
 
@@ -171,7 +188,11 @@ impl Runtime for HognoseRuntime {
             }
         }
 
-        let rate = if self.threat > self.threat_ema { 16.0 } else { 2.0 };
+        let rate = if self.threat > self.threat_ema {
+            16.0
+        } else {
+            2.0
+        };
         self.threat_ema += (self.threat - self.threat_ema) * (rate * dt).min(1.0);
 
         self.habituation.step(dt, self.threat, 0.0);
@@ -194,12 +215,63 @@ impl Runtime for HognoseRuntime {
         self.snake.step(dt, &drives, &world);
     }
 
+    fn habitat_tick(&mut self, dt: f32, h: &mut dfcore::Habitat, cursor: Option<Vec2>) {
+        // Normalised, authored thermal inertia; never infer tank heat from CPU load.
+        let heated = h.warm_end.unwrap_or(0);
+        let heating = h.warm_end.is_some() || (7.0..21.0).contains(&h.local_hour());
+        let hides: Vec<_> = h
+            .props
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.kind == dfcore::PropKind::Hide)
+            .collect();
+        let warmth = hides
+            .iter()
+            .find(|(_, p)| p.variant == heated)
+            .map(|(_, p)| {
+                (1.0 - self.snake.pos.dist(p.pos) / (h.region.size.0 * 0.7)).clamp(0.15, 0.9)
+            })
+            .unwrap_or(0.3)
+            * if heating { 1.0 } else { 0.45 };
+        self.body_warmth += (warmth - self.body_warmth) * (dt / 45.0).min(1.0);
+        if self.body_warmth < 0.4 {
+            self.seek_warm = true;
+        }
+        if self.body_warmth > 0.65 {
+            self.seek_warm = false;
+        }
+        let variant = if self.seek_warm { heated } else { 1 - heated };
+        let target = hides
+            .iter()
+            .find(|(_, p)| p.variant == variant)
+            .or_else(|| hides.first())
+            .map(|(_, p)| p.pos);
+        if self.snake.state == dfcore::HognoseState::Slither {
+            self.snake.heading +=
+                h.obstacle_turn(self.snake.pos, self.snake.heading, 12.0) * dt * 2.0;
+        }
+        self.pending_tempo = 0.75 + self.body_warmth * 0.5;
+        self.tick(dt, h.region, cursor, target);
+        if self.snake.buried < 0.5 && self.snake.speed > 1.0 {
+            h.track(self.snake.pos);
+        }
+    }
+
     fn build(&mut self, glass: bool) -> Geometry<'_> {
-        hognosebody::build_frame(&mut self.frame_mesh, &self.snake, glass);
+        if let Some(asset) = self.authored_skin.filter(|_| !glass) {
+            asset.build_frame(&mut self.frame_mesh, &self.snake);
+        } else {
+            hognosebody::build_frame(&mut self.frame_mesh, &self.snake, glass);
+        }
         Geometry {
+            inspection_vertices: None,
             body: &self.frame_mesh,
             neurons: None,
         }
+    }
+
+    fn head_inspection_radius(&self) -> Option<f32> {
+        Some(6.0)
     }
 
     fn position(&self) -> Vec2 {
@@ -232,7 +304,7 @@ impl Runtime for HognoseRuntime {
         )
     }
 
-    fn snapshot_pose(&mut self, _alt: f32, frames: u32, region: Region) {
+    fn snapshot_pose(&mut self, alt: f32, frames: u32, region: Region) {
         // Slither for a moment, then bluff: the hood is the pose that says
         // "hognose" rather than "rope".
         let drives = BrainSignals::new();
@@ -247,6 +319,9 @@ impl Runtime for HognoseRuntime {
         for _ in 0..frames.max(30) {
             self.snake.step(1.0 / 60.0, &drives, &world);
         }
+        if alt < 0.0 {
+            return;
+        } // Diagnostic calm pose, before the bluff.
         let ahead = Vec2::new(
             self.snake.pos.x + self.snake.heading.cos() * 80.0,
             self.snake.pos.y + self.snake.heading.sin() * 80.0,
@@ -306,7 +381,10 @@ mod tests {
             calm.tick(dt, bounds, None, None);
         }
         assert!(
-            !matches!(calm.snake.state, HognoseState::Bluff | HognoseState::PlayDead),
+            !matches!(
+                calm.snake.state,
+                HognoseState::Bluff | HognoseState::PlayDead
+            ),
             "a cursor resting well away should not alarm it: {:?}",
             calm.snake.state
         );
@@ -347,7 +425,11 @@ mod tests {
             dead |= rt.snake.state == HognoseState::PlayDead;
             let _ = pass;
         }
-        assert!(dead, "two lunges should exhaust the bluff: {:?}", rt.snake.state);
+        assert!(
+            dead,
+            "two lunges should exhaust the bluff: {:?}",
+            rt.snake.state
+        );
     }
 
     #[test]
@@ -364,7 +446,10 @@ mod tests {
             bluffed |= rt.snake.state == HognoseState::Bluff;
             x -= 20.0;
         }
-        assert!(!bluffed, "a habituated snake should tolerate the same approach");
+        assert!(
+            !bluffed,
+            "a habituated snake should tolerate the same approach"
+        );
     }
 
     #[test]

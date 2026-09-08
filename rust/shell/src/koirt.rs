@@ -27,11 +27,11 @@
 //! startle drive, so the fish that bolted from your cursor on day one only
 //! flicks its tail by the end of the week.
 
-use dfcore::Region;
 use dfcore::creature::{Body, World};
 use dfcore::data::BrainPointsFile;
 use dfcore::env::thermal_tempo;
 use dfcore::util::{clamp, hypot};
+use dfcore::Region;
 use dfcore::{
     circadian_activity, BrainSignals, Creature, EnvSnapshot, Habituation, KoiBody, Sim, Vec2,
 };
@@ -67,6 +67,8 @@ pub struct KoiRuntime {
     /// Circadian activity, 0..1: koi are markedly less active when it is cold
     /// and dark, which is a real and well-known thing about the animal.
     activity: f32,
+    appetite: f32,
+    meal_pause: f32,
 }
 
 impl KoiRuntime {
@@ -93,6 +95,8 @@ impl KoiRuntime {
             pending_tempo: 1.0,
             pending_sleepy: false,
             activity: 1.0,
+            appetite: 0.7,
+            meal_pause: 0.0,
         }
     }
 
@@ -192,7 +196,11 @@ impl Runtime for KoiRuntime {
 
         // Rise fast, fall slow: a startle should not be cancelled by the
         // cursor happening to stop for one frame.
-        let rate = if self.threat > self.threat_ema { 18.0 } else { 2.2 };
+        let rate = if self.threat > self.threat_ema {
+            18.0
+        } else {
+            2.2
+        };
         self.threat_ema += (self.threat - self.threat_ema) * (rate * dt).min(1.0);
 
         // The same habituation every other creature uses, on the same
@@ -220,9 +228,47 @@ impl Runtime for KoiRuntime {
         self.koi.step(dt, &drives, &world);
     }
 
+    fn habitat_tick(&mut self, dt: f32, h: &mut dfcore::Habitat, cursor: Option<Vec2>) {
+        // Compressed simulation timing, not a husbandry feeding schedule.
+        self.pending_tempo = 1.0; // aquarium water is not the CPU
+        self.appetite = (self.appetite + dt / 600.0).min(1.0);
+        self.meal_pause = (self.meal_pause - dt).max(0.0);
+        let target = h.target().filter(|t| t.kind == dfcore::PropKind::Food);
+        let willing = self.appetite > 0.25
+            && self.meal_pause == 0.0
+            && self.threat_ema < 0.18
+            && !self.pending_sleepy
+            && !self.forced_startle;
+        let meal = target.filter(|_| willing);
+        if let Some(t) = meal {
+            self.koi.seek_surface_food(t.pos);
+        }
+        self.tick(dt, h.region, cursor, meal.map(|t| t.pos));
+        if let Some(t) = meal {
+            if matches!(
+                self.koi.state,
+                dfcore::KoiState::Cruise | dfcore::KoiState::Hover
+            ) && h.consume(t, self.koi.pos, self.koi.depth)
+            {
+                self.appetite = (self.appetite - 0.28).max(0.0);
+                self.meal_pause = 6.0;
+                self.koi.feeding = 1.0;
+            }
+        }
+    }
+    fn care_state(&self) -> Option<f32> {
+        Some(self.appetite)
+    }
+    fn restore_care(&mut self, value: f32) {
+        if value.is_finite() {
+            self.appetite = value.clamp(0.0, 1.0);
+        }
+    }
+
     fn build(&mut self, glass: bool) -> Geometry<'_> {
         koibody::build_frame(&mut self.frame_mesh, &self.koi, glass);
         Geometry {
+            inspection_vertices: None,
             body: &self.frame_mesh,
             // Nothing to show inside: there is no connectome. An empty glass
             // fish is the honest rendering.
@@ -249,8 +295,15 @@ impl Runtime for KoiRuntime {
 
     fn status(&self) -> String {
         format!(
-            "{:?} pos ({:.0},{:.0}) speed {:.0} depth {:.2}",
-            self.koi.state, self.koi.pos.x, self.koi.pos.y, self.koi.speed, self.koi.depth
+            "{:?} | depth {:.0}% | appetite {:.0}%{}",
+            self.koi.state,
+            self.koi.depth * 100.0,
+            self.appetite * 100.0,
+            if self.meal_pause > 0.0 {
+                " | feeding"
+            } else {
+                ""
+            }
         )
     }
 
@@ -275,6 +328,51 @@ impl Runtime for KoiRuntime {
 mod tests {
     use super::*;
     use dfcore::KoiState;
+
+    fn meal() -> (KoiRuntime, dfcore::Habitat) {
+        let mut rt = KoiRuntime::new(7);
+        rt.koi.pos = Vec2::ZERO;
+        rt.koi.depth = 0.96;
+        let mut h = dfcore::Habitat::new(
+            dfcore::HabitatKind::Pond,
+            Region::centered((600.0, 420.0)),
+            7,
+        );
+        h.props.retain(|p| p.kind == dfcore::PropKind::Food);
+        h.props[0].pos = Vec2::ZERO;
+        h.focus = Some(0);
+        (rt, h)
+    }
+    #[test]
+    fn surface_meal_changes_appetite_and_emits_feedback() {
+        let (mut rt, mut h) = meal();
+        rt.habitat_tick(1.0 / 60.0, &mut h, None);
+        assert!(!h.props[0].present());
+        assert!(rt.appetite < 0.5);
+        assert!(rt.koi.feeding > 0.0);
+        assert!(!h.ripples.is_empty());
+    }
+    #[test]
+    fn food_is_refused_when_sated_sleepy_or_frightened() {
+        for reason in 0..3 {
+            let (mut rt, mut h) = meal();
+            match reason {
+                0 => rt.appetite = 0.1,
+                1 => rt.pending_sleepy = true,
+                _ => rt.forced_startle = true,
+            }
+            rt.habitat_tick(1.0 / 60.0, &mut h, None);
+            assert!(h.props[0].present());
+        }
+    }
+    #[test]
+    fn a_fish_below_the_pellet_must_rise_before_eating() {
+        let (mut rt, mut h) = meal();
+        rt.koi.depth = 0.2;
+        rt.habitat_tick(1.0 / 60.0, &mut h, None);
+        assert!(h.props[0].present());
+        assert!(rt.koi.depth > 0.2 && rt.koi.depth < 0.3);
+    }
 
     fn env_with_cursor(at: Vec2, hour: f32) -> EnvSnapshot {
         EnvSnapshot {
@@ -360,7 +458,10 @@ mod tests {
             darted |= rt.koi.state == KoiState::Dart;
             x -= 26.0;
         }
-        assert!(!darted, "a habituated koi should tolerate the same approach");
+        assert!(
+            !darted,
+            "a habituated koi should tolerate the same approach"
+        );
     }
 
     #[test]

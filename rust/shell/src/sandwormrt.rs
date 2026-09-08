@@ -51,6 +51,8 @@ pub struct SandwormRuntime {
     beats: VecDeque<(f32, Vec2)>,
     /// The rhythm's strength this poll, 0..1, and where it is.
     thumper: f32,
+    placed_thumper: Option<Vec2>,
+    expedition: Option<crate::habitatmesh::fremen::Expedition>,
     thumper_at: Option<Vec2>,
     /// Smoothed, so a single missed beat does not lose the worm.
     thumper_ema: f32,
@@ -82,6 +84,8 @@ impl SandwormRuntime {
             frame_mesh: Mesh::default(),
             beats: VecDeque::new(),
             thumper: 0.0,
+            placed_thumper: None,
+            expedition: None,
             thumper_at: None,
             thumper_ema: 0.0,
             tread: VecDeque::new(),
@@ -114,7 +118,8 @@ impl SandwormRuntime {
         if !(0.15..=2.5).contains(&mean) {
             return (0.0, None);
         }
-        let var = intervals.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / intervals.len() as f32;
+        let var =
+            intervals.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / intervals.len() as f32;
         let cv = var.sqrt() / mean;
         let regularity = clamp(1.0 - cv * 2.5, 0.0, 1.0);
         let n = self.beats.len() as f32;
@@ -191,16 +196,44 @@ impl Runtime for SandwormRuntime {
     /// sandworm. The body is told where it is; on the open desktop there is
     /// no water anywhere.
     fn habitat_changed(&mut self, habitat: Option<&dfcore::Habitat>) {
+        if let Some(h) = habitat.filter(|h| h.kind == dfcore::HabitatKind::SandTerrarium) {
+            if self.expedition.is_none() {
+                self.expedition = Some(crate::habitatmesh::fremen::Expedition::new(h.region));
+            }
+        } else {
+            self.expedition = None;
+            self.worm.obstacles.clear();
+        }
         self.worm.hazard = habitat
             .filter(|h| h.kind == dfcore::HabitatKind::SandTerrarium)
             .map(|h| crate::habitatmesh::terrarium::water_dish(&h.region));
+    }
+
+    fn offer(&mut self, at: Vec2) -> bool {
+        if let Some(e) = &mut self.expedition { e.cancel(); }
+        self.placed_thumper = Some(at);
+        true
+    }
+    fn stop_interaction(&mut self) {
+        if let Some(e) = &mut self.expedition { e.cancel(); }
+        self.placed_thumper = None;
+        self.beats.clear();
+        self.tread.clear();
+        self.thumper = 0.0;
+        self.thumper_ema = 0.0;
+        self.thumper_at = None;
     }
 
     fn sense(&mut self, env: &EnvSnapshot, dt: f32) {
         for b in self.beats.iter_mut() {
             b.0 += dt;
         }
-        while self.beats.front().map(|b| b.0 > RHYTHM_WINDOW).unwrap_or(false) {
+        while self
+            .beats
+            .front()
+            .map(|b| b.0 > RHYTHM_WINDOW)
+            .unwrap_or(false)
+        {
             self.beats.pop_front();
         }
         for c in &env.clicks {
@@ -213,7 +246,12 @@ impl Runtime for SandwormRuntime {
         for t in self.tread.iter_mut() {
             t.0 += dt;
         }
-        while self.tread.front().map(|t| t.0 > TREAD_WINDOW).unwrap_or(false) {
+        while self
+            .tread
+            .front()
+            .map(|t| t.0 > TREAD_WINDOW)
+            .unwrap_or(false)
+        {
             self.tread.pop_front();
         }
         if let Some(m) = env.cursor {
@@ -236,7 +274,11 @@ impl Runtime for SandwormRuntime {
         } else {
             self.prev_cursor = None;
         }
-        let rate = if self.thumper > self.thumper_ema { 4.0 } else { 0.6 };
+        let rate = if self.thumper > self.thumper_ema {
+            4.0
+        } else {
+            0.6
+        };
         self.thumper_ema += (self.thumper - self.thumper_ema) * (rate * dt).min(1.0);
 
         // A worm does not learn to fear you; there is nothing to habituate.
@@ -250,10 +292,18 @@ impl Runtime for SandwormRuntime {
     }
 
     fn tick(&mut self, dt: f32, region: Region, cursor: Option<Vec2>, attractor: Option<Vec2>) {
+        if let Some(at) = self.placed_thumper {
+            self.thumper_at = Some(at);
+            self.thumper_ema += (1.0 - self.thumper_ema) * (dt * 3.0).min(1.0);
+        }
         let drives = self.drives();
         // The thumper is the attractor while it is going; otherwise whatever
         // the enclosure offers.
-        let lure = if drives.pursuit > 0.2 { self.thumper_at } else { None };
+        let lure = if drives.pursuit > 0.2 {
+            self.thumper_at
+        } else {
+            None
+        };
         let world = World {
             region,
             ledges: Vec::new(),
@@ -262,6 +312,7 @@ impl Runtime for SandwormRuntime {
         };
         self.worm.step(dt, &drives, &world);
         if self.worm.swallowed {
+            self.placed_thumper = None;
             // The thumper is gone. So is the rhythm that was it.
             self.beats.clear();
             self.tread.clear();
@@ -271,9 +322,35 @@ impl Runtime for SandwormRuntime {
         }
     }
 
+    fn habitat_tick(&mut self, dt: f32, h: &mut dfcore::Habitat, cursor: Option<Vec2>) {
+        let previous_obstacles = self.worm.obstacles.clone();
+        self.worm.obstacles = h.props.iter().filter(|p| p.present()).map(|p| {
+            if p.kind == dfcore::PropKind::Hide {
+                (h.region.clamp_inside(p.pos, p.radius * 1.1 + 4.0), p.radius * 1.22)
+            } else { (p.pos, p.radius * 1.15) }
+        }).collect();
+        if let Some(e) = &self.expedition { self.worm.obstacles.push(e.footprint()); }
+        self.worm.obstacles.push(crate::habitatmesh::terrarium::water_dish(&h.region));
+        if self.worm.obstacles != previous_obstacles { self.worm.fit_clearance(h.region); }
+        self.placed_thumper = self
+            .placed_thumper
+            .map(|p| h.region.clamp_inside(h.thumper.unwrap_or(p), 25.0));
+        self.tick(dt, h.region, cursor, None);
+        if let Some(e) = &mut self.expedition {
+            e.update(dt, h.region, &mut self.worm, &mut self.placed_thumper);
+        }
+        h.thumper = self.placed_thumper;
+    }
+
     fn build(&mut self, glass: bool) -> Geometry<'_> {
         sandwormbody::build_frame(&mut self.frame_mesh, &self.worm, glass);
+        let body_end = self.frame_mesh.verts.len();
+        if let Some(e) = &self.expedition { e.build(&mut self.frame_mesh, &self.worm); }
+        if let Some(at) = self.placed_thumper {
+            crate::habitatmesh::fremen::thumper(&mut self.frame_mesh, at, self.worm.time);
+        }
         Geometry {
+            inspection_vertices: Some(body_end),
             body: &self.frame_mesh,
             neurons: None,
         }
@@ -286,8 +363,10 @@ impl Runtime for SandwormRuntime {
     fn place(&mut self, at: Vec2) {
         let seed = (at.x.abs() as u64) ^ ((at.y.abs() as u64) << 8) ^ 0x5A4D;
         let hazard = self.worm.hazard;
+        let obstacles = self.worm.obstacles.clone();
         self.worm = SandwormBody::new(at, seed);
         self.worm.hazard = hazard;
+        self.worm.obstacles = obstacles;
     }
 
     fn moved_display(&mut self, region: Region) {
@@ -300,14 +379,15 @@ impl Runtime for SandwormRuntime {
 
     fn status(&self) -> String {
         format!(
-            "{:?} pos ({:.0},{:.0}) speed {:.0} surface {:.2} rear {:.2} thumper {:.2}",
+            "{:?} pos ({:.0},{:.0}) speed {:.0} surface {:.2} rear {:.2} thumper {:.2} | Fremen: {}",
             self.worm.state,
             self.worm.pos.x,
             self.worm.pos.y,
             self.worm.speed,
             self.worm.surface,
             self.worm.rear,
-            self.thumper_ema
+            self.thumper_ema,
+            self.expedition.as_ref().map_or("none", |e| e.activity())
         )
     }
 
@@ -334,6 +414,70 @@ impl Runtime for SandwormRuntime {
 mod tests {
     use super::*;
     use dfcore::SandwormState;
+    #[test]
+    fn scout_completes_animated_ride_in_stocked_terrarium() {
+        let region=Region::centered((600.0,400.0));
+        let mut h=dfcore::Habitat::new(dfcore::HabitatKind::SandTerrarium,region,42);
+        let mut rt=SandwormRuntime::new(42);
+        rt.habitat_changed(Some(&h));
+        let mut stages=std::collections::HashSet::new();
+        for _ in 0..9000 {
+            h.step(1.0/60.0,rt.position(),None);
+            rt.habitat_tick(1.0/60.0,&mut h,None);
+            stages.insert(rt.expedition.as_ref().unwrap().activity());
+        }
+        for stage in ["planting thumper","climbing aboard","riding","dismounting","returning to cave"] {
+            assert!(stages.contains(stage),"missing {stage}, visited {stages:?}");
+        }
+    }
+
+    #[test]
+    fn surfaced_worm_does_not_cross_a_hide() {
+        let region = Region::centered((600.0, 400.0));
+        let mut h = dfcore::Habitat::new(dfcore::HabitatKind::SandTerrarium, region, 1);
+        h.props.retain(|p| p.kind == dfcore::PropKind::Hide);
+        h.props.truncate(1);
+        h.props[0].pos = Vec2::ZERO;
+        let mut rt = SandwormRuntime::new(1);
+        rt.habitat_changed(Some(&h));
+        rt.expedition = None;
+        rt.worm = SandwormBody::new(Vec2::new(-130.0, 0.0), 1);
+        rt.worm.heading = 0.0;
+        rt.offer(Vec2::new(160.0, 0.0));
+        for _ in 0..1800 {
+            rt.worm.state = SandwormState::Cruise;
+            rt.worm.state_timer = 3.0;
+            rt.habitat_tick(1.0/60.0, &mut h, None);
+            for p in &rt.worm.spine {
+                assert!(p.dist(Vec2::ZERO) > h.props[0].radius + 6.0, "body crossed hide at {p:?}");
+            }
+        }
+        assert!(rt.worm.pos.x > 60.0, "worm stopped instead of routing around the hide: {:?}", rt.worm.pos);
+    }
+
+    #[test]
+    fn stocked_terrarium_keeps_the_whole_worm_clear() {
+        for seed in 1..=8 {
+            let region = Region::centered((600.0, 400.0));
+            let mut h = dfcore::Habitat::new(dfcore::HabitatKind::SandTerrarium, region, seed);
+            let mut rt = SandwormRuntime::new(seed);
+            rt.habitat_changed(Some(&h));
+            for _ in 0..3600 {
+                rt.habitat_tick(1.0/30.0, &mut h, None);
+                for i in 0..rt.worm.spine.len() {
+                    for j in i+6..rt.worm.spine.len() {
+                        assert!(rt.worm.spine[i].dist(rt.worm.spine[j]) > 11.0,
+                            "seed {seed}: body folded at {i}, {j}");
+                    }
+                }
+                for p in &rt.worm.spine {
+                    for (c,r) in &rt.worm.obstacles {
+                        assert!(p.dist(*c) > r+7.0, "seed {seed}: body {p:?} crossed obstacle {c:?}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn the_sandworm_never_claims_to_have_a_brain() {
@@ -375,15 +519,21 @@ mod tests {
         called.worm.heading = std::f32::consts::PI;
         let mut breached = false;
         let mut nearest = f32::MAX;
+        let mut strongest_rhythm = 0.0_f32;
         // One click every 0.5 s (every 15th poll) for 40 s.
         for i in 0..1200 {
             let env = click_env(if i % 15 == 0 { Some(spot) } else { None });
             called.sense(&env, dt);
             called.tick(dt, bounds, None, None);
+            strongest_rhythm = strongest_rhythm.max(called.thumper_ema);
             nearest = nearest.min(called.worm.pos.dist(spot));
             breached |= called.worm.state == SandwormState::Breach;
         }
-        assert!(called.thumper_ema > 0.5, "no rhythm detected: {}", called.thumper_ema);
+        assert!(
+            strongest_rhythm > 0.5,
+            "no rhythm detected: {}",
+            strongest_rhythm
+        );
         assert!(nearest < 60.0, "never came: nearest {nearest:.0}");
         assert!(breached, "came but did not breach");
 
@@ -451,7 +601,11 @@ mod tests {
             };
             steady.sense(&env, dt);
         }
-        assert!(steady.thumper > 0.3, "a steady tread was not heard: {}", steady.thumper);
+        assert!(
+            steady.thumper > 0.3,
+            "a steady tread was not heard: {}",
+            steady.thumper
+        );
 
         let mut erratic = SandwormRuntime::new(13);
         let mut x = -300.0f32;
@@ -465,7 +619,11 @@ mod tests {
             };
             erratic.sense(&env, dt);
         }
-        assert!(erratic.thumper < 0.15, "the sandwalk called a worm: {}", erratic.thumper);
+        assert!(
+            erratic.thumper < 0.15,
+            "the sandwalk called a worm: {}",
+            erratic.thumper
+        );
     }
 
     /// The terrarium's dish reaches the body as a hazard; the open desktop
@@ -482,7 +640,10 @@ mod tests {
         rt.habitat_changed(Some(&h));
         let (at, r) = rt.worm.hazard.expect("no hazard from the terrarium");
         assert!(r > 10.0);
-        assert!(at.x < h.region.center.x, "the dish should be at the cool end");
+        assert!(
+            at.x < h.region.center.x,
+            "the dish should be at the cool end"
+        );
         rt.place(Vec2::ZERO);
         assert!(rt.worm.hazard.is_some(), "placing the worm lost the water");
         rt.habitat_changed(None);

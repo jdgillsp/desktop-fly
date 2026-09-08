@@ -213,10 +213,25 @@ neurons"*. See [`WEB_PLAN.md`](WEB_PLAN.md) and
 [`data/weaver/PROVENANCE.md`](data/weaver/PROVENANCE.md).
 
 Webs start inside a vivarium (the tray's *Habitat*; on by default for these
-three). On the open desktop a web hangs in a box under the widest window
-edge that has room below it; move that window and the threads fixed to it
-are cut, and the spider repairs or starts over. A fast cursor sweep through
-silk cuts it too.
+three). House-spider retreats favor upper corners; funnel sheets sit lower.
+Walls and solid furniture footprints supply attachment points, and moving
+or removing a support breaks its attached strands. On the desktop, sites
+prefer gaps between windows but can also use visible application frames,
+including maximized windows. Moving, resizing, closing, or covering a frame
+disrupts its attachments; construction replans against the changed supports.
+A fast cursor sweep through silk cuts it too. Windows UI Automation samples
+visible control, link, text-block, and image outlines in the front application;
+scrolling, layout changes, and disappearing elements disrupt their attachments.
+Only geometry and stable runtime IDs are read, without text or field values.
+Apps that do not expose accessibility geometry fall back to window frames.
+Sampling runs on a bounded background worker and stale results expire.
+
+Silk now has three-dimensional positions and a damped, tension-only constraint
+solver: anchors stay pinned, junctions sag, and unsupported silk falls. Orb webs
+stand upright, house-spider tangles occupy depth beneath the lid, and funnel
+sheets spread low over the substrate. The animal and caught prey follow the
+physical silk. Construction and prey detection still use a 2D chart; this is an
+authored biological approximation, not a calibrated material simulation.
 
 Their suites: `dfcore --creature araneus --simtest` (the strike node is
 silent for 12 s of rest across seeds, fires within 1 s of a sustained
@@ -229,6 +244,17 @@ after half the web is gone, construction pausing when the walk drive is
 down, and the program never exciting the silk).
 
 ## Creatures #8–#9: a hognose snake and a sandworm (Windows build)
+
+For a thumper, select **Habitat interactions...** in the tray, choose
+**Place a thumper**, and click the top-down map. In the sandworm terrarium,
+a Fremen scout also leaves a rocky cave automatically, plants a thumper,
+mounts the arriving worm for a short ride, and returns home before the next
+expedition. Placing a thumper yourself or stopping it sends the scout home.
+The scout kneels to plant, routes around furnishings, climbs aboard, holds
+maker hooks while riding, and dismounts smoothly. The thumper has a moving
+piston and sand pulses. Habitat status shows the scout's current activity.
+For animation snapshots, add `--snapshot-seconds 25 --snapshot scene.png`.
+Launch with `./fly.bat --creature sandworm --habitat --literal`.
 
 `--creature hognose | sandworm`, or the tray. Both are **procedural**, on the
 koi's terms: no reptile has a connectome at any scale, and the sandworm is
@@ -278,3 +304,43 @@ If you use this, cite:
 
 - Dorkenwald, S. et al. *Neuronal wiring diagram of an adult brain.* Nature 634, 124–138 (2024). https://doi.org/10.1038/s41586-024-07558-y
 - Schlegel, P. et al. *Whole-brain annotation and multi-connectome cell typing of Drosophila.* Nature 634, 139–152 (2024). https://doi.org/10.1038/s41586-024-07686-5
+
+
+### Habitat interactions and glass aquarium
+
+Open **Habitat interactions...** in the Windows tray menu to offer food/prey,
+move furnishings with a top-down placement map, adjust hognose heat sources,
+place/stop a sandworm thumper, or toggle quiet observation. The koi enclosure
+now has transparent sides and a visible water column. Feeding depends on
+appetite, safety and reaching the surface. Ordinary overlay clicks remain
+click-through. See [the behavior audit and controls](HABITAT_INTERACTIONS.md)
+for species-specific behavior, evidence, and scientific limitations.
+
+
+### Inspecting animal detail
+
+In habitat mode, use the tray **View > Close-up (follow the animal)**. The camera
+fits the animal rather than the surrounding web or habitat. For the hognose,
+**View > Head close-up** uses a lower angle and frames its head and neck.
+
+Diagnostic example (release build):
+
+```powershell
+./rust/target/release/desktopfly.exe --creature hognose --literal --habitat --head-closeup --alt -1 --size 1200 --snapshot hognose-head.png
+```
+
+The detailed hognose uses the editable Blender source in `art/blender`; the
+other animals use refined procedural meshes. See `VISUAL_FIDELITY.md` for scope.
+
+### Animal size and shelter visibility (Windows)
+
+In the tray menu, **Animal size (habitat off)** offers 50%, 100%, 150%,
+200%, 300%, and 400%. It scales the free-roaming animal and its glass anatomy;
+habitat view size remains separate. The setting is remembered across restarts.
+
+For the hognose's terrarium, use **Contents > See-through hides** to make the
+cork shelters faintly transparent while the snake still uses them as shelter.
+Toggle it off to restore their normal appearance. This preference is also saved.
+
+Offscreen diagnostics accept `--animal-scale 2` (without `--habitat`) and
+`--habitat --see-through-hides`.

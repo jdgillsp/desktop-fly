@@ -132,27 +132,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: ubuf.as_entire_binding(),
-            }],
-        });
+        let (bgl, bind_group) = crate::skin_texture::create_bindings(&device, &queue, &ubuf);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[Some(&bgl)],
@@ -162,7 +142,7 @@ impl Renderer {
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4],
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4],
         };
 
         let make_pipeline = |vs: &str, fs: &str, depth_write: bool, cull: Option<wgpu::Face>| {
@@ -328,16 +308,30 @@ impl Renderer {
         if mesh.indices.is_empty() {
             return;
         }
-        // Skip the frame rather than panic. A dropped frame is a blink; an
-        // assert here takes down a pet that is supposed to sit on the desktop
-        // for days.
-        if mesh.verts.len() > self.vbuf_cap || mesh.indices.len() > self.ibuf_cap {
-            eprintln!(
-                "frame geometry exceeds buffers ({} verts, {} indices) - skipping",
-                mesh.verts.len(),
-                mesh.indices.len()
-            );
-            return;
+        // Grow once when authored detail exceeds the initial allocation. Body
+        // and neuron buffers share capacities; include both index counts.
+        let vertex_need = mesh.verts.len().max(neurons.map_or(0, |n| n.verts.len()));
+        let index_need = mesh.indices.len().max(neurons.map_or(0, |n| n.indices.len()));
+        if vertex_need > self.vbuf_cap {
+            self.vbuf_cap = vertex_need.next_power_of_two();
+            let make = |label| self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (self.vbuf_cap * std::mem::size_of::<Vertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.vbuf = make("grown body vertices");
+            self.nvbuf = make("grown neuron vertices");
+        }
+        if index_need > self.ibuf_cap {
+            self.ibuf_cap = index_need.next_power_of_two();
+            let make = |label| self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label), size: (self.ibuf_cap * 4) as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.ibuf = make("grown body indices");
+            self.nibuf = make("grown neuron indices");
         }
         self.queue
             .write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&mesh.verts));

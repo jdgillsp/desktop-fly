@@ -18,7 +18,7 @@
 use dfcore::HognoseBody;
 
 use crate::flybody::GlassPalette;
-use crate::mesh::{Mesh, Vertex};
+use crate::mesh::{Material, Mesh, Vertex};
 
 const GROUND: [f32; 4] = [0.74, 0.60, 0.40, 1.0];
 const SADDLE: [f32; 4] = [0.40, 0.26, 0.14, 1.0];
@@ -46,11 +46,11 @@ fn radius_at(t: f32) -> f32 {
         2.8
     } else if t < 0.14 {
         2.8 - 1.0 * ((t - 0.08) / 0.06)
-    } else if t < 0.55 {
-        1.8 + 0.6 * ((t - 0.14) / 0.41).sqrt()
+    } else if t < 0.72 {
+        1.8 + 0.6 * (((t - 0.14) / 0.58) * std::f32::consts::PI).sin().sqrt()
     } else {
-        let u = (t - 0.55) / 0.45;
-        2.4 * (1.0 - u).powf(1.4) + 0.3
+        let u = (t - 0.72) / 0.28;
+        1.8 * (1.0 - u).powf(0.9) + 0.08 * u
     }
 }
 
@@ -89,18 +89,15 @@ fn mix(a: [f32; 4], b: [f32; 4], k: f32) -> [f32; 4] {
     ]
 }
 
-/// Dorsal colouring at body fraction `t`: saddles every so often, on ground.
-fn dorsal_color(t: f32) -> [f32; 4] {
-    let period = 0.085;
-    let u = (t / period).fract();
-    if u < 0.42 { SADDLE } else { GROUND }
-}
-
 /// Ventral colouring: cream, with a black blotch pattern offset from the saddles.
 fn ventral_color(t: f32) -> [f32; 4] {
     let period = 0.11;
     let u = ((t + 0.03) / period).fract();
-    if u < 0.30 { BLOTCH } else { BELLY }
+    if u < 0.30 {
+        BLOTCH
+    } else {
+        BELLY
+    }
 }
 
 /// How far a spine point has righted itself during the peek: the head and
@@ -113,22 +110,55 @@ fn peek_at(i: usize, peek: f32) -> f32 {
     peek * (1.0 - i as f32 / NECK as f32)
 }
 
-/// What the top-down camera sees at `t`: the back, or — rolled over — the
-/// belly. `roll` is the body's `belly_up`.
-fn body_color(t: f32, roll: f32, glass: bool) -> [f32; 4] {
+// Separate dorsal saddles and staggered flank spots, with a pale jaw.
+// The angular coordinate prevents the markings becoming complete bands.
+fn surface_color(t: f32, a: f32, roll: f32, glass: bool) -> [f32; 4] {
     if glass {
         return GlassPalette::SHELL;
     }
-    mix(dorsal_color(t), ventral_color(t), roll)
+    let (up, across) = a.sin_cos();
+    let back = if t < 0.12 {
+        if up < 0.35 {
+            BELLY
+        } else if t > 0.035 && across.abs() > 0.4 {
+            SADDLE
+        } else {
+            GROUND
+        }
+    } else {
+        let phase = (t / 0.095).fract();
+        let dorsal = ((phase - 0.5) / 0.34).powi(2) + (across / 0.82).powi(2);
+        let flank_phase = ((t / 0.095 + 0.5).fract() - 0.5) / 0.27;
+        let flank = flank_phase.powi(2) + ((up - 0.22) / 0.32).powi(2);
+        if up < -0.25 {
+            ventral_color(t)
+        } else if (up > 0.0 && dorsal < 1.0) || flank < 1.0 {
+            SADDLE
+        } else {
+            GROUND
+        }
+    };
+    mix(back, ventral_color(t), roll)
 }
 
 fn quad(out: &mut Mesh, p: [[f32; 3]; 4], n: [f32; 3], c: [f32; 4]) {
     let b = out.verts.len() as u32;
     for v in p {
         out.verts.push(Vertex {
+            texcoord: [0.0; 4],
             pos: v,
             normal: n,
             color: c,
+            material: if c[..3] == EYE[..3] {
+                Material::EYE
+            } else if c[..3] == TONGUE[..3] || c[..3] == MOUTH[..3] {
+                Material::WET
+            } else if c == GlassPalette::LIMB || c == GlassPalette::SHELL || c == GlassPalette::WING
+            {
+                Material::GLASS
+            } else {
+                Material::SKIN
+            },
         });
     }
     out.indices
@@ -141,15 +171,43 @@ fn fan(out: &mut Mesh, root: [f32; 3], rim: &[[f32; 3]], c: [f32; 4]) {
     }
     let base = out.verts.len() as u32;
     out.verts.push(Vertex {
+        texcoord: [0.0; 4],
         pos: root,
         normal: [0.0, 0.0, 1.0],
         color: c,
+        material: if c[..3] == EYE[..3] {
+            Material::EYE
+        } else if c[..3] == TONGUE[..3] || c[..3] == MOUTH[..3] {
+            Material::WET
+        } else if c == GlassPalette::LIMB || c == GlassPalette::SHELL || c == GlassPalette::WING {
+            Material::GLASS
+        } else {
+            Material::SKIN
+        },
     });
     for p in rim {
         out.verts.push(Vertex {
+            texcoord: [0.0; 4],
             pos: *p,
-            normal: [0.0, 0.0, 1.0],
+            normal: if c[..3] == EYE[..3] {
+                let dx = p[0] - root[0];
+                let dy = p[1] - root[1];
+                let length = (dx * dx + dy * dy + 0.36).sqrt();
+                [dx / length, dy / length, 0.6 / length]
+            } else {
+                [0.0, 0.0, 1.0]
+            },
             color: c,
+            material: if c[..3] == EYE[..3] {
+                Material::EYE
+            } else if c[..3] == TONGUE[..3] || c[..3] == MOUTH[..3] {
+                Material::WET
+            } else if c == GlassPalette::LIMB || c == GlassPalette::SHELL || c == GlassPalette::WING
+            {
+                Material::GLASS
+            } else {
+                Material::SKIN
+            },
         });
     }
     for k in 0..rim.len() as u32 - 1 {
@@ -173,7 +231,11 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
     let z0 = Z - sink;
     // Free roam has no sand to hide under, so the animal also fades as it
     // digs in; in a tank the surface hides it before the fade matters.
-    let fade = if glass { 1.0 } else { 1.0 - snake.buried * 0.85 };
+    let fade = if glass {
+        1.0
+    } else {
+        1.0 - snake.buried * 0.85
+    };
 
     let frame = |i: usize| -> ([f32; 2], [f32; 2]) {
         let a = spine[i.saturating_sub(1)];
@@ -202,29 +264,36 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
         let r = radius_at(t) * swell;
         let spread = hood_at(t, snake.hood);
         let w = r + spread;
-        let h = r * (1.0 - 0.45 * (spread / 1.5).min(1.0));
+        let head_flatten = if t < 0.12 { 0.70 } else { 0.88 };
+        let h = r * head_flatten * (1.0 - 0.45 * (spread / 1.5).min(1.0));
         // Peeking, the head and neck have righted and lifted a little
         // while the body is still on its back.
         let righted = peek_at(i, snake.peek);
         let zc = z0 + lift_at(i, snake.head_lift) + righted * 2.0;
-        let c = body_color(t, roll * (1.0 - righted), glass);
         for k in 0..RING {
             let a = std::f32::consts::TAU * k as f32 / RING as f32;
+            let c = surface_color(t, a, roll * (1.0 - righted), glass);
             let (sa, ca) = a.sin_cos();
-            let pos = [
-                p.x + nrm[0] * w * ca,
-                p.y + nrm[1] * w * ca,
-                zc + h * sa,
-            ];
+            let pos = [p.x + nrm[0] * w * ca, p.y + nrm[1] * w * ca, zc + h * sa];
             let nx = nrm[0] * ca / w.max(1e-3);
             let ny = nrm[1] * ca / w.max(1e-3);
             let nz = sa / h.max(1e-3);
             let l = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-4);
-            let shade = if glass { 1.0 } else { 0.78 + 0.22 * sa.max(0.0) };
+            let shade = if glass {
+                1.0
+            } else {
+                0.78 + 0.22 * sa.max(0.0)
+            };
             out.verts.push(Vertex {
+                texcoord: [0.0; 4],
                 pos,
                 normal: [nx / l, ny / l, nz / l],
                 color: [c[0] * shade, c[1] * shade, c[2] * shade, c[3] * fade],
+                material: if glass {
+                    Material::GLASS
+                } else {
+                    Material::SKIN
+                },
             });
         }
     }
@@ -235,7 +304,72 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
             let b = ring_base + (i * RING + k2) as u32;
             let c = ring_base + ((i + 1) * RING + k) as u32;
             let d = ring_base + ((i + 1) * RING + k2) as u32;
-            out.indices.extend_from_slice(&[a, c, b, b, c, d]);
+            // Resolve blotch edges between the coarse simulation spine points.
+            // Sampling pigment here keeps each saddle separate at desktop scale.
+            let corners = [
+                out.verts[a as usize],
+                out.verts[b as usize],
+                out.verts[c as usize],
+                out.verts[d as usize],
+            ];
+            const DETAIL: usize = 4;
+            let base = out.verts.len() as u32;
+            for row in 0..=DETAIL {
+                for col in 0..=DETAIL {
+                    let u = row as f32 / DETAIL as f32;
+                    let v = col as f32 / DETAIL as f32;
+                    let weights = [(1.0 - u) * (1.0 - v), (1.0 - u) * v, u * (1.0 - v), u * v];
+                    let mut pos = [0.0; 3];
+                    let mut normal = [0.0; 3];
+                    for j in 0..4 {
+                        for axis in 0..3 {
+                            pos[axis] += corners[j].pos[axis] * weights[j];
+                            normal[axis] += corners[j].normal[axis] * weights[j];
+                        }
+                    }
+                    let t = (i as f32 + u) / (n - 1) as f32;
+                    let angle = std::f32::consts::TAU * (k as f32 + v) / RING as f32;
+                    let righted =
+                        peek_at(i, snake.peek) * (1.0 - u) + peek_at(i + 1, snake.peek) * u;
+                    let mut color = surface_color(t, angle, roll * (1.0 - righted), glass);
+                    let shade = if glass {
+                        1.0
+                    } else {
+                        0.78 + 0.22 * angle.sin().max(0.0)
+                    };
+                    // Fine diagonal scale keels modulate the skin without a mesh per scale.
+                    let keel = if glass {
+                        1.0
+                    } else {
+                        let stagger = ((angle / std::f32::consts::TAU * 20.0).floor() % 2.0) * 0.5;
+                        let cell = (t * 125.0 + stagger).fract();
+                        0.92 + 0.08 * (cell * std::f32::consts::PI).sin()
+                    };
+                    for channel in &mut color[..3] {
+                        *channel *= shade * keel;
+                    }
+                    color[3] *= fade;
+                    out.verts.push(Vertex {
+                        texcoord: [0.0; 4],
+                        pos,
+                        normal,
+                        color,
+                        material: if glass {
+                            Material::GLASS
+                        } else {
+                            Material::SKIN
+                        },
+                    });
+                }
+            }
+            for row in 0..DETAIL {
+                for col in 0..DETAIL {
+                    let a = base + (row * (DETAIL + 1) + col) as u32;
+                    let b = a + (DETAIL + 1) as u32;
+                    out.indices
+                        .extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+                }
+            }
         }
     }
 
@@ -249,32 +383,66 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
     let head_roll = roll * (1.0 - peek_at(0, snake.peek));
     let zh = z0 + lift_at(0, snake.head_lift) + peek_at(0, snake.peek) * 2.0;
     let snout = [
-        head.x + tan[0] * 2.4,
-        head.y + tan[1] * 2.4,
-        zh + 1.3 * (1.0 - 2.0 * head_roll),
+        head.x + tan[0] * 1.5,
+        head.y + tan[1] * 1.5,
+        zh + 1.6 * (1.0 - 2.0 * head_roll),
     ];
     {
         let tip = out.verts.len() as u32;
-        let c = body_color(0.0, roll, glass);
+        let c = if glass {
+            GlassPalette::SHELL
+        } else {
+            mix(GROUND, BELLY, 0.42 + 0.38 * head_roll)
+        };
         out.verts.push(Vertex {
+            texcoord: [0.0; 4],
             pos: snout,
             normal: [tan[0], tan[1], 0.4],
             color: [c[0], c[1], c[2], c[3] * fade],
+            material: if glass {
+                Material::GLASS
+            } else {
+                Material::SKIN
+            },
         });
+        // A broad raised rostral plate, rather than a single conical point.
+        for k in 0..RING {
+            let a = std::f32::consts::TAU * k as f32 / RING as f32;
+            out.verts.push(Vertex {
+                texcoord: [0.0; 4],
+                pos: [
+                    snout[0] + nrm[0] * 1.05 * a.cos(),
+                    snout[1] + nrm[1] * 1.05 * a.cos(),
+                    snout[2] + 0.45 * a.sin(),
+                ],
+                normal: [tan[0], tan[1], 0.4],
+                color: [c[0], c[1], c[2], c[3] * fade],
+                material: if glass {
+                    Material::GLASS
+                } else {
+                    Material::SKIN
+                },
+            });
+        }
         for k in 0..RING {
             let k2 = (k + 1) % RING;
-            out.indices.extend_from_slice(&[
-                tip,
-                ring_base + k as u32,
-                ring_base + k2 as u32,
-            ]);
+            let a = tip + 1 + k as u32;
+            let b = tip + 1 + k2 as u32;
+            let c = ring_base + k as u32;
+            let d = ring_base + k2 as u32;
+            out.indices
+                .extend_from_slice(&[tip, a, b, a, c, b, b, c, d]);
         }
     }
 
     // --- the tongue: a forked ribbon flicked out of the snout.
     if snake.tongue > 0.05 {
         let reach = 1.0 + snake.tongue * 4.0;
-        let c = if glass { GlassPalette::LIMB } else { [TONGUE[0], TONGUE[1], TONGUE[2], fade] };
+        let c = if glass {
+            GlassPalette::LIMB
+        } else {
+            [TONGUE[0], TONGUE[1], TONGUE[2], fade]
+        };
         let root = [snout[0], snout[1], snout[2] - 0.3];
         let stem = [
             snout[0] + tan[0] * reach * 0.6,
@@ -335,20 +503,20 @@ pub fn build_frame(out: &mut Mesh, snake: &HognoseBody, glass: bool) {
     if !glass && head_roll < 0.6 {
         for side in [-1.0f32, 1.0] {
             let e = [
-                head.x + nrm[0] * side * 2.2 + tan[0] * 0.6,
-                head.y + nrm[1] * side * 2.2 + tan[1] * 0.6,
-                zh + radius_at(0.0) * 0.7,
+                head.x + nrm[0] * side * 1.65 - tan[0] * 1.0,
+                head.y + nrm[1] * side * 1.65 - tan[1] * 1.0,
+                zh + 1.72,
             ];
-            let r = 0.55;
-            quad(
+            let rim: Vec<_> = (0..=16)
+                .map(|k| {
+                    let a = std::f32::consts::TAU * k as f32 / 16.0;
+                    [e[0] + 0.65 * a.cos(), e[1] + 0.65 * a.sin(), e[2]]
+                })
+                .collect();
+            fan(
                 out,
-                [
-                    [e[0] - r, e[1] - r, e[2]],
-                    [e[0] + r, e[1] - r, e[2]],
-                    [e[0] + r, e[1] + r, e[2]],
-                    [e[0] - r, e[1] + r, e[2]],
-                ],
-                [0.0, 0.0, 1.0],
+                [e[0], e[1], e[2] + 0.22],
+                &rim,
                 [EYE[0], EYE[1], EYE[2], fade],
             );
         }
@@ -420,7 +588,10 @@ mod tests {
         }
         let width = 2.0 * widest;
         let ratio = length / width.max(1e-3);
-        assert!((9.0..16.0).contains(&ratio), "length:width {ratio:.1}:1 (real: about 12:1)");
+        assert!(
+            (9.0..16.0).contains(&ratio),
+            "length:width {ratio:.1}:1 (real: about 12:1)"
+        );
         let _ = max_across;
     }
 
@@ -442,8 +613,10 @@ mod tests {
             neck.clone()
                 .flat_map(|i| {
                     let c = s.spine[i];
-                    (i * 10..i * 10 + 10)
-                        .map(move |k| ((m.verts[k].pos[0] - c.x).powi(2) + (m.verts[k].pos[1] - c.y).powi(2)).sqrt())
+                    (i * 10..i * 10 + 10).map(move |k| {
+                        ((m.verts[k].pos[0] - c.x).powi(2) + (m.verts[k].pos[1] - c.y).powi(2))
+                            .sqrt()
+                    })
                 })
                 .fold(0.0f32, f32::max)
         };
@@ -486,14 +659,20 @@ mod tests {
         let mut m = Mesh::default();
         build_frame(&mut m, &s, false);
         let sum = |ring: usize| -> f32 {
-            (ring * 10..ring * 10 + 10).map(|k| m.verts[k].color).map(|c| c[0] + c[1] + c[2]).fold(0.0f32, f32::max)
+            (ring * 10..ring * 10 + 10)
+                .map(|k| m.verts[k].color)
+                .map(|c| c[0] + c[1] + c[2])
+                .fold(0.0f32, f32::max)
         };
         let mut over = snake();
         over.belly_up = 1.0;
         let mut o = Mesh::default();
         build_frame(&mut o, &over, false);
         let osum = |ring: usize| -> f32 {
-            (ring * 10..ring * 10 + 10).map(|k| o.verts[k].color).map(|c| c[0] + c[1] + c[2]).fold(0.0f32, f32::max)
+            (ring * 10..ring * 10 + 10)
+                .map(|k| o.verts[k].color)
+                .map(|c| c[0] + c[1] + c[2])
+                .fold(0.0f32, f32::max)
         };
         assert_ne!(sum(0), osum(0), "the head did not right itself");
         assert_eq!(sum(15), osum(15), "the body righted too");
@@ -511,8 +690,17 @@ mod tests {
         build_frame(&mut b, &under, false);
         let (_, hi_a) = bounds(&a);
         let (_, hi_b) = bounds(&b);
-        assert!(hi_b[2] < hi_a[2] - 6.0, "did not sink: {} vs {}", hi_b[2], hi_a[2]);
-        assert!(b.verts[0].color[3] < 0.3, "still opaque: {}", b.verts[0].color[3]);
+        assert!(
+            hi_b[2] < hi_a[2] - 6.0,
+            "did not sink: {} vs {}",
+            hi_b[2],
+            hi_a[2]
+        );
+        assert!(
+            b.verts[0].color[3] < 0.3,
+            "still opaque: {}",
+            b.verts[0].color[3]
+        );
         // In glass it sinks but does not fade, because the tank hides it.
         let mut g = Mesh::default();
         build_frame(&mut g, &under, true);
@@ -536,7 +724,10 @@ mod tests {
     #[test]
     fn the_head_is_broader_than_the_neck() {
         assert!(radius_at(0.06) > radius_at(0.14) * 1.3);
-        assert!(radius_at(0.35) > radius_at(0.14), "the body is stouter than the neck");
+        assert!(
+            radius_at(0.35) > radius_at(0.14),
+            "the body is stouter than the neck"
+        );
     }
 
     /// Bluffing, the head comes off the ground and the body swells.
@@ -556,14 +747,21 @@ mod tests {
         let n = calm.spine.len();
         // (Its ring's mean z is its centreline; the swell changes the ring's
         // size but not where it sits.)
-        let tail = |m: &Mesh| ((n - 1) * 10..n * 10).map(|k| m.verts[k].pos[2]).sum::<f32>() / 10.0;
+        let tail = |m: &Mesh| {
+            ((n - 1) * 10..n * 10)
+                .map(|k| m.verts[k].pos[2])
+                .sum::<f32>()
+                / 10.0
+        };
         assert!((tail(&a) - tail(&b)).abs() < 0.05);
         // And midbody is wider.
         let mid = 10;
         let c = calm.spine[mid];
         let width = |m: &Mesh| {
             (mid * 10..mid * 10 + 10)
-                .map(|k| ((m.verts[k].pos[0] - c.x).powi(2) + (m.verts[k].pos[1] - c.y).powi(2)).sqrt())
+                .map(|k| {
+                    ((m.verts[k].pos[0] - c.x).powi(2) + (m.verts[k].pos[1] - c.y).powi(2)).sqrt()
+                })
                 .fold(0.0f32, f32::max)
         };
         assert!(width(&b) > width(&a) * 1.15, "no inflation");
@@ -572,12 +770,42 @@ mod tests {
 
     #[test]
     fn the_snout_is_upturned() {
-        let s = snake();
+        let mut s = snake();
+        s.tongue = 0.0;
+        s.belly_up = 0.0;
+        s.buried = 0.0;
+        s.head_lift = 0.0;
+        s.peek = 0.0;
         let mut m = Mesh::default();
         build_frame(&mut m, &s, false);
-        let ring = s.spine.len() * 10;
-        let snout = m.verts[ring].pos;
-        assert!(snout[2] > Z + 0.5, "the snout is not raised: {}", snout[2]);
+        let head = s.spine[0];
+        let dx = head.x - s.spine[1].x;
+        let dy = head.y - s.spine[1].y;
+        let len = (dx * dx + dy * dy).sqrt();
+        let forward = |v: &Vertex| ((v.pos[0] - head.x) * dx + (v.pos[1] - head.y) * dy) / len;
+        let front = m
+            .verts
+            .iter()
+            .map(forward)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(front > 1.0, "no projecting rostral plate");
+        // Inspect the leading face itself, independently of body tessellation.
+        let face: Vec<_> = m
+            .verts
+            .iter()
+            .filter(|v| forward(v) > front - 0.05)
+            .collect();
+        assert!(
+            face.iter().all(|v| v.pos[2] > Z + 0.5),
+            "the rostral face is not raised"
+        );
+        let across = |v: &&Vertex| (-(v.pos[0] - head.x) * dy + (v.pos[1] - head.y) * dx) / len;
+        let width = face.iter().map(across).fold(f32::NEG_INFINITY, f32::max)
+            - face.iter().map(across).fold(f32::INFINITY, f32::min);
+        assert!(
+            width > 1.4,
+            "the nose is a point rather than a broad shovel: {width}"
+        );
     }
 
     #[test]
@@ -595,11 +823,10 @@ mod tests {
         let mut saw_saddle = false;
         let mut saw_ground = false;
         for i in 0..40 {
-            let c = body_color(i as f32 / 40.0, 0.0, false);
+            let c = surface_color(i as f32 / 40.0, std::f32::consts::FRAC_PI_2, 0.0, false);
             saw_saddle |= c == SADDLE;
             saw_ground |= c == GROUND;
         }
         assert!(saw_saddle && saw_ground);
     }
 }
-

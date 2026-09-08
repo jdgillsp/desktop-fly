@@ -14,14 +14,14 @@
 //! worm runs brainless: a constant forward drive, and no reactions. The tray
 //! says so, and the brain window stays closed.
 
-use dfcore::Region;
 use dfcore::creature::{Body, World};
 use dfcore::data::BrainPointsFile;
 use dfcore::env::thermal_tempo;
 use dfcore::util::hypot;
+use dfcore::Region;
 use dfcore::{
-    circadian_activity, BrainSignals, CElegans, Connectome, Creature, DynamicsSpec,
-    EnvSnapshot, GradedSignalBuilder, GradedSim, Habituation, Sim, Vec2, Worm,
+    circadian_activity, BrainSignals, CElegans, Connectome, Creature, DynamicsSpec, EnvSnapshot,
+    GradedSignalBuilder, GradedSim, Habituation, Sim, Vec2, Worm,
 };
 
 use crate::mesh::Mesh;
@@ -52,6 +52,7 @@ pub struct WormRuntime {
     pending_sleepy: bool,
     /// "Escape Test" for a blind animal: a strong anterior touch.
     touch_override: f32,
+    on_food: bool,
 }
 
 impl WormRuntime {
@@ -72,6 +73,7 @@ impl WormRuntime {
             pending_tempo: 1.0,
             pending_sleepy: false,
             touch_override: 0.0,
+            on_food: false,
             creature,
         };
         match dfcore::data::load_for(rt.creature.data_dir()) {
@@ -229,6 +231,10 @@ impl Runtime for WormRuntime {
                 s
             }
         };
+        // Authored habitat motor modulation, not a reconstructed feeding circuit.
+        if self.on_food {
+            drives.walk_drive *= 0.45;
+        }
         drives.tempo = self.pending_tempo;
         drives.sleep = self.pending_sleepy;
         let world = World {
@@ -243,16 +249,31 @@ impl Runtime for WormRuntime {
         }
     }
 
+    fn habitat_tick(&mut self, dt: f32, h: &mut dfcore::Habitat, cursor: Option<Vec2>) {
+        let food = h.target().filter(|t| t.kind == dfcore::PropKind::Lawn);
+        self.on_food = food.is_some_and(|t| self.worm.pos.dist(t.pos) < t.radius);
+        // Let the worm dwell and eventually leave, rather than orbiting a point.
+        let target = food.filter(|_| !self.on_food).map(|t| t.pos);
+        self.tick(dt, h.region, cursor, target);
+        self.on_food = false;
+    }
+
     fn build(&mut self, glass: bool) -> Geometry<'_> {
         wormbody::build_frame(&mut self.frame_mesh, &self.worm, glass);
         self.has_neurons = false;
         if glass {
             if let Some(sim) = self.sim.as_ref() {
-                wormbody::build_neuron_field(&mut self.neuron_mesh, sim, &self.activity, &self.worm);
+                wormbody::build_neuron_field(
+                    &mut self.neuron_mesh,
+                    sim,
+                    &self.activity,
+                    &self.worm,
+                );
                 self.has_neurons = true;
             }
         }
         Geometry {
+            inspection_vertices: None,
             body: &self.frame_mesh,
             neurons: if self.has_neurons {
                 Some(&self.neuron_mesh)

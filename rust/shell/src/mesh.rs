@@ -10,6 +10,25 @@ pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 4],
+    /// Roughness, specular strength, diffuse wrap, and silhouette rim strength.
+    /// Kept explicit so glass, wet skin and dry substrate do not share a finish.
+    pub material: [f32; 4],
+    /// UV, albedo weight, and scale relief amplitude.
+    pub texcoord: [f32; 4],
+}
+
+/// Lightweight dielectric finishes; no texture lookup or extra draw call.
+pub struct Material;
+
+impl Material {
+    pub const MATTE: [f32; 4] = [0.88, 0.05, 0.08, 0.06];
+    pub const CHITIN: [f32; 4] = [0.43, 0.23, 0.05, 0.10];
+    pub const EYE: [f32; 4] = [0.16, 0.62, 0.0, 0.08];
+    pub const SKIN: [f32; 4] = [0.58, 0.16, 0.12, 0.08];
+    pub const WET: [f32; 4] = [0.24, 0.40, 0.12, 0.10];
+    pub const MEMBRANE: [f32; 4] = [0.38, 0.20, 0.28, 0.12];
+    pub const GLASS: [f32; 4] = [0.12, 0.48, 0.0, 0.30];
+    pub const METAL: [f32; 4] = [0.32, 0.42, 0.0, 0.10];
 }
 
 #[derive(Clone, Debug, Default)]
@@ -30,12 +49,10 @@ pub fn sphere(radius: f32, rings: u32, sectors: u32) -> Mesh {
         let phi = std::f32::consts::PI * r as f32 / rings as f32;
         for s in 0..=sectors {
             let theta = std::f32::consts::TAU * s as f32 / sectors as f32;
-            let n = [
-                phi.sin() * theta.cos(),
-                phi.cos(),
-                phi.sin() * theta.sin(),
-            ];
+            let n = [phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin()];
             m.verts.push(Vertex {
+                texcoord: [0.0; 4],
+                material: Material::MATTE,
                 pos: [n[0] * radius, n[1] * radius, n[2] * radius],
                 normal: n,
                 color: [1.0; 4],
@@ -47,8 +64,7 @@ pub fn sphere(radius: f32, rings: u32, sectors: u32) -> Mesh {
         for s in 0..sectors {
             let a = r * stride + s;
             let b = a + stride;
-            m.indices
-                .extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+            m.indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
         }
     }
     m
@@ -67,12 +83,10 @@ pub fn capsule(cap_radius: f32, height: f32, rings: u32, sectors: u32) -> Mesh {
             let phi = phi_from + (phi_to - phi_from) * r as f32 / steps as f32;
             for s in 0..=sectors {
                 let theta = std::f32::consts::TAU * s as f32 / sectors as f32;
-                let n = [
-                    phi.sin() * theta.cos(),
-                    phi.cos(),
-                    phi.sin() * theta.sin(),
-                ];
+                let n = [phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin()];
                 m.verts.push(Vertex {
+                    texcoord: [0.0; 4],
+                    material: Material::MATTE,
                     pos: [
                         n[0] * cap_radius,
                         n[1] * cap_radius + y_center,
@@ -86,7 +100,13 @@ pub fn capsule(cap_radius: f32, height: f32, rings: u32, sectors: u32) -> Mesh {
     };
 
     // Top cap, then bottom cap; the cylinder is the band between them.
-    ring(cyl_half, 0.0, std::f32::consts::FRAC_PI_2, half_rings, &mut m);
+    ring(
+        cyl_half,
+        0.0,
+        std::f32::consts::FRAC_PI_2,
+        half_rings,
+        &mut m,
+    );
     ring(
         -cyl_half,
         std::f32::consts::FRAC_PI_2,
@@ -101,8 +121,7 @@ pub fn capsule(cap_radius: f32, height: f32, rings: u32, sectors: u32) -> Mesh {
         for s in 0..sectors {
             let a = r * stride + s;
             let b = a + stride;
-            m.indices
-                .extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+            m.indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
         }
     }
     m
@@ -118,11 +137,15 @@ pub fn cone(top_radius: f32, bottom_radius: f32, height: f32, sectors: u32) -> M
         let (st, ct) = theta.sin_cos();
         let n = normalize([slope[0] * ct, slope[1], slope[0] * st]);
         m.verts.push(Vertex {
+            texcoord: [0.0; 4],
+            material: Material::MATTE,
             pos: [top_radius * ct, half, top_radius * st],
             normal: n,
             color: [1.0; 4],
         });
         m.verts.push(Vertex {
+            texcoord: [0.0; 4],
+            material: Material::MATTE,
             pos: [bottom_radius * ct, -half, bottom_radius * st],
             normal: n,
             color: [1.0; 4],
@@ -140,6 +163,8 @@ pub fn cone(top_radius: f32, bottom_radius: f32, height: f32, sectors: u32) -> M
         }
         let center = m.verts.len() as u32;
         m.verts.push(Vertex {
+            texcoord: [0.0; 4],
+            material: Material::MATTE,
             pos: [0.0, y, 0.0],
             normal: [0.0, ny, 0.0],
             color: [1.0; 4],
@@ -147,6 +172,8 @@ pub fn cone(top_radius: f32, bottom_radius: f32, height: f32, sectors: u32) -> M
         for s in 0..=sectors {
             let theta = std::f32::consts::TAU * s as f32 / sectors as f32;
             m.verts.push(Vertex {
+                texcoord: [0.0; 4],
+                material: Material::MATTE,
                 pos: [radius * theta.cos(), y, radius * theta.sin()],
                 normal: [0.0, ny, 0.0],
                 color: [1.0; 4],
@@ -172,6 +199,8 @@ pub fn wing(width: f32, height: f32, y_offset: f32, sectors: u32) -> Mesh {
     let (rx, ry) = (width / 2.0, height / 2.0);
     let center = 0u32;
     m.verts.push(Vertex {
+        texcoord: [0.0; 4],
+        material: Material::MATTE,
         pos: [0.0, y_offset, 0.0],
         normal: [0.0, 0.0, 1.0],
         color: [1.0; 4],
@@ -179,6 +208,8 @@ pub fn wing(width: f32, height: f32, y_offset: f32, sectors: u32) -> Mesh {
     for s in 0..=sectors {
         let theta = std::f32::consts::TAU * s as f32 / sectors as f32;
         m.verts.push(Vertex {
+            texcoord: [0.0; 4],
+            material: Material::MATTE,
             pos: [rx * theta.cos(), y_offset + ry * theta.sin(), 0.0],
             normal: [0.0, 0.0, 1.0],
             color: [1.0; 4],
@@ -268,5 +299,35 @@ mod tests {
         assert!((hi[1] - 1.0).abs() < 0.05, "leading edge {}", hi[1]);
         assert!((hi[0] - 2.6).abs() < 0.05, "half-width {}", hi[0]);
         assert!(indices_are_valid(&m));
+    }
+}
+
+impl Mesh {
+    /// Scale the animal about its simulation position; leave appended scenery in place.
+    pub fn scale_animal(&mut self, at: dfcore::Vec2, scale: f32, count: Option<usize>) {
+        let count = count.unwrap_or(self.verts.len());
+        for v in self.verts.iter_mut().take(count) {
+            v.pos = [at.x + (v.pos[0] - at.x) * scale,
+                at.y + (v.pos[1] - at.y) * scale, v.pos[2] * scale];
+        }
+    }
+}
+
+#[cfg(test)]
+mod display_scale_tests {
+    use super::*;
+    #[test]
+    fn scale_keeps_anchor_and_appended_scenery_in_place() {
+        let mut m = sphere(2.0, 4, 4);
+        let before = m.clone();
+        let at = dfcore::Vec2::new(10.0, -20.0);
+        m.scale_animal(at, 3.0, Some(2));
+        for (v, original) in m.verts[..2].iter().zip(&before.verts) {
+            assert_eq!(v.pos, [at.x + (original.pos[0] - at.x) * 3.0,
+                at.y + (original.pos[1] - at.y) * 3.0, original.pos[2] * 3.0]);
+            assert_eq!(v.normal, original.normal);
+        }
+        assert_eq!(m.verts[2].pos, before.verts[2].pos);
+        assert_eq!(m.indices, before.indices);
     }
 }

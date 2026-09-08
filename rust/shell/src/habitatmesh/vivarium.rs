@@ -27,7 +27,16 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
     let size = c.h.region.size;
 
     // --- floor: coco fibre, dark and fine, with some leaf litter on it.
-    ground_face(out, lo, hi, FLOOR_Z, rgba(COCO, 0.56));
+    substrate(
+        out,
+        lo,
+        hi,
+        FLOOR_Z,
+        0.28,
+        0.24,
+        (size.0 * 31.0 + size.1 * 17.0) as u32,
+        rgba(COCO, 0.56),
+    );
     let mut s = c.scatter();
     for _ in 0..70 {
         let gr = 1.4 + s.next() * 2.6;
@@ -36,7 +45,14 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
             lo.y + gr + s.next() * (size.1 - 2.0 * gr),
         );
         let k = 0.7 + s.next() * 0.7;
-        dome(out, at, FLOOR_Z + 0.5, gr, gr * 0.4, rgba(shade(COCO, k), 0.62));
+        dome(
+            out,
+            at,
+            FLOOR_Z + 0.5,
+            gr,
+            gr * 0.4,
+            rgba(shade(COCO, k), 0.62),
+        );
     }
     for i in 0..6 {
         let r = 5.0 + s.next() * 4.0;
@@ -44,18 +60,32 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
             lo.x + r + 4.0 + s.next() * (size.0 - 2.0 * r - 8.0),
             lo.y + r + 4.0 + s.next() * (size.1 - 2.0 * r - 8.0),
         );
-        blob(
+        leaf(
             out,
-            at,
-            FLOOR_Z + 0.7,
+            [at.x, at.y, FLOOR_Z + 0.7],
             r,
-            0.6,
-            0.25,
             i as f32 * 2.1,
             rgba(shade(LITTER, 0.8 + s.next() * 0.4), 0.8),
         );
     }
 
+    // Short tangled coir fibres break up the smooth soil between grains.
+    for _ in 0..44 {
+        let at =
+            c.h.region
+                .clamp_inside(Vec2::new(s.range(lo.x, hi.x), s.range(lo.y, hi.y)), 7.0);
+        let angle = s.range(0.0, std::f32::consts::TAU);
+        ribbon(
+            out,
+            &[
+                at,
+                Vec2::new(at.x + angle.cos() * 5.0, at.y + angle.sin() * 5.0),
+            ],
+            FLOOR_Z + 0.65,
+            0.55,
+            rgba(shade(COCO, s.range(1.2, 1.7)), 0.62),
+        );
+    }
     // --- the far acrylic walls with their ventilation rows.
     c.far_walls(out, ACRYLIC, 0.16, 0.45);
     vent_row(out, c, Row::BackHigh);
@@ -68,14 +98,22 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
     }
 
     // --- the silk retreat, spun into the top back-left corner.
-    retreat(out, c);
+    surface(out, Material::MEMBRANE, |out| retreat(out, c));
 
     // The plant and the pebble first, then the tall things, so the bark is
     // drawn after the floor clutter it stands over.
-    for prop in c.h.props.iter().filter(|p| !matches!(p.kind, PropKind::Bark | PropKind::Twig)) {
+    for prop in
+        c.h.props
+            .iter()
+            .filter(|p| !matches!(p.kind, PropKind::Bark | PropKind::Twig))
+    {
         prop_mesh(out, c, prop);
     }
-    for prop in c.h.props.iter().filter(|p| matches!(p.kind, PropKind::Bark | PropKind::Twig)) {
+    for prop in
+        c.h.props
+            .iter()
+            .filter(|p| matches!(p.kind, PropKind::Bark | PropKind::Twig))
+    {
         prop_mesh(out, c, prop);
     }
     let _ = top;
@@ -202,9 +240,21 @@ fn retreat(out: &mut Mesh, c: &Ctx) {
     // Guy lines down the two walls and along the rim.
     let line = rgba(SILK, 0.6);
     for (a, b, n) in [
-        (arc(0), [lo.x + 0.5, hi.y - 0.5, top - 6.0 - reach * 0.8], [0.0, -1.0, 0.0]),
-        (arc(SEG), [lo.x + 0.5, hi.y - 0.5, top - 6.0 - reach * 0.8], [1.0, 0.0, 0.0]),
-        (hub, [lo.x + reach * 0.9, hi.y - 0.5, top - 20.0], [0.0, -1.0, 0.0]),
+        (
+            arc(0),
+            [lo.x + 0.5, hi.y - 0.5, top - 6.0 - reach * 0.8],
+            [0.0, -1.0, 0.0],
+        ),
+        (
+            arc(SEG),
+            [lo.x + 0.5, hi.y - 0.5, top - 6.0 - reach * 0.8],
+            [1.0, 0.0, 0.0],
+        ),
+        (
+            hub,
+            [lo.x + reach * 0.9, hi.y - 0.5, top - 20.0],
+            [0.0, -1.0, 0.0],
+        ),
     ] {
         let w = 0.45;
         face(
@@ -288,18 +338,28 @@ fn prop_mesh(out: &mut Mesh, c: &Ctx, prop: &Prop) {
                     a[1] + (b[1] - a[1]) * t,
                     a[2] + (b[2] - a[2]) * t,
                 ];
-                let e = region.clamp_inside(
-                    Vec2::new(p[0] + dir * 22.0, p[1] - 6.0 * dir.abs()),
-                    8.0,
-                );
+                let e =
+                    region.clamp_inside(Vec2::new(p[0] + dir * 22.0, p[1] - 6.0 * dir.abs()), 8.0);
                 (p, [e.x, e.y, p[2] + 10.0])
             };
             for (t, dir) in [(0.45, -1.0), (0.7, 1.0)] {
                 let (p, e) = side(t, dir);
                 tube(out, p, e, 1.9, 8, true, rgba(WOOD, 0.9));
-                disc(out, [e[0], e[1], e[2] + 0.5], 7.0, None, rgba(LEAF, 0.88));
+                leaf(
+                    out,
+                    [e[0], e[1], e[2] + 0.5],
+                    7.0,
+                    dir * 0.7,
+                    rgba(LEAF, 0.88),
+                );
             }
-            disc(out, [b[0], b[1], b[2] + 0.5], 8.0, None, rgba(shade(LEAF, 1.1), 0.88));
+            leaf(
+                out,
+                [b[0], b[1], b[2] + 0.5],
+                8.0,
+                0.5,
+                rgba(shade(LEAF, 1.1), 0.88),
+            );
         }
         _ => {}
     }
@@ -376,7 +436,7 @@ fn bark(out: &mut Mesh, c: &Ctx, prop: &Prop) {
     // Fissures: dark strips running up the face.
     let mut s = Scatter::new((prop.radius * 53.0) as u32);
     let groove = rgba(shade(BARK, 0.45), 0.7);
-    for _ in 0..6 {
+    for _ in 0..16 {
         let fx = x0 + 4.0 + s.next() * (x1 - x0 - 8.0);
         let w = 0.8 + s.next() * 1.4;
         let (t0, t1) = {

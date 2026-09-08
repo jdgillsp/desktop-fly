@@ -13,11 +13,9 @@
 //! fly's `Ledge`s come from. The screen is a frame too, with an id that never
 //! changes, so a thread to the edge of the display is a thread to something.
 //!
-//! Windows are treated as **solid**: on the desktop the web is planned in the
-//! air between them, never over one. A web inside a window's rectangle would
-//! be anchored only to that window, and every move of it would take the whole
-//! web; a web in a gap loses one side and keeps the rest, which is the
-//! behaviour the feature is for.
+//! Gaps between windows are preferred. When those are unavailable, a visible
+//! window frame can support a web over the application. Frames are front to
+//! back, so covered outlines are unavailable and lose their attachments.
 
 use crate::habitat::Region;
 use crate::rng::Pcg32;
@@ -91,6 +89,7 @@ impl Frame {
     /// outline grown by `inset`, so the animal stops just short of the thing.
     fn hit(&self, from: Vec2, dx: f32, dy: f32, inset: f32) -> Option<(f32, Vec2)> {
         if self.contains(from) {
+            let inset = inset.min(((self.hi.x - self.lo.x).min(self.hi.y - self.lo.y) * 0.5 - 0.01).max(0.0));
             let lo = Vec2::new(self.lo.x + inset, self.lo.y + inset);
             let hi = Vec2::new(self.hi.x - inset, self.hi.y - inset);
             let mut t = f32::MAX;
@@ -158,6 +157,23 @@ pub struct Anchors {
 }
 
 impl Anchors {
+    /// Habitat furniture uses its physical footprint, not the web's planning box.
+    /// Negative ids are reserved for habitat supports; window handles are positive.
+    pub fn habitat(h: &crate::habitat::Habitat) -> Self {
+        use crate::habitat::PropKind;
+        let mut world = Self::enclosure(h.region);
+        for (i, p) in h.props.iter().enumerate() {
+            if p.present() && matches!(p.kind, PropKind::Bark | PropKind::Twig | PropKind::Pebble | PropKind::Hide) {
+                let r = p.radius;
+                world.structures.push(Frame {
+                    lo: h.region.clamp_inside(Vec2::new(p.pos.x - r, p.pos.y - r), 0.0),
+                    hi: h.region.clamp_inside(Vec2::new(p.pos.x + r, p.pos.y + r), 0.0),
+                    id: -2 - i as i64,
+                });
+            }
+        }
+        world
+    }
     /// Four walls that never move.
     pub fn enclosure(region: Region) -> Self {
         Anchors {
@@ -171,8 +187,8 @@ impl Anchors {
     /// planned in `bounds`.
     pub fn desktop(bounds: Region, display: Region, frames: &[Frame]) -> Self {
         let mut structures = Vec::with_capacity(frames.len() + 1);
-        structures.push(Frame::of(display, SCREEN));
         structures.extend(frames.iter().copied());
+        structures.push(Frame::of(display, SCREEN));
         Anchors {
             bounds,
             structures,
@@ -181,7 +197,14 @@ impl Anchors {
     }
 
     pub fn is_enclosure(&self) -> bool {
-        self.structures.len() == 1 && self.structures[0].id == WALLS
+        self.structures.iter().any(|s| s.id == WALLS)
+    }
+
+    /// Desktop frames arrive front to back. Hidden outlines cannot hold silk.
+    fn visible(&self, index: usize, p: Vec2) -> bool {
+        if self.is_enclosure() { return true; }
+        !self.structures.iter().take(index).filter(|s| s.id != SCREEN)
+            .any(|s| s.contains(p))
     }
 
     /// The first structure a ray from `from` at `angle` reaches within
@@ -189,9 +212,9 @@ impl Anchors {
     pub fn ray(&self, from: Vec2, angle: f32, inset: f32) -> Option<(Vec2, i64)> {
         let (dy, dx) = angle.sin_cos();
         let mut best: Option<(f32, Vec2, i64)> = None;
-        for s in &self.structures {
+        for (index, s) in self.structures.iter().enumerate() {
             if let Some((t, p)) = s.hit(from, dx, dy, inset) {
-                if t <= self.reach && best.map(|b| t < b.0).unwrap_or(true) {
+                if self.visible(index, p) && t <= self.reach && best.map(|b| t < b.0).unwrap_or(true) {
                     best = Some((t, p, s.id));
                 }
             }
@@ -232,7 +255,9 @@ impl Anchors {
     pub fn on(&self, p: Vec2, tol: f32) -> Option<i64> {
         self.structures
             .iter()
-            .map(|s| (s.edge_distance(p), s.id))
+            .enumerate()
+            .filter(|(i, _)| self.visible(*i, p))
+            .map(|(_, s)| (s.edge_distance(p), s.id))
             .filter(|(d, _)| *d <= tol)
             .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
             .map(|(_, id)| id)
@@ -242,8 +267,8 @@ impl Anchors {
     /// structures, with room for the smallest web in every direction and the
     /// structures as close around it as that allows — a gap between two
     /// windows, a corner of the screen, the space under a window and above
-    /// the taskbar. Windows are solid; nothing is planned over one. `None` if
-    /// the screen is too crowded for any web at all.
+    /// the taskbar. Visible application frames are used when gaps are unavailable.
+    /// `None` if no adequately supported site is available.
     ///
     /// Deterministic given the frames and the seed: the best few sites by
     /// score are kept and one is drawn, so the same desktop does not always
@@ -260,22 +285,23 @@ impl Anchors {
             while x < hi.x - 60.0 {
                 let p = Vec2::new(x, y);
                 x += STEP;
-                if frames.iter().any(|f| f.contains(p)) {
-                    continue;
-                }
+                let over_window = frames.iter().any(|f| f.contains(p));
                 let mut clearance = f32::MAX;
                 let mut score = 0.0;
+                let mut supports = 0;
                 for k in 0..DIRS {
                     let a = std::f32::consts::TAU * k as f32 / DIRS as f32;
                     let d = match world.ray(p, a, 0.0) {
-                        Some((q, _)) => hypot(q.x - p.x, q.y - p.y),
+                        Some((q, _)) => { supports += 1; hypot(q.x - p.x, q.y - p.y) },
                         None => MAX_REACH,
                     };
                     clearance = clearance.min(d);
                     score += d.min(MAX_REACH);
                 }
-                if clearance >= MIN_CLEARANCE {
-                    sites.push((score, p, clearance));
+                if supports >= 3 && clearance >= MIN_CLEARANCE {
+                    // Prefer gaps, but a maximized application's visible frame
+                    // is also a real support. Do not fall back to a floating box.
+                    sites.push((score + if over_window { MAX_REACH * DIRS as f32 } else { 0.0 }, p, clearance));
                 }
             }
             y += STEP;
@@ -412,9 +438,9 @@ mod tests {
         assert!(!a.contains(site.center) && !b.contains(site.center), "{site:?}");
         assert!(site.center.x.abs() < 260.0, "in the gap: {site:?}");
         assert!(site.size.0 <= crate::weaver::FREE_ROAM_WEB.0 && site.size.1 <= crate::weaver::FREE_ROAM_WEB.1);
-        // A screen with no room anywhere gives nothing.
+        // A maximized window still provides visible structural edges.
         let full = Frame::of(display, 3);
-        assert!(Anchors::choose_site(display, &[full], &mut rng).is_none());
+        assert!(Anchors::choose_site(display, &[full], &mut rng).is_some());
         // An empty screen gives a corner-ish site: something is always
         // close, because a web wants structure around it.
         let site = Anchors::choose_site(display, &[], &mut rng).unwrap();

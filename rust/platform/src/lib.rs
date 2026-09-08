@@ -6,6 +6,8 @@
 
 #[cfg(target_os = "windows")]
 mod windows_senses;
+#[cfg(target_os = "windows")]
+mod ui_supports;
 pub mod notify;
 
 #[cfg(target_os = "windows")]

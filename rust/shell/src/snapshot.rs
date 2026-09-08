@@ -40,6 +40,10 @@ pub fn render_to_png(
     // Inside the enclosure, look closely at the animal rather than at the
     // whole tank.
     closeup: bool,
+    head_closeup: bool,
+    animal_scale: f32,
+    see_through_hides: bool,
+    elapsed: f32,
 ) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         #[cfg(target_os = "windows")]
@@ -77,7 +81,7 @@ pub fn render_to_png(
         Some(v) => v.camera(),
         None => crate::camera::Camera::TopDown,
     };
-    let enclosure = habitat.map(|v| {
+    let mut enclosure = habitat.map(|v| {
         let kind = dfcore::HabitatKind::for_substrate(rt.substrate());
         let display = (width as f32, height as f32);
         // The largest tank that fits the frame, centred, through the same
@@ -107,24 +111,46 @@ pub fn render_to_png(
         Some(h) => h.region,
         None => dfcore::Region::centered((width as f32, height as f32)),
     };
+    rt.habitat_changed(enclosure.as_ref());
     rt.snapshot_pose(alt, walking_frames, region);
-    // The close-up is decided once the animal is posed, since it is what the
-    // camera centres on. Everything before this — the tank's size and place —
-    // was done against the plain camera, as on the desktop.
+    // Run the actual enclosure interaction loop for reproducible animation QA.
+    for _ in 0..(elapsed.clamp(0.0,300.0)*60.0) as usize {
+        if let Some(h) = &mut enclosure {
+            h.step(1.0/60.0,rt.position(),None);
+            rt.habitat_tick(1.0/60.0,h,None);
+        } else { rt.tick(1.0/60.0,region,None,None); }
+    }
+    let hint = rt.vertical_hint();
+    if elapsed > 0.0 { println!("snapshot: {}",rt.status()); }
+    let at = rt.position();
+    let radius = if head_closeup {
+        rt.head_inspection_radius()
+    } else {
+        rt.inspection_radius()
+    };
+    let geometry = rt.build(glass);
+    let lift = enclosure
+        .as_ref()
+        .map_or(0.0, |h| crate::habitatmesh::creature_lift(h.kind, hint));
     let cam = if closeup {
-        cam.framed(rt.position(), crate::camera::CLOSEUP_MAGNIFY)
+        cam.fit_animal(
+            crate::runtime::inspection_points(
+                geometry.body,
+                at,
+                radius,
+                geometry.inspection_vertices,
+                lift,
+            ),
+            (width as f32, height as f32),
+        )
+        .map_or(cam, |f| cam.framed(f.focus, f.magnify))
     } else {
         cam
     };
-    let hint = rt.vertical_hint();
-    let geometry = rt.build(glass);
     let mut frame = crate::mesh::Mesh::default();
     let mut front = crate::mesh::Mesh::default();
-    let mut lift = 0.0;
     if let Some(h) = &enclosure {
-        crate::habitatmesh::build_back(&mut frame, h, cam.view_dir());
-        crate::habitatmesh::build_front(&mut front, h, cam.view_dir(), false);
-        lift = crate::habitatmesh::creature_lift(h.kind, hint);
+        crate::habitatmesh::build_display(&mut frame, &mut front, h, cam.view_dir(), false, see_through_hides);
     }
     let base = frame.verts.len() as u32;
     frame.verts.extend(geometry.body.verts.iter().map(|v| {
@@ -140,12 +166,13 @@ pub fn render_to_png(
     frame
         .indices
         .extend(front.indices.iter().map(|i| i + fbase));
-    let neuron_mesh = geometry
-        .neurons
-        .filter(|m| !m.indices.is_empty())
-        .cloned();
+    let neuron_mesh = geometry.neurons.filter(|m| !m.indices.is_empty()).cloned();
     let have_neurons = neuron_mesh.is_some();
-    let neuron_mesh = neuron_mesh.unwrap_or_default();
+    let mut neuron_mesh = neuron_mesh.unwrap_or_default();
+    if enclosure.is_none() {
+        frame.scale_animal(at, animal_scale, geometry.inspection_vertices);
+        neuron_mesh.scale_animal(at, animal_scale, None);
+    }
     println!(
         "snapshot: {} verts, {} indices, {} neurons lit",
         frame.verts.len(),
@@ -196,27 +223,7 @@ pub fn render_to_png(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }],
-    });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &bgl,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: ubuf.as_entire_binding(),
-        }],
-    });
+    let (bgl, bind_group) = crate::skin_texture::create_bindings(&device, &queue, &ubuf);
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
         bind_group_layouts: &[Some(&bgl)],
@@ -232,7 +239,7 @@ pub fn render_to_png(
             buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4],
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4],
             })],
         },
         fragment: Some(wgpu::FragmentState {
@@ -272,7 +279,7 @@ pub fn render_to_png(
             buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4],
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4],
             })],
         },
         fragment: Some(wgpu::FragmentState {
@@ -321,16 +328,20 @@ pub fn render_to_png(
     });
     let (nvbuf, nibuf) = if have_neurons {
         (
-            Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(&neuron_mesh.verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            })),
-            Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(&neuron_mesh.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            })),
+            Some(
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(&neuron_mesh.verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                }),
+            ),
+            Some(
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(&neuron_mesh.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                }),
+            ),
         )
     } else {
         (None, None)

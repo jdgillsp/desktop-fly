@@ -17,8 +17,10 @@ mod brain;
 mod camera;
 mod flybody;
 mod habitatmesh;
+mod hognoseasset;
 mod hognosebody;
 mod hognosert;
+mod interaction;
 mod koibody;
 mod koirt;
 mod math;
@@ -28,21 +30,27 @@ mod render;
 mod runtime;
 mod sandwormbody;
 mod sandwormrt;
+mod skin_texture;
 mod snapshot;
 mod spiderbody;
 mod spiderrt;
+mod transduction;
+mod tray;
 mod weaverbody;
 mod weaverrt;
-mod tray;
-mod transduction;
+mod webspace;
+mod webtravel;
+mod webcontact;
+#[cfg(test)]
+mod webaudit;
 mod wormbody;
 mod wormrt;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dfcore::env::{Rect, ScreenSpace, Senses};
 use camera::{Camera, HabitatView};
+use dfcore::env::{Rect, ScreenSpace, Senses};
 use dfcore::{Habitat, HabitatChord, HabitatKind, PropKind, Region, Vec2};
 use dfplatform::HostSenses;
 
@@ -67,7 +75,9 @@ fn harden_overlay_styles(window: &Window) {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
-    let Ok(h) = window.window_handle() else { return };
+    let Ok(h) = window.window_handle() else {
+        return;
+    };
     let RawWindowHandle::Win32(w) = h.as_raw() else {
         return;
     };
@@ -98,6 +108,7 @@ struct Args {
     habitat_explicit: bool,
     /// The habitat camera follows the animal, close. A toggle, persisted.
     closeup: bool,
+    interactions: bool,
     /// Frame cap. A background pet does not need 60 fps, and Spike 0 measured
     /// ~8% of a core just to clear and present a full-screen overlay -- so the
     /// frame rate is most of the idle cost. See `--fps`.
@@ -151,9 +162,13 @@ fn parse_args() -> Args {
         },
         // Off unless asked for: free roam stays the default, and an existing
         // install is unaffected by this feature existing.
-        habitat: a.iter().any(|x| x == "--habitat") || persist::load_habitat_choice().unwrap_or(false),
-        habitat_explicit: a.iter().any(|x| x == "--habitat") || persist::load_habitat_choice().is_some(),
-        closeup: a.iter().any(|x| x == "--closeup") || persist::load_closeup_choice().unwrap_or(false),
+        habitat: a.iter().any(|x| x == "--habitat")
+            || persist::load_habitat_choice().unwrap_or(false),
+        habitat_explicit: a.iter().any(|x| x == "--habitat")
+            || persist::load_habitat_choice().is_some(),
+        interactions: a.iter().any(|x| x == "--interactions"),
+        closeup: a.iter().any(|x| x == "--closeup")
+            || persist::load_closeup_choice().unwrap_or(false),
         fps: a
             .iter()
             .position(|x| x == "--fps")
@@ -195,6 +210,9 @@ struct App {
     /// region the creature sees is `Region::centered(display)` — bit-identical
     /// to the arithmetic the bodies did before habitats existed.
     habitat: Option<Habitat>,
+    panel: Option<interaction::Panel>,
+    quiet: bool,
+    interaction_feedback: String,
     /// This frame's composed geometry: the tank behind, the creature, then the
     /// front glass. One mesh and one draw, so the renderer needs no extra
     /// buffers — index order is draw order.
@@ -208,6 +226,12 @@ struct App {
     grabbing: bool,
     /// Where the close-up is looking: the animal's position, a beat behind.
     closeup_focus: Vec2,
+    closeup_magnify: f32,
+    closeup_ready: bool,
+    head_closeup: bool,
+    animal_scale: f32,
+    see_through_hides: bool,
+    scaled_neurons: mesh::Mesh,
     /// How the user has angled and sized the enclosure. Persisted.
     view: HabitatView,
     /// The chord held this frame and last, and where the pointer was when the
@@ -232,14 +256,21 @@ struct App {
     last_mood: String,
     last_state_save: Instant,
     /// Monitors, for the "Move to Next Display" command.
-    monitors: Vec<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>, f64)>,
+    monitors: Vec<(
+        winit::dpi::PhysicalPosition<i32>,
+        winit::dpi::PhysicalSize<u32>,
+        f64,
+    )>,
     monitor_index: usize,
 }
 
 impl App {
     fn new(mut args: Args) -> Self {
         let space = ScreenSpace::new(Rect::new(0, 0, 1920, 1080));
-        let rt = runtime::make(&args.creature, dfcore::DEFAULT_SEED);
+        let mut rt = runtime::make(&args.creature, dfcore::DEFAULT_SEED);
+        if let Some(value) = persist::load_appetite(rt.creature().id()) {
+            rt.restore_care(value);
+        }
         if !args.habitat_explicit && rt.prefers_habitat() {
             args.habitat = true;
         }
@@ -260,10 +291,19 @@ impl App {
             hidden_for_fullscreen: false,
             last_env_cursor: None,
             habitat: None,
+            panel: None,
+            quiet: false,
+            interaction_feedback: String::new(),
             frame_mesh: mesh::Mesh::default(),
             front_mesh: mesh::Mesh::default(),
             grabbing: false,
             closeup_focus: Vec2::ZERO,
+            closeup_magnify: 1.0,
+            closeup_ready: false,
+            head_closeup: false,
+            animal_scale: persist::load_animal_scale(),
+            see_through_hides: persist::load_see_through_hides(),
+            scaled_neurons: mesh::Mesh::default(),
             view: {
                 let mut v = HabitatView::default();
                 if let Some((pitch, yaw, zoom)) = persist::load_habitat_view() {
@@ -339,7 +379,9 @@ impl ApplicationHandler for App {
             .with_inner_size(size);
         #[cfg(target_os = "windows")]
         {
-            attrs = attrs.with_skip_taskbar(true).with_no_redirection_bitmap(true);
+            attrs = attrs
+                .with_skip_taskbar(true)
+                .with_no_redirection_bitmap(true);
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let _ = window.set_cursor_hittest(false);
@@ -433,13 +475,25 @@ impl ApplicationHandler for App {
         match &self.habitat {
             Some(h) => {
                 self.rt.place(h.region.center);
-                println!("habitat: {} at ({:.0},{:.0}), {:.0}x{:.0}",
-                    h.kind.label(), h.region.center.x, h.region.center.y,
-                    h.region.size.0, h.region.size.1);
+                println!(
+                    "habitat: {} at ({:.0},{:.0}), {:.0}x{:.0}",
+                    h.kind.label(),
+                    h.region.center.x,
+                    h.region.center.y,
+                    h.region.size.0,
+                    h.region.size.1
+                );
             }
             None => self.rt.place(Vec2::new(w * 0.2, -h * 0.15)),
         }
 
+        if self.args.interactions {
+            self.panel = interaction::Panel::new();
+            self.configure_interactions();
+            if let Some(panel) = &self.panel {
+                panel.show();
+            }
+        }
         self.surface = Some(surface);
         self.renderer = Some(renderer);
         self.window = Some(window);
@@ -510,11 +564,9 @@ impl ApplicationHandler for App {
                     ..
                 } => {
                     let name = self.rt.creature().display_name();
-                    if let (Some(b), Some(sim), Some((cx, cy))) = (
-                        self.brain.as_mut(),
-                        self.rt.sim_mut(),
-                        self.brain_cursor,
-                    ) {
+                    if let (Some(b), Some(sim), Some((cx, cy))) =
+                        (self.brain.as_mut(), self.rt.sim_mut(), self.brain_cursor)
+                    {
                         if let Some(label) = b.handle_click(cx, cy, sim) {
                             println!("stimulating {label}");
                             if let Some(w) = &self.brain_window {
@@ -639,7 +691,7 @@ impl App {
             Some(_) if self.args.closeup => self
                 .view
                 .camera()
-                .framed(self.closeup_focus, camera::CLOSEUP_MAGNIFY),
+                .framed(self.closeup_focus, self.closeup_magnify),
             Some(_) => self.view.camera(),
             None => Camera::TopDown,
         }
@@ -704,6 +756,7 @@ impl App {
             Some(h) if h.kind == kind => h.reshape(region),
             _ => {
                 let mut h = Habitat::new(kind, region, dfcore::DEFAULT_SEED);
+                h.warm_end = persist::load_heat(kind.slug());
                 // A tank the user has arranged comes back as they left it.
                 if let Some(saved) = persist::load_habitat_contents(kind.slug()) {
                     h.restore(&saved);
@@ -716,7 +769,8 @@ impl App {
 
     /// Tell the tray what the view is and what the enclosure could hold. Both
     /// depend on the running creature, so this is called wherever the tank is.
-    fn refresh_habitat_menu(&self) {
+    fn refresh_habitat_menu(&mut self) {
+        self.configure_interactions();
         let Some(t) = &self.tray else { return };
         t.set_view(
             &if self.args.habitat && self.args.closeup {
@@ -728,17 +782,17 @@ impl App {
             },
             self.view.is_default(),
         );
+        t.set_animal_display(self.animal_scale, self.habitat.is_some(), self.see_through_hides,
+            self.habitat.as_ref().is_some_and(|h| h.kind == dfcore::HabitatKind::SandTerrarium));
         t.set_closeup(self.args.closeup);
+        t.set_head_closeup(
+            self.head_closeup,
+            self.habitat.is_some() && self.rt.head_inspection_radius().is_some(),
+        );
         let slots: Vec<(String, bool, bool)> = match &self.habitat {
             Some(h) => PropKind::catalogue(h.kind)
                 .iter()
-                .map(|k| {
-                    (
-                        k.label().to_lowercase(),
-                        h.can_add(*k),
-                        h.count(*k) > 0,
-                    )
-                })
+                .map(|k| (k.label().to_lowercase(), h.can_add(*k), h.count(*k) > 0))
                 .collect(),
             None => Vec::new(),
         };
@@ -747,10 +801,30 @@ impl App {
 
     /// Persist what the user has arranged: the angles and size, and the props
     /// as fractions of the tank.
+    fn configure_interactions(&mut self) {
+        if let Some(panel) = &mut self.panel {
+            let names = self
+                .habitat
+                .as_ref()
+                .map(|h| {
+                    h.props
+                        .iter()
+                        .map(|p| format!("{} ({})", p.kind.label(), p.variant + 1))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            panel.configure(self.rt.creature().id(), &names);
+        }
+    }
+
     fn save_habitat_settings(&self) {
+        if let Some(value) = self.rt.care_state() {
+            persist::save_appetite(self.rt.creature().id(), value);
+        }
         persist::save_habitat_view(self.view.pitch, self.view.yaw, self.view.zoom);
         if let Some(h) = &self.habitat {
             persist::save_habitat_contents(h.kind.slug(), &h.snapshot());
+            persist::save_heat(h.kind.slug(), h.warm_end);
         }
     }
 
@@ -782,13 +856,17 @@ impl App {
         }
         self.rebuild_habitat(false);
         self.rt.moved_display(self.region());
-        println!("moved to display {} ({}x{})", self.monitor_index, size.width, size.height);
+        println!(
+            "moved to display {} ({}x{})",
+            self.monitor_index, size.width, size.height
+        );
     }
 
     /// Swap the running creature for another, in place: the new animal appears
     /// where the old one was, with its own habituation history, and the brain
     /// window is rebuilt for its data (or closed if it has none).
     fn switch_creature(&mut self, event_loop: &ActiveEventLoop, id: &str) {
+        self.save_habitat_settings();
         if id == self.rt.creature().id() {
             return;
         }
@@ -798,6 +876,11 @@ impl App {
         *rt.habituation_mut() = persist::load(id);
         rt.place(at);
         self.rt = rt;
+        self.closeup_ready = false;
+        self.head_closeup = false;
+        if let Some(value) = persist::load_appetite(self.rt.creature().id()) {
+            self.rt.restore_care(value);
+        }
         persist::save_creature_choice(id);
         // A koi in a terrarium, or a spider in a fish tank, would be the wrong
         // enclosure for the animal — so the tank is rebuilt from the new
@@ -838,7 +921,11 @@ impl App {
     /// reaching for the keys does not jerk the view by however far the mouse
     /// happened to be from where it was.
     fn handle_chord(&mut self) {
-        let chord = if self.habitat.is_some() { self.chord } else { HabitatChord::None };
+        let chord = if self.habitat.is_some() {
+            self.chord
+        } else {
+            HabitatChord::None
+        };
         let continuing = chord == self.prev_chord && chord.active();
         let delta = match (continuing, self.chord_from, self.last_screen_cursor) {
             (true, Some(a), Some(b)) => Vec2::new(b.x - a.x, b.y - a.y),
@@ -904,10 +991,53 @@ impl App {
         };
         self.last_frame = Some(now);
 
+        let actions = self.panel.as_mut().map(|p| p.poll()).unwrap_or_default();
+        for action in actions {
+            if matches!(action, interaction::Command::Quiet) {
+                self.quiet = !self.quiet;
+                self.interaction_feedback = if self.quiet {
+                    "Quiet observation on."
+                } else {
+                    "Desktop disturbances on."
+                }
+                .to_string();
+            } else if let Some(h) = &mut self.habitat {
+                self.interaction_feedback =
+                    interaction::apply(self.rt.as_mut(), h, action).to_string();
+                self.rt.habitat_changed(Some(h));
+                self.save_habitat_settings();
+                self.refresh_habitat_menu();
+            } else {
+                self.interaction_feedback = "Enable Habitat from the tray first.".to_string();
+            }
+        }
+        if self.frames % 30 == 0 {
+            if let Some(panel) = &mut self.panel {
+                panel.status(&format!(
+                    "{} | {}\r\n{}",
+                    self.rt.status(),
+                    if self.quiet {
+                        "quiet"
+                    } else {
+                        "desktop senses"
+                    },
+                    self.interaction_feedback
+                ));
+            }
+        }
         // Drain first so the tray borrow ends before anything mutates self.
         let commands = self.tray.as_ref().map(|t| t.poll()).unwrap_or_default();
         for cmd in commands {
             match cmd {
+                tray::TrayCommand::Interactions => {
+                    if self.panel.is_none() {
+                        self.panel = interaction::Panel::new();
+                    }
+                    self.configure_interactions();
+                    if let Some(panel) = &self.panel {
+                        panel.show();
+                    }
+                }
                 tray::TrayCommand::Quit => {
                     persist::save(self.rt.creature().id(), self.rt.habituation());
                     self.save_habitat_settings();
@@ -935,7 +1065,11 @@ impl App {
                     }
                     println!(
                         "{}",
-                        if self.args.glass { "glass anatomy on" } else { "literal animal" }
+                        if self.args.glass {
+                            "glass anatomy on"
+                        } else {
+                            "literal animal"
+                        }
                     );
                 }
                 tray::TrayCommand::ToggleHabitat => {
@@ -958,6 +1092,18 @@ impl App {
                             None => "habitat off - free roam".to_string(),
                         }
                     );
+                }
+                tray::TrayCommand::SetAnimalSize(percent) => {
+                    if self.habitat.is_none() {
+                        self.animal_scale = percent as f32 / 100.0;
+                        persist::save_animal_scale(self.animal_scale);
+                    }
+                    self.refresh_habitat_menu();
+                }
+                tray::TrayCommand::ToggleSeeThroughHides => {
+                    self.see_through_hides = !self.see_through_hides;
+                    persist::save_see_through_hides(self.see_through_hides);
+                    self.refresh_habitat_menu();
                 }
                 tray::TrayCommand::AdjustView(step) => {
                     // One coarse step each; the chords are the fine control.
@@ -984,11 +1130,25 @@ impl App {
                     self.refresh_habitat_menu();
                     println!("habitat view reset: {}", self.view.describe());
                 }
+                tray::TrayCommand::ToggleHeadCloseup => {
+                    if self.rt.head_inspection_radius().is_some() {
+                        self.head_closeup = !self.head_closeup;
+                        self.args.closeup = true;
+                        self.closeup_ready = false;
+                        if self.head_closeup {
+                            self.view.pitch = 1.15;
+                        }
+                        persist::save_closeup_choice(true);
+                        self.refresh_habitat_menu();
+                    }
+                }
                 tray::TrayCommand::ToggleCloseup => {
                     self.args.closeup = !self.args.closeup;
+                    self.head_closeup = false;
                     // Start on the animal rather than sliding in from wherever
                     // the focus was last left.
                     self.closeup_focus = self.rt.position();
+                    self.closeup_ready = false;
                     persist::save_closeup_choice(self.args.closeup);
                     self.refresh_habitat_menu();
                     println!("close-up {}", if self.args.closeup { "on" } else { "off" });
@@ -1053,7 +1213,15 @@ impl App {
             let sense_dt = (now - self.last_sense).as_secs_f32().clamp(1e-4, 0.5);
             self.last_sense = now;
             let t0 = Instant::now();
-            let env = self.senses.poll(&self.space);
+            let mut env = self.senses.poll(&self.space);
+            if self.quiet || self.panel.as_ref().is_some_and(|p| p.active()) {
+                env.cursor = None;
+                env.cursor_vel = Vec2::ZERO;
+                env.new_windows.clear();
+                env.clicks.clear();
+                env.build_events.clear();
+                env.typing_level = 0.0;
+            }
             if self.args.diag && self.frames < 3 {
                 eprintln!("[diag] senses.poll took {:?}", t0.elapsed());
             }
@@ -1061,7 +1229,10 @@ impl App {
             // Yield to fullscreen games and presentations. New on Windows;
             // macOS's .fullScreenAuxiliary made it unnecessary there.
             if self.args.diag && self.frames < 3 {
-                eprintln!("[diag] fullscreen_app_active = {}", env.fullscreen_app_active);
+                eprintln!(
+                    "[diag] fullscreen_app_active = {}",
+                    env.fullscreen_app_active
+                );
             }
             if env.fullscreen_app_active != self.hidden_for_fullscreen {
                 self.hidden_for_fullscreen = env.fullscreen_app_active;
@@ -1070,7 +1241,9 @@ impl App {
                 }
             }
 
-            if self.args.diag && self.frames < 3 { eprintln!("[diag] A: about to transduce"); }
+            if self.args.diag && self.frames < 3 {
+                eprintln!("[diag] A: about to transduce");
+            }
             if self.habitat.is_some() {
                 // Two corrections inside a tank.
                 //
@@ -1109,12 +1282,16 @@ impl App {
                 self.chord = HabitatChord::None;
                 self.grabbing = false;
             }
-            if self.args.diag && self.frames < 3 { eprintln!("[diag] B: transduced"); }
+            if self.args.diag && self.frames < 3 {
+                eprintln!("[diag] B: transduced");
+            }
         }
 
         // The brain at a true 1 kHz, decoupled from the frame rate, then the
         // body once — both inside the runtime, whichever creature it is.
-        if self.args.diag && self.frames < 3 { eprintln!("[diag] C: stepping creature"); }
+        if self.args.diag && self.frames < 3 {
+            eprintln!("[diag] C: stepping creature");
+        }
         let at_last_frame = self.rt.position();
         // Repositioning: while the chord is held the tank follows the pointer.
         // Deliberately not a click-and-drag — the overlay never takes a click
@@ -1125,23 +1302,16 @@ impl App {
         let region = self.region();
         // The enclosure moves first, so the creature reacts to where the props
         // are now rather than to where they were a frame ago.
-        let attractor = match &mut self.habitat {
+        match &mut self.habitat {
             Some(h) => {
                 h.step(dt, at_last_frame, self.last_env_cursor);
-                h.attractor()
+                self.rt.habitat_tick(dt, h, self.last_env_cursor);
             }
-            None => None,
+            None => self.rt.tick(dt, region, self.last_env_cursor, None),
         };
-        self.rt.tick(dt, region, self.last_env_cursor, attractor);
-        // The close-up follows the animal a beat behind: a view snapped to
-        // every step would shake the whole tank with the walk.
-        {
-            let target = self.rt.position();
-            let k = 1.0 - (-dt * 5.0).exp();
-            self.closeup_focus.x += (target.x - self.closeup_focus.x) * k;
-            self.closeup_focus.y += (target.y - self.closeup_focus.y) * k;
+        if self.args.diag && self.frames < 3 {
+            eprintln!("[diag] E: body updated");
         }
-        if self.args.diag && self.frames < 3 { eprintln!("[diag] E: body updated"); }
 
         let diag = self.args.diag && self.frames < 3;
         let (glass, shadows) = (self.args.glass, self.args.shadows);
@@ -1149,11 +1319,56 @@ impl App {
         let at = self.rt.position();
         // Read everything the composition needs off `self` before `build`
         // borrows the runtime for the rest of the frame.
-        let cam = self.camera();
+        let mut cam = self.camera();
+        let inspection_camera = self.view.camera();
+        let inspection_display = self.space.size();
+        let inspection_radius = if self.head_closeup {
+            self.rt.head_inspection_radius()
+        } else {
+            self.rt.inspection_radius()
+        };
         let lift_hint = self.rt.vertical_hint();
         let grabbing = self.grabbing;
         let geometry = self.rt.build(glass);
-        if diag { eprintln!("[diag] F: geometry built"); }
+        if self.args.closeup && self.habitat.is_some() {
+            let lift = self
+                .habitat
+                .as_ref()
+                .map_or(0.0, |h| habitatmesh::creature_lift(h.kind, lift_hint));
+            let points = runtime::inspection_points(
+                geometry.body,
+                at,
+                inspection_radius,
+                geometry.inspection_vertices,
+                lift,
+            );
+            if let Some(target) = inspection_camera.fit_animal(points, inspection_display) {
+                if !self.closeup_ready {
+                    self.closeup_focus = target.focus;
+                    self.closeup_magnify = target.magnify;
+                    self.closeup_ready = true;
+                } else {
+                    let follow = 1.0 - (-dt * 7.0).exp();
+                    self.closeup_focus.x += (target.focus.x - self.closeup_focus.x) * follow;
+                    self.closeup_focus.y += (target.focus.y - self.closeup_focus.y) * follow;
+                    // Pull back promptly when a snake extends; zoom in gently
+                    // so breathing and individual steps do not pump the view.
+                    let rate = if target.magnify < self.closeup_magnify {
+                        12.0
+                    } else {
+                        1.5
+                    };
+                    self.closeup_magnify +=
+                        (target.magnify - self.closeup_magnify) * (1.0 - (-dt * rate).exp());
+                }
+                cam = inspection_camera.framed(self.closeup_focus, self.closeup_magnify);
+            }
+        } else {
+            self.closeup_ready = false;
+        }
+        if diag {
+            eprintln!("[diag] F: geometry built");
+        }
 
         // The enclosure and the creature share one pipeline and one vertex
         // format, so they go to the GPU as a single mesh rather than as a third
@@ -1167,8 +1382,8 @@ impl App {
         let (body, creature_range, ground_z) = match &self.habitat {
             Some(h) => {
                 let view = cam.view_dir();
-                habitatmesh::build_back(&mut self.frame_mesh, h, view);
-                habitatmesh::build_front(&mut self.front_mesh, h, view, grabbing);
+                habitatmesh::build_display(&mut self.frame_mesh, &mut self.front_mesh,
+                    h, view, grabbing, self.see_through_hides);
 
                 // The creature is lifted into the tank: standing on the
                 // substrate, or — for a swimmer — floating at its own depth,
@@ -1189,7 +1404,9 @@ impl App {
                 let end = self.frame_mesh.indices.len() as u32;
 
                 let fbase = self.frame_mesh.verts.len() as u32;
-                self.frame_mesh.verts.extend_from_slice(&self.front_mesh.verts);
+                self.frame_mesh
+                    .verts
+                    .extend_from_slice(&self.front_mesh.verts);
                 self.frame_mesh
                     .indices
                     .extend(self.front_mesh.indices.iter().map(|i| i + fbase));
@@ -1197,10 +1414,19 @@ impl App {
             }
             None => {
                 let n = geometry.body.indices.len() as u32;
-                (geometry.body, 0..n, -0.5)
+                self.frame_mesh.clone_from(geometry.body);
+                self.frame_mesh.scale_animal(at, self.animal_scale, geometry.inspection_vertices);
+                (&self.frame_mesh, 0..n, -0.5)
             }
         };
 
+        let neurons = if self.habitat.is_none() {
+            geometry.neurons.map(|n| {
+                self.scaled_neurons.clone_from(n);
+                self.scaled_neurons.scale_animal(at, self.animal_scale, None);
+                &self.scaled_neurons
+            })
+        } else { geometry.neurons };
         if let (Some(r), Some(s)) = (self.renderer.as_mut(), self.surface.as_ref()) {
             if !hidden {
                 let t0 = Instant::now();
@@ -1208,7 +1434,7 @@ impl App {
                     s,
                     &render::Frame {
                         mesh: body,
-                        neurons: geometry.neurons,
+                        neurons,
                         shadows,
                         creature: creature_range,
                         camera: cam,
@@ -1318,14 +1544,26 @@ fn main() {
                 .and_then(|v| v.parse::<f32>().ok())
                 .unwrap_or(dflt)
         };
-        let habitat = argv.iter().any(|a| a == "--habitat").then(|| camera::HabitatView {
-            pitch: num("--pitch", camera::DEFAULT_PITCH),
-            yaw: num("--yaw", camera::DEFAULT_YAW),
-            zoom: num("--tank", 1.0),
-        });
+        let habitat = argv
+            .iter()
+            .any(|a| a == "--habitat")
+            .then(|| camera::HabitatView {
+                pitch: num(
+                    "--pitch",
+                    if argv.iter().any(|a| a == "--head-closeup") {
+                        1.15
+                    } else {
+                        camera::DEFAULT_PITCH
+                    },
+                ),
+                yaw: num("--yaw", camera::DEFAULT_YAW),
+                zoom: num("--tank", 1.0),
+            });
         // Bigger frame with a tank in it: 320 px is barely wider than the fly.
-        let side = if habitat.is_some() { 560 } else { 320 };
-        let closeup = habitat.is_some() && argv.iter().any(|a| a == "--closeup");
+        let side = num("--size", if habitat.is_some() { 560.0 } else { 320.0 }).clamp(128.0, 4096.0)
+            as u32;
+        let head_closeup = habitat.is_some() && argv.iter().any(|a| a == "--head-closeup");
+        let closeup = head_closeup || (habitat.is_some() && argv.iter().any(|a| a == "--closeup"));
         snapshot::render_to_png(
             rt.as_mut(),
             &path,
@@ -1337,6 +1575,10 @@ fn main() {
             zoom,
             habitat,
             closeup,
+            head_closeup,
+            num("--animal-scale", 1.0).clamp(0.5, 4.0),
+            argv.iter().any(|a| a == "--see-through-hides"),
+            num("--snapshot-seconds", 0.0),
         );
         return;
     }

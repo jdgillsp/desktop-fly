@@ -1,5 +1,15 @@
 # Creatures #8 and #9: a hognose snake, and a sandworm
 
+The sandworm now receives solid footprints for terrarium furnishings, the
+water dish, and the Fremen cave. Navigation probes curved routes with body
+clearance, limits bend radius, and checks the trailing body before advancing.
+It opens its approach when a nearby lure lies inside its turning circle.
+Layout changes re-seat an obstructed body under clear sand. Regression tests
+cover routing past a hide, sustained tight turns, and full-body clearance in
+eight seeded stocked terrariums. The mesh uses finer armor seams, a tapered
+body, a shaded inner maw with three tooth rows, and a neck lift measured in
+behavioral segments rather than mesh samples. Rider height follows that mesh.
+
 **Status:** implemented on Windows. Branch `spider-webs`.
 
 Two more procedural creatures, on the koi's terms (KOI_PLAN.md). Both share

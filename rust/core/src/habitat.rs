@@ -184,7 +184,7 @@ impl HabitatKind {
             HabitatKind::FlyCage => "fly cage",
             HabitatKind::Vivarium => "vivarium",
             HabitatKind::AgarPlate => "agar plate",
-            HabitatKind::Pond => "pond",
+            HabitatKind::Pond => "glass aquarium",
             HabitatKind::SandTerrarium => "sand terrarium",
         }
     }
@@ -417,6 +417,8 @@ pub struct PropSave {
     pub nx: f32,
     #[serde(default)]
     pub ny: f32,
+    #[serde(default)]
+    pub spent: bool,
 }
 
 /// How close the creature has to get to a prop to affect it. Generous: the
@@ -430,7 +432,15 @@ const CURSOR_REACH: f32 = 70.0;
 /// already a picture with no room in it for the animal.
 pub const MAX_PROPS: usize = 12;
 
-/// The enclosure: a region, a kind, and the props inside it.
+/// A target scoped to one simulation frame; indices do not survive edits.
+#[derive(Debug, Clone, Copy)]
+pub struct HabitatTarget {
+    pub index: usize,
+    pub kind: PropKind,
+    pub pos: Vec2,
+    pub radius: f32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Habitat {
     pub kind: HabitatKind,
@@ -440,6 +450,12 @@ pub struct Habitat {
     /// bodies only ever see its position, via `World::attractor`.
     pub focus: Option<usize>,
     focus_timer: f32,
+    /// Short-lived surface disturbances (position, seconds since event).
+    pub ripples: Vec<(Vec2, f32)>,
+    /// Which hide carries the simulated heat source; None uses the daily cycle.
+    pub warm_end: Option<u8>,
+    pub tracks: Vec<(Vec2, f32)>,
+    pub thumper: Option<Vec2>,
     /// Local hour, for the one choice that depends on it: which end of a
     /// thermal gradient to lie at. Set by the shell; noon when it never is.
     hour: f32,
@@ -454,6 +470,10 @@ impl Habitat {
             props: Vec::new(),
             focus: None,
             focus_timer: 0.0,
+            ripples: Vec::new(),
+            warm_end: None,
+            tracks: Vec::new(),
+            thumper: None,
             hour: 12.0,
             rng: Pcg32::new(seed),
         };
@@ -465,6 +485,8 @@ impl Habitat {
     /// evening and retreat to the cool end through the heat of the day, and
     /// that is a choice the enclosure makes for the animal, because the
     /// hides are its furniture.
+    pub fn local_hour(&self) -> f32 { self.hour }
+
     pub fn set_hour(&mut self, hour: f32) {
         self.hour = hour;
     }
@@ -472,6 +494,7 @@ impl Habitat {
     /// Which hide the hour calls for: 0 (warm) morning and evening, 1 (cool)
     /// through the middle of the day and at night, when the mat is off.
     pub fn preferred_hide_variant(&self) -> u8 {
+        if let Some(end) = self.warm_end { return end; }
         let h = self.hour.rem_euclid(24.0);
         if (7.0..11.5).contains(&h) || (16.5..21.0).contains(&h) {
             0
@@ -653,6 +676,7 @@ impl Habitat {
         self.props
             .iter()
             .map(|p| PropSave {
+                spent: !p.present(),
                 kind: p.kind.slug().to_string(),
                 variant: p.variant,
                 nx: if hw > 1e-3 { (p.pos.x - self.region.center.x) / hw } else { 0.0 },
@@ -680,6 +704,7 @@ impl Habitat {
             }
             self.push(kind, sp.variant);
             if let Some(p) = self.props.last_mut() {
+                if sp.spent && p.kind == PropKind::Food { p.respawn = f32::INFINITY; }
                 p.pos = Vec2::new(
                     self.region.center.x + sp.nx.clamp(-1.0, 1.0) * hw,
                     self.region.center.y + sp.ny.clamp(-1.0, 1.0) * hh,
@@ -710,6 +735,10 @@ impl Habitat {
         self.region = region;
         let kx = if old.size.0 > 1e-3 { region.size.0 / old.size.0 } else { 1.0 };
         let ky = if old.size.1 > 1e-3 { region.size.1 / old.size.1 } else { 1.0 };
+        let carry = |at: Vec2| Vec2::new(region.center.x + (at.x-old.center.x)*kx, region.center.y + (at.y-old.center.y)*ky);
+        for (at, _) in &mut self.tracks { *at = carry(*at); }
+        for (at, _) in &mut self.ripples { *at = carry(*at); }
+        self.thumper = self.thumper.map(carry);
         let lawn = self.lawn_radius();
         for p in self.props.iter_mut() {
             p.pos = Vec2::new(
@@ -725,6 +754,10 @@ impl Habitat {
 
     /// One frame of enclosure life.
     pub fn step(&mut self, dt: f32, creature: Vec2, cursor: Option<Vec2>) {
+        for (_, age) in &mut self.tracks { *age += dt; }
+        self.tracks.retain(|(_, age)| *age < 25.0);
+        for (_, age) in &mut self.ripples { *age += dt; }
+        self.ripples.retain(|(_, age)| *age < 2.0);
         let region = self.region;
         for p in self.props.iter_mut() {
             p.phase += dt * (0.7 + p.radius * 0.02);
@@ -788,16 +821,14 @@ impl Habitat {
                 PropKind::Food => {
                     // A pellet on the surface: drifts toward the near edge,
                     // wanders a little on the way, and is gone the moment the
-                    // fish reaches it.
+                    // fish acknowledges surface contact.
                     p.pos.y -= 11.0 * dt;
                     p.pos.x += (p.phase * 0.9).sin() * 6.0 * dt;
-                    if near_creature {
-                        p.respawn = 6.0;
-                    } else if p.pos.y <= region.center.y - region.half().1 + 26.0 {
+                    if p.pos.y <= region.center.y - region.half().1 + 26.0 {
                         // Reached the edge uneaten. Rather than leaving a
                         // pellet parked against the stones forever, it goes
-                        // soggy and a fresh one is dropped in later.
-                        p.respawn = 5.0;
+                        // soggy; the next pellet must be offered explicitly.
+                        p.respawn = f32::INFINITY;
                     }
                     p.pos = region.clamp_inside(p.pos, 24.0);
                 }
@@ -810,7 +841,7 @@ impl Habitat {
         // A flake that has just come back starts near the surface, where food
         // would fall in from.
         for i in 0..self.props.len() {
-            if self.props[i].kind == PropKind::Food && self.props[i].respawn > 0.0 {
+            if self.props[i].kind == PropKind::Food && self.props[i].respawn > 0.0 && self.props[i].respawn.is_finite() {
                 let (hw, hh) = self.region.half();
                 let x = self.region.center.x + self.rng.range(-hw * 0.6, hw * 0.6);
                 let p = &mut self.props[i];
@@ -878,11 +909,83 @@ impl Habitat {
         self.focus_timer = self.rng.range(4.0, 9.0);
     }
 
+    /// Local obstacle avoidance for an animal on the substrate. It is steering,
+    /// not a full rigid-body collision solver for the animal's entire spine.
+    pub fn obstacle_turn(&self, at: Vec2, heading: f32, clearance: f32) -> f32 {
+        let forward = Vec2::new(heading.cos(), heading.sin());
+        let mut turn = 0.0;
+        for p in &self.props {
+            if !matches!(p.kind, PropKind::Cobble | PropKind::Pebble | PropKind::Vial) { continue; }
+            let dx = p.pos.x-at.x; let dy = p.pos.y-at.y;
+            let ahead = dx*forward.x + dy*forward.y;
+            let side = dx*(-forward.y) + dy*forward.x;
+            let reach = p.radius + clearance;
+            if ahead > 0.0 && ahead < reach+35.0 && side.abs() < reach {
+                turn += if side >= 0.0 { -1.0 } else { 1.0 } * (1.0-side.abs()/reach);
+            }
+        }
+        turn.clamp(-1.0,1.0)
+    }
+    pub fn track(&mut self, at: Vec2) {
+        if self.tracks.last().is_none_or(|(p,_)| p.dist(at) > 5.0) {
+            if self.tracks.len() >= 64 { self.tracks.remove(0); }
+            self.tracks.push((at,0.0));
+        }
+    }
+
+    /// A semantic target, scoped to this frame; never store its index across edits.
+    pub fn target(&self) -> Option<HabitatTarget> {
+        let index = self.focus?;
+        let p = self.props.get(index)?;
+        if !p.present() { return None; }
+        Some(HabitatTarget { index, kind: p.kind, pos: p.pos, radius: p.radius })
+    }
+
+    /// Offer one pellet; spent food is reused and never replenishes itself.
+    pub fn offer_food(&mut self, at: Vec2) -> bool {
+        if self.kind != HabitatKind::Pond { return false; }
+        let index = self.props.iter().position(|p| p.kind == PropKind::Food && !p.present());
+        let index = match index {
+            Some(i) => i,
+            None => { if !self.add(PropKind::Food) { return false; } self.props.len()-1 }
+        };
+        self.props[index].pos = self.region.clamp_inside(at, 28.0);
+        self.props[index].respawn = 0.0;
+        self.focus = None;
+        self.ripple(at);
+        true
+    }
+
+    pub fn ripple(&mut self, at: Vec2) {
+        if self.ripples.len() >= 8 { self.ripples.remove(0); }
+        self.ripples.push((at, 0.0));
+    }
+
+    /// Consumption is acknowledged by the animal, after reaching the surface.
+    pub fn consume(&mut self, target: HabitatTarget, at: Vec2, depth: f32) -> bool {
+        let Some(p) = self.props.get_mut(target.index) else { return false; };
+        if p.kind != PropKind::Food || !p.present() || depth < 0.88 || at.dist(p.pos) > p.radius + 10.0 { return false; }
+        let pos = p.pos;
+        p.respawn = f32::INFINITY;
+        self.focus = None;
+        self.ripple(pos);
+        true
+    }
+
+    pub fn move_prop(&mut self, index: usize, at: Vec2) -> bool {
+        let Some(p) = self.props.get_mut(index) else { return false; };
+        if p.kind.scales_with_tank() { return false; }
+        p.pos = self.region.clamp_inside(at, p.radius + 8.0);
+        p.vel = Vec2::ZERO;
+        self.focus = None;
+        true
+    }
+
     /// Where the creature is currently drawn to, if anywhere. This is the only
     /// thing the bodies ever learn about the props.
     pub fn attractor(&self) -> Option<Vec2> {
         self.focus
-            .filter(|&i| self.props[i].present())
+            .filter(|&i| self.props.get(i).is_some_and(|p| p.present()))
             .map(|i| self.props[i].pos)
     }
 }
@@ -898,6 +1001,26 @@ mod tests {
 
     fn tank(kind: HabitatKind) -> Habitat {
         Habitat::new(kind, Region::new(Vec2::new(300.0, -200.0), (600.0, 420.0)), 7)
+    }
+
+    #[test]
+    fn spent_food_stays_spent_after_restore_and_can_be_offered_again() {
+        let mut h=tank(HabitatKind::Pond);
+        let i=h.props.iter().position(|p|p.kind==PropKind::Food).unwrap();
+        h.props[i].respawn=f32::INFINITY;
+        let saved=h.snapshot(); h.restore(&saved);
+        assert!(!h.props[i].present());
+        assert!(h.offer_food(h.region.center));
+        assert!(h.props[i].present());
+    }
+    #[test]
+    fn substrate_obstacles_change_steering_only_in_front() {
+        let mut h=tank(HabitatKind::SandTerrarium);
+        h.props.retain(|p|p.kind==PropKind::Cobble);
+        h.props.truncate(1);
+        h.props[0].pos=Vec2::new(20.0,0.0);
+        assert!(h.obstacle_turn(Vec2::ZERO,0.0,12.0).abs()>0.1);
+        assert_eq!(h.obstacle_turn(Vec2::ZERO,std::f32::consts::PI,12.0),0.0);
     }
 
     /// The zoom control resizes the tank on every frame the chord is held. If a
@@ -1005,7 +1128,7 @@ mod tests {
         for _ in 0..20 {
             h.step(0.1, Vec2::new(0.0, 0.0), None);
         }
-        for i in h.focus {
+        for i in h.focus.into_iter() {
             assert!(i < h.props.len(), "focus {i} is out of range");
         }
     }
@@ -1054,12 +1177,12 @@ mod tests {
     fn a_corrupt_arrangement_costs_only_the_props_it_names_wrongly() {
         let mut h = tank(HabitatKind::Pond);
         let saved = vec![
-            PropSave { kind: "lilypad".into(), variant: 0, nx: 0.2, ny: -0.3 },
-            PropSave { kind: "unicorn".into(), variant: 0, nx: 0.0, ny: 0.0 },
+            PropSave { kind: "lilypad".into(), variant: 0, nx: 0.2, ny: -0.3, spent: false },
+            PropSave { kind: "unicorn".into(), variant: 0, nx: 0.0, ny: 0.0, spent: false },
             // Belongs to another enclosure entirely.
-            PropSave { kind: "bark".into(), variant: 0, nx: 0.0, ny: 0.0 },
+            PropSave { kind: "bark".into(), variant: 0, nx: 0.0, ny: 0.0, spent: false },
             // Off the end of the world.
-            PropSave { kind: "cobble".into(), variant: 0, nx: 44.0, ny: -91.0 },
+            PropSave { kind: "cobble".into(), variant: 0, nx: 44.0, ny: -91.0, spent: false },
         ];
         h.restore(&saved);
         assert_eq!(h.props.len(), 2, "expected the lily pad and the cobble only");
@@ -1304,11 +1427,13 @@ mod tests {
             "attracted to the wrong prop"
         );
 
-        // Swim into it.
+        // Passing beneath food must not consume it.
         let at = h.props[i].pos;
-        for _ in 0..5 {
-            h.step(1.0 / 60.0, at, None);
-        }
+        let target = h.target().unwrap();
+        assert!(!h.consume(target, at, 0.3));
+        assert!(h.props[i].present());
+        assert!(h.consume(target, at, 0.95));
+        for _ in 0..600 { h.step(1.0 / 60.0, at, None); }
         assert!(!h.props[i].present(), "the pellet was not eaten");
         assert!(
             h.attractor().is_none(),

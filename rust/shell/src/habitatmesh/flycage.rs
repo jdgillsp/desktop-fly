@@ -28,6 +28,17 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
 
     // --- floor: a sheet of paper towel, as the bottom of a rearing cage is.
     ground_face(out, lo, hi, FLOOR_Z, rgba(PAPER, 0.34));
+    // Faint embossed towel fibres stay under the furnishings.
+    for row in 0..10 {
+        let y = lo.y + 6.0 + (hi.y - lo.y - 12.0) * row as f32 / 9.0;
+        ribbon(
+            out,
+            &[Vec2::new(lo.x + 5.0, y), Vec2::new(hi.x - 5.0, y)],
+            FLOOR_Z + 0.08,
+            0.65,
+            rgba(shade(PAPER, 0.88), 0.14),
+        );
+    }
     // A few crumbs of medium and spent yeast around the floor, so it is a
     // surface that has been lived on rather than a wash of colour.
     let mut s = c.scatter();
@@ -38,25 +49,60 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
             lo.y + gr + s.next() * (c.h.region.size.1 - 2.0 * gr),
         );
         let k = 0.7 + s.next() * 0.5;
-        dome(out, at, FLOOR_Z + 0.5, gr, gr * 0.4, rgba(shade(MEDIUM, k), 0.6));
+        dome(
+            out,
+            at,
+            FLOOR_Z + 0.5,
+            gr,
+            gr * 0.4,
+            rgba(shade(MEDIUM, k), 0.6),
+        );
     }
 
     // --- the two far panels of mesh, and their weave.
     c.far_walls(out, MESH, 0.06, 0.10);
     weave(out, c, Panel::Back, 0.30);
-    weave(out, c, if c.near_is_lo_x() { Panel::Right } else { Panel::Left }, 0.30);
+    weave(
+        out,
+        c,
+        if c.near_is_lo_x() {
+            Panel::Right
+        } else {
+            Panel::Left
+        },
+        0.30,
+    );
 
     // --- the frame: bottom bars on three edges, the two back uprights and
     // the far front upright. The rest is in front of the creature and drawn
     // there.
+    let frame_start = out.verts.len();
     let f = rgba(FRAME, FRAME_A);
-    slab(out, [lo.x, hi.y - BAR, FLOOR_Z], [hi.x, hi.y, FLOOR_Z + BAR], f);
-    slab(out, [lo.x, lo.y, FLOOR_Z], [lo.x + BAR, hi.y, FLOOR_Z + BAR], f);
-    slab(out, [hi.x - BAR, lo.y, FLOOR_Z], [hi.x, hi.y, FLOOR_Z + BAR], f);
+    slab(
+        out,
+        [lo.x, hi.y - BAR, FLOOR_Z],
+        [hi.x, hi.y, FLOOR_Z + BAR],
+        f,
+    );
+    slab(
+        out,
+        [lo.x, lo.y, FLOOR_Z],
+        [lo.x + BAR, hi.y, FLOOR_Z + BAR],
+        f,
+    );
+    slab(
+        out,
+        [hi.x - BAR, lo.y, FLOOR_Z],
+        [hi.x, hi.y, FLOOR_Z + BAR],
+        f,
+    );
     slab(out, [lo.x, hi.y - BAR, FLOOR_Z], [lo.x + BAR, hi.y, top], f);
     slab(out, [hi.x - BAR, hi.y - BAR, FLOOR_Z], [hi.x, hi.y, top], f);
     front_upright(out, c, !c.near_is_lo_x(), f);
 
+    for v in &mut out.verts[frame_start..] {
+        v.material = Material::METAL;
+    }
     for prop in &c.h.props {
         prop_mesh(out, c, prop);
     }
@@ -71,13 +117,28 @@ pub fn front(out: &mut Mesh, c: &Ctx, grabbed: bool) {
     c.front_pane(out, MESH, 0.04, 0.08);
     weave(out, c, Panel::Front, 0.20);
     c.near_side(out, MESH, 0.04, 0.08);
-    weave(out, c, if c.near_is_lo_x() { Panel::Left } else { Panel::Right }, 0.20);
+    weave(
+        out,
+        c,
+        if c.near_is_lo_x() {
+            Panel::Left
+        } else {
+            Panel::Right
+        },
+        0.20,
+    );
 
     // --- the rest of the frame: the near front upright, the front bottom
     // bar, and all four top bars, which light up while the cage is being
     // moved.
+    let frame_start = out.verts.len();
     let f = rgba(FRAME, FRAME_A);
-    slab(out, [lo.x, lo.y, FLOOR_Z], [hi.x, lo.y + BAR, FLOOR_Z + BAR], f);
+    slab(
+        out,
+        [lo.x, lo.y, FLOOR_Z],
+        [hi.x, lo.y + BAR, FLOOR_Z + BAR],
+        f,
+    );
     front_upright(out, c, c.near_is_lo_x(), f);
     let t = if grabbed {
         rgba([1.0, 1.0, 1.0], 0.95)
@@ -88,15 +149,40 @@ pub fn front(out: &mut Mesh, c: &Ctx, grabbed: bool) {
     slab(out, [lo.x, lo.y, top - BAR], [hi.x, lo.y + BAR, top], t);
     slab(out, [lo.x, lo.y, top - BAR], [lo.x + BAR, hi.y, top], t);
     slab(out, [hi.x - BAR, lo.y, top - BAR], [hi.x, hi.y, top], t);
+    // Small corner fasteners give the extrusion a manufactured scale cue.
+    for x in [lo.x + BAR * 0.5, hi.x - BAR * 0.5] {
+        tube(
+            out,
+            [x, lo.y + 0.1, top - BAR * 0.5],
+            [x, lo.y + 0.4, top - BAR * 0.5],
+            0.85,
+            8,
+            true,
+            rgba([0.4, 0.42, 0.42], 0.9),
+        );
+    }
+    for v in &mut out.verts[frame_start..] {
+        v.material = Material::METAL;
+    }
 }
 
 /// One of the two front uprights of the frame: the −x one or the +x one.
 fn front_upright(out: &mut Mesh, c: &Ctx, at_lo_x: bool, color: [f32; 4]) {
     let (lo, hi, top) = (c.lo, c.hi, c.top);
     if at_lo_x {
-        slab(out, [lo.x, lo.y, FLOOR_Z], [lo.x + BAR, lo.y + BAR, top], color);
+        slab(
+            out,
+            [lo.x, lo.y, FLOOR_Z],
+            [lo.x + BAR, lo.y + BAR, top],
+            color,
+        );
     } else {
-        slab(out, [hi.x - BAR, lo.y, FLOOR_Z], [hi.x, lo.y + BAR, top], color);
+        slab(
+            out,
+            [hi.x - BAR, lo.y, FLOOR_Z],
+            [hi.x, lo.y + BAR, top],
+            color,
+        );
     }
 }
 
@@ -127,7 +213,12 @@ fn weave(out: &mut Mesh, c: &Ctx, panel: Panel, alpha: f32) {
             while x < hi.x - BAR {
                 face(
                     out,
-                    [[x - w, y, z0], [x + w, y, z0], [x + w, y, z1], [x - w, y, z1]],
+                    [
+                        [x - w, y, z0],
+                        [x + w, y, z0],
+                        [x + w, y, z1],
+                        [x - w, y, z1],
+                    ],
                     n,
                     col,
                 );
@@ -158,7 +249,12 @@ fn weave(out: &mut Mesh, c: &Ctx, panel: Panel, alpha: f32) {
             while y < hi.y - BAR {
                 face(
                     out,
-                    [[x, y - w, z0], [x, y + w, z0], [x, y + w, z1], [x, y - w, z1]],
+                    [
+                        [x, y - w, z0],
+                        [x, y + w, z0],
+                        [x, y + w, z1],
+                        [x, y - w, z1],
+                    ],
                     n,
                     col,
                 );
@@ -197,7 +293,17 @@ fn prop_mesh(out: &mut Mesh, c: &Ctx, prop: &Prop) {
             let r = prop.radius;
             let bottom = [prop.pos.x, prop.pos.y, FLOOR_Z + 0.8];
             let lip = [prop.pos.x, prop.pos.y, FLOOR_Z + 10.0];
-            tube(out, bottom, lip, r, 24, false, rgba([0.93, 0.93, 0.91], 0.55));
+            surface(out, Material::GLASS, |out| {
+                tube(
+                    out,
+                    bottom,
+                    lip,
+                    r,
+                    32,
+                    false,
+                    rgba([0.93, 0.93, 0.91], 0.55),
+                )
+            });
             disc(out, bottom, r, None, rgba([0.93, 0.93, 0.91], 0.7));
             disc(
                 out,
@@ -223,9 +329,9 @@ fn prop_mesh(out: &mut Mesh, c: &Ctx, prop: &Prop) {
         PropKind::Fruit => {
             contact_shade(out, prop.pos, FLOOR_Z + 0.45, prop.radius);
             if prop.variant == 0 {
-                banana(out, c, prop);
+                surface(out, Material::SKIN, |out| banana(out, c, prop));
             } else {
-                apple_wedge(out, prop);
+                surface(out, Material::WET, |out| apple_wedge(out, prop));
             }
         }
         PropKind::Vial => {
@@ -256,6 +362,7 @@ fn prop_mesh(out: &mut Mesh, c: &Ctx, prop: &Prop) {
                 true,
                 rgba(MEDIUM, 0.9),
             );
+            let glass_start = out.verts.len();
             tube(
                 out,
                 [x0, y, z],
@@ -265,6 +372,9 @@ fn prop_mesh(out: &mut Mesh, c: &Ctx, prop: &Prop) {
                 true,
                 rgba([0.80, 0.88, 0.90], 0.35),
             );
+            for v in &mut out.verts[glass_start..] {
+                v.material = Material::GLASS;
+            }
             tube(
                 out,
                 [x1 - r * 1.8, y, z],
@@ -302,14 +412,22 @@ fn banana(out: &mut Mesh, c: &Ctx, prop: &Prop) {
         [p.x, p.y, z]
     };
     let skin = rgba([0.93, 0.80, 0.26], 0.93);
-    for k in 0..3 {
-        let a = pt(k as f32 / 3.0);
-        let b = pt((k + 1) as f32 / 3.0);
+    for k in 0..9 {
+        let a = pt(k as f32 / 9.0);
+        let b = pt((k + 1) as f32 / 9.0);
         tube(out, a, b, r, 12, true, skin);
     }
     for t in [0.0, 1.0] {
         let p = pt(t);
-        tube(out, p, pt(if t == 0.0 { 0.08 } else { 0.92 }), r * 0.6, 10, true, rgba([0.33, 0.22, 0.10], 0.9));
+        tube(
+            out,
+            p,
+            pt(if t == 0.0 { 0.08 } else { 0.92 }),
+            r * 0.6,
+            10,
+            true,
+            rgba([0.33, 0.22, 0.10], 0.9),
+        );
     }
 }
 
@@ -333,22 +451,45 @@ fn apple_wedge(out: &mut Mesh, prop: &Prop) {
     for i in 0..segs {
         let (a, b) = (arc(i), arc(i + 1));
         // top and bottom faces
-        tri(out, [[apex.x, apex.y, z1], [a.x, a.y, z1], [b.x, b.y, z1]], [0.0, 0.0, 1.0], flesh);
-        tri(out, [[apex.x, apex.y, z0], [b.x, b.y, z0], [a.x, a.y, z0]], [0.0, 0.0, -1.0], flesh);
+        tri(
+            out,
+            [[apex.x, apex.y, z1], [a.x, a.y, z1], [b.x, b.y, z1]],
+            [0.0, 0.0, 1.0],
+            flesh,
+        );
+        tri(
+            out,
+            [[apex.x, apex.y, z0], [b.x, b.y, z0], [a.x, a.y, z0]],
+            [0.0, 0.0, -1.0],
+            flesh,
+        );
         // the skin along the arc
         let mid = ang0 + span * ((i as f32 + 0.5) / segs as f32 - 0.5);
         face(
             out,
-            [[a.x, a.y, z0], [b.x, b.y, z0], [b.x, b.y, z1], [a.x, a.y, z1]],
+            [
+                [a.x, a.y, z0],
+                [b.x, b.y, z0],
+                [b.x, b.y, z1],
+                [a.x, a.y, z1],
+            ],
             [mid.cos(), mid.sin(), 0.0],
             skin,
         );
     }
     // the two cut faces
-    for (p, n) in [(arc(0), ang0 - span * 0.5 - 1.57), (arc(segs), ang0 + span * 0.5 + 1.57)] {
+    for (p, n) in [
+        (arc(0), ang0 - span * 0.5 - 1.57),
+        (arc(segs), ang0 + span * 0.5 + 1.57),
+    ] {
         face(
             out,
-            [[apex.x, apex.y, z0], [p.x, p.y, z0], [p.x, p.y, z1], [apex.x, apex.y, z1]],
+            [
+                [apex.x, apex.y, z0],
+                [p.x, p.y, z0],
+                [p.x, p.y, z1],
+                [apex.x, apex.y, z1],
+            ],
             [n.cos(), n.sin(), 0.0],
             flesh,
         );

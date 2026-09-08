@@ -32,7 +32,7 @@ const HEAT: [f32; 3] = [0.95, 0.42, 0.18];
 /// it does not evaporate. Public because the sandworm's runtime has to know
 /// where the water is; the body avoids it.
 pub(crate) fn water_dish(region: &Region) -> (Vec2, f32) {
-    let (lo, hi) = (region.min(), region.max());
+    let lo = region.min();
     let size = region.size;
     let r = (size.0.min(size.1) * 0.09).clamp(14.0, 26.0);
     (Vec2::new(lo.x + r + 18.0, lo.y + r + 18.0), r)
@@ -41,7 +41,10 @@ pub(crate) fn water_dish(region: &Region) -> (Vec2, f32) {
 /// The heat mat: under the sand at the +x third of the tank.
 pub(crate) fn heat_mat(region: &Region) -> (Vec2, Vec2) {
     let (lo, hi) = (region.min(), region.max());
-    (Vec2::new(lo.x + region.size.0 * 0.64, lo.y + 6.0), Vec2::new(hi.x - 6.0, hi.y - 6.0))
+    (
+        Vec2::new(lo.x + region.size.0 * 0.64, lo.y + 6.0),
+        Vec2::new(hi.x - 6.0, hi.y - 6.0),
+    )
 }
 
 pub fn back(out: &mut Mesh, c: &Ctx) {
@@ -103,8 +106,17 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
     ] {
         face(out, quad, n, side);
     }
-    ground_face(out, slo, shi, sand_z, rgba(SAND_C, 0.58));
-    ground_face(out, mlo, mhi, sand_z + 0.05, rgba(HEAT, 0.07));
+    substrate(
+        out,
+        slo,
+        shi,
+        sand_z,
+        0.10,
+        0.12,
+        (size.0 * 31.0 + size.1 * 17.0) as u32,
+        rgba(SAND_C, 0.58),
+    );
+    ground_face(out, mlo, mhi, sand_z + 0.11, rgba(HEAT, 0.07));
 
     // --- the surface is not flat: low drifts, and a scatter of coarser
     // grains, so the sand has grain rather than reading as a beige sheet.
@@ -125,12 +137,18 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
             })
             .collect();
         let tone = if i % 2 == 0 { 1.06 } else { 0.94 };
-        ribbon(out, &pts, sand_z + 0.12, s.range(6.0, 12.0), rgba(shade(SAND_C, tone), 0.30));
+        ribbon(
+            out,
+            &pts,
+            sand_z + 0.12,
+            s.range(6.0, 12.0),
+            rgba(shade(SAND_C, tone), 0.30),
+        );
     }
-    for i in 0..40 {
+    for i in 0..100 {
         let x = lo.x + 8.0 + s.next() * (size.0 - 16.0);
         let y = lo.y + 8.0 + s.next() * (size.1 - 16.0);
-        let r = 0.8 + s.next() * 1.6;
+        let r = 0.45 + s.next() * 1.25;
         blob(
             out,
             Vec2::new(x, y),
@@ -148,7 +166,17 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
     // every terrarium has one and it is not something to take out.
     {
         let (at, r) = water_dish(&c.h.region);
-        blob(out, at, sand_z + 0.3, r + 2.5, 1.8, 0.05, 3.0, rgba(DISH, 0.9));
+        blob(
+            out,
+            at,
+            sand_z + 0.3,
+            r + 2.5,
+            1.8,
+            0.05,
+            3.0,
+            rgba(DISH, 0.9),
+        );
+        let water_start = out.verts.len();
         disc(out, [at.x, at.y, sand_z + 1.6], r, None, rgba(WATER, 0.55));
         // A bright ring where the water meets the rim.
         for k in 0..24 {
@@ -167,8 +195,22 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
                 rgba([0.80, 0.92, 0.95], 0.5),
             );
         }
+        for v in &mut out.verts[water_start..] {
+            v.material = Material::WET;
+        }
     }
 
+    for pair in c.h.tracks.windows(2) {
+        if pair[0].0.dist(pair[1].0) < 20.0 {
+            ribbon(
+                out,
+                &[pair[0].0, pair[1].0],
+                FLOOR_Z + SAND + 0.15,
+                1.8,
+                rgba([0.48, 0.35, 0.20], (1.0 - pair[0].1 / 25.0).max(0.0) * 0.24),
+            );
+        }
+    }
     // --- the far glass.
     c.far_walls(out, GLASS, 0.10, 0.36);
 
@@ -211,12 +253,16 @@ pub(crate) fn prop_mesh(out: &mut Mesh, c: &Ctx, prop: &Prop) {
                 rgba(CORK, 0.94),
             );
             // Bark texture: a few darker ridges along the top.
-            for k in 0..3 {
-                let y = at.y + (k as f32 - 1.0) * r * 0.45;
+            for k in 0..7 {
+                let y = at.y + (k as f32 - 3.0) * r * 0.25;
                 let z = zc + (r * r - (y - at.y).powi(2)).max(0.0).sqrt() + 0.15;
                 ribbon(
                     out,
-                    &[Vec2::new(at.x - half * 0.9, y), Vec2::new(at.x + half * 0.9, y)],
+                    &[
+                        Vec2::new(at.x - half * 0.9, y),
+                        Vec2::new(at.x - half * 0.15, y + 0.4),
+                        Vec2::new(at.x + half * 0.9, y),
+                    ],
                     z,
                     0.9,
                     rgba(shade(CORK, 0.7), 0.8),

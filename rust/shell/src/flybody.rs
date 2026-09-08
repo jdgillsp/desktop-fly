@@ -17,7 +17,7 @@ use dfcore::body::{Fly, State};
 use dfcore::{LifSim, Pose};
 
 use crate::math::{self, Mat4};
-use crate::mesh::{self, Mesh, Vertex};
+use crate::mesh::{self, Material, Mesh, Vertex};
 
 const BODY_BROWN: [f32; 4] = [0.50, 0.38, 0.22, 1.0];
 const LEG_COLOR: [f32; 4] = [0.33, 0.24, 0.14, 1.0];
@@ -30,7 +30,7 @@ const HEAD_COLOR: [f32; 4] = [0.575, 0.473, 0.337, 1.0];
 /// The abdomen's stripe texture (`abdomenTexture()`), as two banded colours.
 const ABDOMEN_LIGHT: [f32; 4] = [0.72, 0.55, 0.32, 1.0];
 const ABDOMEN_DARK: [f32; 4] = [0.22, 0.15, 0.09, 1.0];
-const WING_COLOR: [f32; 4] = [0.82, 0.86, 0.92, 0.30];
+const WING_COLOR: [f32; 4] = [0.80, 0.85, 0.90, 0.42];
 
 /// "Glass anatomy" (PORT_PLAN.md §6.3 #2): a soft translucent shell with the
 /// live connectome visible inside it.
@@ -98,7 +98,12 @@ impl NeuronLayout {
             let span = max[k] - min[k];
             inv_span[k] = if span > 1e-4 { 1.0 / span } else { 0.0 };
         }
-        NeuronLayout { min, inv_span, lo, hi }
+        NeuronLayout {
+            min,
+            inv_span,
+            lo,
+            hi,
+        }
     }
 
     pub fn map(&self, p: [f32; 3]) -> [f32; 3] {
@@ -133,6 +138,8 @@ pub struct FlyMeshes {
     antenna: Mesh,
     proboscis: Mesh,
     wing: Mesh,
+    wing_veins: Mesh,
+    thorax_setae: Mesh,
     /// Indexed as `[leg][segment]`, since segment lengths differ per leg.
     leg_segments: Vec<[Mesh; 3]>,
 }
@@ -142,14 +149,23 @@ impl FlyMeshes {
         let abdomen = {
             // Banded to stand in for `abdomenTexture()`: dark stripes across the
             // long axis, which is what reads at this size.
-            let mut m = mesh::sphere(5.0, 20, 28);
+            let mut m = mesh::sphere(5.0, 64, 88);
             for v in m.verts.iter_mut() {
-                let band = ((v.pos[1] * 0.9).sin() * 3.0).sin();
-                v.color = if band > 0.15 {
-                    ABDOMEN_DARK
-                } else {
-                    ABDOMEN_LIGHT
-                };
+                // The posterior edge of each tergite is pigmented; the ventral
+                // cuticle stays pale. Smooth pigment edges survive close viewing.
+                let phase = (v.pos[1] * 0.58 + 0.18).rem_euclid(1.0);
+                let band = ((phase - 0.64) * 22.0).clamp(0.0, 1.0)
+                    * ((0.98 - phase) * 30.0).clamp(0.0, 1.0)
+                    * ((v.pos[2] + 1.8) / 2.0).clamp(0.0, 1.0);
+                v.material = Material::CHITIN;
+                let grain = 0.93 + 0.07 * (v.pos[0] * 17.0 + v.pos[1] * 11.0).sin().abs();
+                v.color = std::array::from_fn(|k| {
+                    if k == 3 {
+                        1.0
+                    } else {
+                        (ABDOMEN_LIGHT[k] * (1.0 - band) + ABDOMEN_DARK[k] * band) * grain
+                    }
+                });
             }
             m
         };
@@ -157,23 +173,38 @@ impl FlyMeshes {
             .iter()
             .map(|&(_, _, _, f, t, ta)| {
                 [
-                    mesh::capsule(0.48, f, 8, 10),
-                    mesh::capsule(0.38, t, 8, 10),
-                    mesh::capsule(0.24, ta, 8, 10),
+                    tapered_limb(0.48, f, 0.22),
+                    tapered_limb(0.38, t, 0.30),
+                    tapered_limb(0.24, ta, 0.50),
                 ]
             })
             .collect();
 
         FlyMeshes {
-            thorax: mesh::sphere(4.6, 18, 24),
+            thorax: {
+                let mut m = finish(mesh::sphere(4.6, 40, 64), Material::CHITIN);
+                for v in &mut m.verts {
+                    let stripe = ((v.pos[0].abs() - 1.15).abs() < 0.32
+                        || (v.pos[0].abs() - 2.6).abs() < 0.25)
+                        && v.pos[2] > 1.0;
+                    v.color = if stripe {
+                        [0.48, 0.44, 0.40, 1.0]
+                    } else {
+                        [1.0; 4]
+                    };
+                }
+                m
+            },
+            thorax_setae: setae(4.6, 420, 0.56),
+            wing_veins: wing_veins(),
             abdomen,
-            head: mesh::sphere(3.0, 16, 20),
-            eye: mesh::sphere(2.0, 14, 18),
+            head: finish(mesh::sphere(3.0, 32, 48), Material::CHITIN),
+            eye: compound_eye(),
             antenna: mesh::capsule(0.16, 2.2, 6, 8),
             proboscis: mesh::cone(0.6, 0.22, 2.4, 12),
             // The Bezier oval is `NSRect(x: -2.6, y: -15.5, width: 5.2, height: 16.5)`,
             // i.e. centred 7.25 behind the hinge.
-            wing: mesh::wing(5.2, 16.5, -7.25, 20),
+            wing: finish(mesh::wing(5.2, 16.5, -7.25, 80), Material::MEMBRANE),
             leg_segments,
         }
     }
@@ -185,9 +216,32 @@ fn emit(out: &mut Mesh, src: &Mesh, m: &Mat4, color: [f32; 4]) {
     out.verts.reserve(src.verts.len());
     for v in &src.verts {
         out.verts.push(Vertex {
+            texcoord: v.texcoord,
             pos: math::transform_point(m, v.pos),
-            normal: math::transform_dir(m, v.normal),
-            color,
+            normal: math::transform_normal(m, v.normal),
+            color: if color == GlassPalette::SHELL
+                || color == GlassPalette::SHELL_DENSE
+                || color == GlassPalette::LIMB
+                || color == GlassPalette::WING
+            {
+                color
+            } else {
+                [
+                    color[0] * v.color[0],
+                    color[1] * v.color[1],
+                    color[2] * v.color[2],
+                    color[3],
+                ]
+            },
+            material: if color == GlassPalette::SHELL
+                || color == GlassPalette::SHELL_DENSE
+                || color == GlassPalette::LIMB
+                || color == GlassPalette::WING
+            {
+                Material::GLASS
+            } else {
+                v.material
+            },
         });
     }
     out.indices.extend(src.indices.iter().map(|i| i + off));
@@ -198,25 +252,164 @@ fn emit_vertex_colored(out: &mut Mesh, src: &Mesh, m: &Mat4) {
     let off = out.verts.len() as u32;
     for v in &src.verts {
         out.verts.push(Vertex {
+            texcoord: v.texcoord,
             pos: math::transform_point(m, v.pos),
-            normal: math::transform_dir(m, v.normal),
+            normal: math::transform_normal(m, v.normal),
             color: v.color,
+            material: v.material,
         });
     }
     out.indices.extend(src.indices.iter().map(|i| i + off));
+}
+
+/// A fly wing has a leading vein and branching longitudinal veins, not a blank paddle.
+fn wing_veins() -> Mesh {
+    let mut m = Mesh::default();
+    for (a, b) in [
+        ([0.0, 0.6], [-1.2, -3.5]),
+        ([-1.2, -3.5], [-2.1, -8.5]),
+        ([-2.1, -8.5], [-1.5, -13.5]),
+        ([0.0, 0.6], [-0.4, -5.0]),
+        ([-0.4, -5.0], [-0.4, -13.9]),
+        ([0.0, 0.6], [0.7, -5.0]),
+        ([0.7, -5.0], [1.5, -10.2]),
+        ([1.5, -10.2], [0.6, -14.8]),
+        ([-0.4, -5.0], [0.7, -5.0]),
+        ([-0.4, -9.0], [1.3, -9.0]),
+    ] {
+        let dx: f32 = b[0] - a[0];
+        let dy: f32 = b[1] - a[1];
+        let len = (dx * dx + dy * dy).sqrt();
+        let off = m.verts.len() as u32;
+        for (p, side) in [(a, -1.0), (a, 1.0), (b, 1.0), (b, -1.0)] {
+            m.verts.push(Vertex {
+                texcoord: [0.0; 4],
+                pos: [
+                    p[0] - dy / len * 0.035 * side,
+                    p[1] + dx / len * 0.035 * side,
+                    0.04,
+                ],
+                normal: [0.0, 0.0, 1.0],
+                color: [1.0; 4],
+                material: Material::MEMBRANE,
+            });
+        }
+        m.indices
+            .extend_from_slice(&[off, off + 1, off + 2, off, off + 2, off + 3]);
+    }
+    // Fine costal perimeter, inset so the original wing dimensions are unchanged.
+    for i in 0..80 {
+        let a = i as f32 * std::f32::consts::TAU / 80.0;
+        let b = (i + 1) as f32 * std::f32::consts::TAU / 80.0;
+        let off = m.verts.len() as u32;
+        for (theta, inset) in [(a, 0.0), (a, 0.045), (b, 0.045), (b, 0.0)] {
+            m.verts.push(Vertex {
+                texcoord: [0.0; 4],
+                pos: [
+                    (2.6 - inset) * theta.cos(),
+                    -7.25 + (8.25 - inset) * theta.sin(),
+                    0.04,
+                ],
+                normal: [0.0, 0.0, 1.0],
+                color: [1.0; 4],
+                material: Material::MEMBRANE,
+            });
+        }
+        m.indices
+            .extend_from_slice(&[off, off + 1, off + 2, off, off + 2, off + 3]);
+    }
+    m
+}
+
+/// Assign a physical finish once to a cached part.
+pub(crate) fn finish(mut mesh: Mesh, material: [f32; 4]) -> Mesh {
+    for v in &mut mesh.verts {
+        v.material = material;
+    }
+    mesh
+}
+
+/// Arthropod limb narrows distally, retaining rounded articulations.
+pub(crate) fn tapered_limb(radius: f32, length: f32, taper: f32) -> Mesh {
+    let mut m = finish(mesh::capsule(radius, length, 12, 16), Material::CHITIN);
+    for v in &mut m.verts {
+        let t = (v.pos[1] / length + 0.5).clamp(0.0, 1.0);
+        let scale = 1.0 - taper * t;
+        v.pos[0] *= scale;
+        v.pos[2] *= scale;
+        let n = [v.normal[0] / scale, v.normal[1], v.normal[2] / scale];
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+        v.normal = n.map(|x| x / len);
+    }
+    m
+}
+
+/// Compound eyes carry many shallow optical facets without giant glitter dots.
+fn compound_eye() -> Mesh {
+    let mut m = finish(mesh::sphere(2.0, 72, 96), [0.29, 0.32, 0.0, 0.06]);
+    for v in &mut m.verts {
+        let n = v.normal;
+        let latitude = (n[1].clamp(-1.0, 1.0).acos() * 24.0).floor();
+        let longitude = n[2].atan2(n[0]) * 15.3 + (latitude % 2.0) * 0.5;
+        let facet = 0.86 + 0.14 * (longitude * 2.1 + latitude * 4.3).sin().abs();
+        v.color = [facet, facet * 0.94, facet * 0.90, 1.0];
+    }
+    m
+}
+
+/// Cached curved hairs: two tapered sections, slender roots, swept tips.
+/// The deterministic distribution avoids a repeated latitude-ring pattern.
+pub(crate) fn setae(radius: f32, count: usize, length: f32) -> Mesh {
+    let mut out = Mesh::default();
+    for i in 0..count {
+        let z = -0.25 + 1.23 * (i as f32 + 0.5) / count as f32;
+        let a = i as f32 * 2.399963;
+        let r = (1.0 - z * z).sqrt();
+        let n = [r * a.cos(), r * a.sin(), z];
+        let p = [n[0] * radius, n[1] * radius, n[2] * radius];
+        let h = length * (0.45 + 0.55 * (a * 1.7).sin().abs());
+        let width = (length * 0.035).clamp(0.007, 0.019);
+        for tangent in [[-a.sin(), a.cos(), 0.0], [-z * a.cos(), -z * a.sin(), r]] {
+            let b = out.verts.len() as u32;
+            for (t, side) in [
+                (0.0, -1.0),
+                (0.0, 1.0),
+                (0.55, -1.0),
+                (0.55, 1.0),
+                (1.0, 0.0),
+            ] {
+                out.verts.push(Vertex {
+                    texcoord: [0.0; 4],
+                    pos: std::array::from_fn(|k| {
+                        p[k] + n[k] * h * t - if k == 1 { h * 0.30 * t * t } else { 0.0 }
+                            + tangent[k] * width * side * (1.0 - t)
+                    }),
+                    normal: n,
+                    color: [1.0; 4],
+                    material: Material::MATTE,
+                });
+            }
+            out.indices.extend_from_slice(&[
+                b,
+                b + 1,
+                b + 2,
+                b + 1,
+                b + 3,
+                b + 2,
+                b + 2,
+                b + 3,
+                b + 4,
+            ]);
+        }
+    }
+    out
 }
 
 /// Screen-facing quads for the circuit's neurons, inside the body.
 ///
 /// The camera is orthographic looking down -z, so a screen-facing billboard is
 /// just an xy quad — no view-matrix maths needed.
-pub fn build_neuron_field(
-    out: &mut Mesh,
-    sim: &LifSim,
-    flash: &[f32],
-    fly: &Fly,
-    pose: &Pose,
-) {
+pub fn build_neuron_field(out: &mut Mesh, sim: &LifSim, flash: &[f32], fly: &Fly, pose: &Pose) {
     out.verts.clear();
     out.indices.clear();
 
@@ -228,7 +421,11 @@ pub fn build_neuron_field(
         ),
     );
     // Sleeping creatures dim rather than go dark: the network is still running.
-    let mood = if fly.state == State::Sleeping { 0.45 } else { 1.0 };
+    let mood = if fly.state == State::Sleeping {
+        0.45
+    } else {
+        1.0
+    };
     let layout = NeuronLayout::fit(&sim.positions);
 
     for (i, p) in sim.positions.iter().enumerate() {
@@ -259,11 +456,13 @@ pub fn build_neuron_field(
         let b = out.verts.len() as u32;
         for (dx, dy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             out.verts.push(Vertex {
+                texcoord: [0.0; 4],
                 pos: [centre[0] + dx * radius, centre[1] + dy * radius, centre[2]],
                 // The corner rides in the normal: `fs_neuron` uses it for a
                 // radial falloff, and nothing lights these points.
                 normal: [dx, dy, 0.0],
                 color: col,
+                material: Material::MATTE,
             });
         }
         out.indices
@@ -281,11 +480,7 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose, g
     let root = math::mul(
         math::translate(pose.pos.x, pose.pos.y, pose.z),
         math::mul(
-            math::euler(
-                pose.pitch,
-                0.0,
-                pose.heading - std::f32::consts::FRAC_PI_2,
-            ),
+            math::euler(pose.pitch, 0.0, pose.heading - std::f32::consts::FRAC_PI_2),
             math::scale(pose.scale, pose.scale, pose.scale),
         ),
     );
@@ -318,7 +513,10 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose, g
     emit(
         out,
         &meshes.thorax,
-        &math::mul(root, math::trs([0.0, 2.5, 6.2], [0.0; 3], [0.95, 1.15, 0.85])),
+        &math::mul(
+            root,
+            math::trs([0.0, 2.5, 6.2], [0.0; 3], [0.95, 1.15, 0.85]),
+        ),
         c_thorax,
     );
     if glass {
@@ -336,18 +534,18 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose, g
             GlassPalette::SHELL,
         );
     } else {
-    emit_vertex_colored(
-        out,
-        &meshes.abdomen,
-        &math::mul(
-            root,
-            math::trs(
-                [0.0, -6.5, 5.6],
-                [0.0; 3],
-                [0.9, 1.5, 0.75 * pose.abdomen_breathe],
+        emit_vertex_colored(
+            out,
+            &meshes.abdomen,
+            &math::mul(
+                root,
+                math::trs(
+                    [0.0, -6.5, 5.6],
+                    [0.0; 3],
+                    [0.9, 1.5, 0.75 * pose.abdomen_breathe],
+                ),
             ),
-        ),
-    );
+        );
     }
     emit(
         out,
@@ -355,6 +553,19 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose, g
         &math::mul(root, math::trs([0.0, 9.0, 6.0], [0.0; 3], [1.0, 0.85, 0.9])),
         c_head,
     );
+
+    if !glass {
+        let thorax_m = math::mul(
+            root,
+            math::trs([0.0, 2.5, 6.2], [0.0; 3], [0.95, 1.15, 0.85]),
+        );
+        emit(
+            out,
+            &meshes.thorax_setae,
+            &thorax_m,
+            [0.16, 0.12, 0.08, 1.0],
+        );
+    }
 
     // --- head furniture ---
     for side in [-1.0f32, 1.0] {
@@ -380,7 +591,10 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose, g
     emit(
         out,
         &meshes.proboscis,
-        &math::mul(root, math::trs([0.0, 10.4, 4.6], [-0.5, 0.0, 0.0], [1.0; 3])),
+        &math::mul(
+            root,
+            math::trs([0.0, 10.4, 4.6], [-0.5, 0.0, 0.0], [1.0; 3]),
+        ),
         c_prob,
     );
 
@@ -454,6 +668,8 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose, g
     }
 
     // --- wings ---
+    // Folded membranes rest above the abdomen's dorsal surface (~9.35),
+    // rather than intersecting it. Dimensions and animated rotations stay unchanged.
     for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
         let w = pose.wings[i];
         emit(
@@ -462,13 +678,28 @@ pub fn build_frame(out: &mut Mesh, meshes: &FlyMeshes, fly: &Fly, pose: &Pose, g
             &math::mul(
                 root,
                 math::trs(
-                    [side * 1.6, 0.5, if side > 0.0 { 7.7 } else { 7.55 }],
+                    [side * 1.6, 0.5, if side > 0.0 { 10.0 } else { 9.9 }],
                     [w[0], w[1], w[2]],
                     [1.0; 3],
                 ),
             ),
             c_wing,
         );
+        if !glass {
+            emit(
+                out,
+                &meshes.wing_veins,
+                &math::mul(
+                    root,
+                    math::trs(
+                        [side * 1.6, 0.5, if side > 0.0 { 10.0 } else { 9.9 }],
+                        [w[0], w[1], w[2]],
+                        [1.0; 3],
+                    ),
+                ),
+                [0.31, 0.28, 0.21, 0.66],
+            );
+        }
     }
 
     // Sleeping flies tuck down slightly; a small cue that reads at fly scale.

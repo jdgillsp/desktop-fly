@@ -28,6 +28,7 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
     let (lo, hi) = (c.lo, c.hi);
     let agar_z = FLOOR_Z + AGAR;
 
+    let gel_start = out.verts.len();
     // --- the bottom of the dish, then the agar as a filled block: a darker
     // floor under it, sides along the walls, and its surface. Seen through
     // the low wall, the side gives the gel its depth.
@@ -80,6 +81,25 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
     }
     ground_face(out, alo, ahi, agar_z, rgba(AGAR_C, 0.50));
 
+    for v in &mut out.verts[gel_start..] {
+        v.material = Material::WET;
+    }
+    // Minute trapped bubbles stay close to the meniscus, leaving the animal readable.
+    let mut bubbles = c.scatter();
+    for _ in 0..18 {
+        let at = Vec2::new(
+            bubbles.range(alo.x + 4.0, ahi.x - 4.0),
+            if bubbles.next() < 0.5 {
+                alo.y + 4.0
+            } else {
+                ahi.y - 4.0
+            },
+        );
+        surface(out, Material::WET, |out| {
+            dome(out, at, agar_z + 0.05, 0.7, 0.18, rgba(DISH, 0.24))
+        });
+    }
+
     // --- tracks: the trails a worm cuts into the surface as it goes, drawn
     // as faint sinuous grooves. Fixed per plate; the live worm adds none,
     // because a trail that persisted would be state the plate does not keep.
@@ -97,10 +117,8 @@ pub fn back(out: &mut Mesh, c: &Ctx) {
             .map(|k| {
                 let t = k as f32 / 18.0 * len;
                 let w = (t / wl * std::f32::consts::TAU).sin() * amp;
-                c.h.region.clamp_inside(
-                    Vec2::new(x0 + dx * t - dy * w, y0 + dy * t + dx * w),
-                    4.0,
-                )
+                c.h.region
+                    .clamp_inside(Vec2::new(x0 + dx * t - dy * w, y0 + dy * t + dx * w), 4.0)
             })
             .collect();
         ribbon(out, &pts, agar_z + 0.15, 1.6, rgba(TRACK, 0.22));
@@ -157,6 +175,7 @@ fn prop_mesh(out: &mut Mesh, c: &Ctx, prop: &Prop) {
         // A lawn of bacteria: a milky patch with a soft, ragged edge, denser
         // toward the middle. Three translucent layers do the softness; the
         // wobble does the raggedness.
+        let lawn_start = out.verts.len();
         let z = FLOOR_Z + AGAR + 0.2;
         for (i, k) in [1.0f32, 0.8, 0.58].iter().enumerate() {
             blob(
@@ -169,6 +188,9 @@ fn prop_mesh(out: &mut Mesh, c: &Ctx, prop: &Prop) {
                 prop.radius + i as f32 * 1.3,
                 rgba(LAWN, 0.30),
             );
+        }
+        for v in &mut out.verts[lawn_start..] {
+            v.material = Material::WET;
         }
         // And it is thinner where the worm has been grazing.
         let mut s = Scatter::new((prop.radius * 11.0) as u32);

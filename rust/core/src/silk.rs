@@ -17,8 +17,9 @@
 //!
 //! Vibration is a scalar excitation per node that spreads along threads and
 //! decays. Prey and the cursor deposit it; a spider's legs read it. This is
-//! not a physics model: tension is a scalar set when a thread is laid, and
-//! nothing sags or blows.
+//! a separate 3D tension-only solver relaxes junctions under gravity while
+//! fixed endpoints stay on their supports. The construction chart is retained
+//! for species programs and vibration/prey queries.
 
 use crate::util::{hypot, Vec2};
 
@@ -75,6 +76,10 @@ impl ThreadKind {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Node {
+    /// External force accumulated for the next physical step (animal/prey contact).
+    pub load: [f32; 3],
+    /// Physical position and motion; the 2D position remains the construction chart.
+    pub spatial: Option<SpatialNode>,
     pub pos: Vec2,
     pub anchor: Anchor,
     /// Vibration energy at this node, decaying.
@@ -87,7 +92,17 @@ pub struct Node {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpatialNode {
+    pub rest: [f32; 3],
+    pub pos: [f32; 3],
+    pub velocity: [f32; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Thread {
+    /// Material length at deposition, retained when supports move.
+    pub material_len: Option<f32>,
+    pub overstrain: f32,
     pub a: usize,
     pub b: usize,
     pub kind: ThreadKind,
@@ -121,6 +136,127 @@ pub struct Silk {
 }
 
 impl Silk {
+    /// A damped, tension-only position solver. Pinned endpoints stay on their
+    /// supports, junctions settle under gravity, and disconnected silk falls.
+    /// Substeps bound large frame times; constraints cannot push like rods.
+    pub fn step_spatial(&mut self, dt: f32, gravity: [f32; 3], floor: f32,
+        locate: impl Fn(&Node) -> [f32; 3]) {
+        for n in &mut self.nodes {
+            let rest = locate(n);
+            if n.spatial.is_none() { n.spatial = Some(SpatialNode { rest, pos: rest, velocity: [0.0; 3] }); }
+            if n.anchor == Anchor::Fixed {
+                n.spatial = Some(SpatialNode { rest, pos: rest, velocity: [0.0; 3] });
+            }
+        }
+        for t in &mut self.threads {
+            if t.material_len.is_none() {
+                let a=self.nodes[t.a].spatial.unwrap().pos;
+                let b=self.nodes[t.b].spatial.unwrap().pos;
+                t.material_len=Some(length3(std::array::from_fn(|k|b[k]-a[k])).max(0.01)*1.004);
+            }
+        }
+        let dt = dt.clamp(0.0, 0.05);
+        let steps = (dt * 120.0).ceil().max(1.0) as usize;
+        let h = dt / steps as f32;
+        if h <= 0.0 { return; }
+        for _ in 0..steps {
+            let mut multipliers=vec![0.0f32;self.threads.len()];
+            let before: Vec<_> = self.nodes.iter().map(|n| n.spatial.unwrap().pos).collect();
+            for n in &mut self.nodes {
+                if n.anchor == Anchor::Free {
+                    let s = n.spatial.as_mut().unwrap();
+                    for k in 0..3 { s.velocity[k] = (s.velocity[k] + (gravity[k]+n.load[k]) * h) * (-h * 2.5).exp(); s.pos[k] += s.velocity[k] * h; }
+                }
+            }
+            for _ in 0..8 {
+                for (index,t) in self.threads.iter().enumerate() {
+                    let a = self.nodes[t.a].spatial.unwrap();
+                    let b = self.nodes[t.b].spatial.unwrap();
+                    let d: [f32; 3] = std::array::from_fn(|k| b.pos[k] - a.pos[k]);
+                    let len = length3(d).max(0.0001);
+                    let rest = t.material_len.unwrap();
+                    let wa = if self.nodes[t.a].anchor == Anchor::Free { 1.0 } else { 0.0 };
+                    let wb = if self.nodes[t.b].anchor == Anchor::Free { 1.0 } else { 0.0 };
+                    if wa + wb > 0.0 {
+                        // XPBD compliance: force response is consistent across substeps.
+                        let alpha=0.0001/(h*h);
+                        let next=(multipliers[index] + (-(len-rest)-alpha*multipliers[index])/(wa+wb+alpha)).min(0.0);
+                        let correction=-(next-multipliers[index])/len;
+                        multipliers[index]=next;
+                        for k in 0..3 {
+                            self.nodes[t.a].spatial.as_mut().unwrap().pos[k] += d[k] * correction * wa;
+                            self.nodes[t.b].spatial.as_mut().unwrap().pos[k] -= d[k] * correction * wb;
+                        }
+                    }
+                }
+            }
+            for (i,t) in self.threads.iter_mut().enumerate() {
+                let a=self.nodes[t.a].spatial.unwrap().pos;
+                let b=self.nodes[t.b].spatial.unwrap().pos;
+                let strain=(length3(std::array::from_fn(|k|b[k]-a[k]))/t.material_len.unwrap()-1.0).max(0.0);
+                t.tension=(strain*1000.0).max(-multipliers[i]/(h*h)).min(1000.0);
+                t.overstrain=if strain>0.65 {t.overstrain+h} else {0.0};
+            }
+            for (i,n) in self.nodes.iter_mut().enumerate() {
+                let s = n.spatial.as_mut().unwrap();
+                if n.anchor == Anchor::Free { s.pos[2] = s.pos[2].max(floor); }
+                for k in 0..3 { s.velocity[k] = ((s.pos[k] - before[i][k]) / h).clamp(-200.0,200.0); }
+            }
+        }
+        for n in &mut self.nodes {n.load=[0.0;3];}
+    }
+
+    /// Transfer a contact load to the endpoints of the physically touched strand.
+    pub fn load_at(&mut self, point: [f32;3], force: [f32;3], reach: f32) -> bool {
+        let Some((i,u,d))=self.physical_contact(point) else {return false;};
+        if d>reach {return false;}
+        let t=self.threads[i];
+        for k in 0..3 {self.nodes[t.a].load[k]+=force[k]*(1.0-u);self.nodes[t.b].load[k]+=force[k]*u;}
+        true
+    }
+
+    pub fn physical_contact(&self, point: [f32;3]) -> Option<(usize,f32,f32)> {
+        self.threads.iter().enumerate().filter_map(|(i,t)|{
+            let a=self.nodes[t.a].spatial?.pos;let b=self.nodes[t.b].spatial?.pos;
+            let d: [f32;3]=std::array::from_fn(|k|b[k]-a[k]);
+            let l2=d.iter().map(|v|v*v).sum::<f32>().max(1e-8);
+            let u=((0..3).map(|k|(point[k]-a[k])*d[k]).sum::<f32>()/l2).clamp(0.0,1.0);
+            Some((i,u,length3(std::array::from_fn(|k|point[k]-a[k]-u*d[k]))))
+        }).min_by(|a,b|a.2.total_cmp(&b.2))
+    }
+
+    pub fn break_overstrained(&mut self) -> usize {
+        let before=self.threads.len();
+        self.threads.retain(|t|t.overstrain<0.15);
+        let cut=before-self.threads.len();
+        if cut>0 {self.prune();}
+        cut
+    }
+
+    /// Interpolate physical coordinates at the point the animal is walking on.
+    pub fn spatial_at(&self, at: Vec2) -> Option<[f32; 3]> {
+        let (i, _) = self.thread_near(at, None, 24.0)?;
+        let t = self.threads[i];
+        let a = self.nodes[t.a]; let b = self.nodes[t.b];
+        let u = param_along(a.pos, b.pos, at);
+        let (a,b) = (a.spatial?,b.spatial?);
+        Some(std::array::from_fn(|k| a.pos[k] + (b.pos[k] - a.pos[k]) * u))
+    }
+
+    pub fn spatial_segments(&self, spider: [f32; 3]) -> Vec<([f32; 3], [f32; 3], ThreadKind, f32)> {
+        let mut segments = Vec::new();
+        for t in &self.threads {
+            let a = self.nodes[t.a]; let b = self.nodes[t.b];
+            if let (Some(pa),Some(pb)) = (a.spatial,b.spatial) {
+                segments.push((pa.pos,pb.pos,t.kind,(a.excite+b.excite)*0.5));
+            }
+        }
+        if let Some((i,kind)) = self.trailing {
+            if let Some(s) = self.nodes[i].spatial { segments.push((s.pos,spider,kind,self.nodes[i].excite)); }
+        }
+        segments
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -138,6 +274,8 @@ impl Silk {
 
     pub fn add_node(&mut self, pos: Vec2, anchor: Anchor) -> usize {
         self.nodes.push(Node {
+            load: [0.0; 3],
+            spatial: None,
             pos,
             anchor,
             excite: 0.0,
@@ -177,6 +315,8 @@ impl Silk {
             Some((n, kind)) if n != node => {
                 let len = dist(self.nodes[n].pos, self.nodes[node].pos);
                 self.threads.push(Thread {
+                    material_len: None,
+                    overstrain: 0.0,
                     a: n,
                     b: node,
                     kind,
@@ -229,10 +369,15 @@ impl Silk {
     /// that moved or closed — and drop what no longer holds anything.
     /// Returns how many threads went.
     pub fn cut_on(&mut self, id: i64) -> usize {
+        self.cut_attachments(|n| n.on == Some(id))
+    }
+
+    /// Sever only strands attached to the selected endpoints.
+    pub fn cut_attachments(&mut self, invalid: impl Fn(&Node) -> bool) -> usize {
         let before = self.threads.len();
         let nodes = &self.nodes;
         self.threads
-            .retain(|t| nodes[t.a].on != Some(id) && nodes[t.b].on != Some(id));
+            .retain(|t| !invalid(&nodes[t.a]) && !invalid(&nodes[t.b]));
         let cut = before - self.threads.len();
         if cut > 0 {
             self.prune();
@@ -347,7 +492,14 @@ impl Silk {
         let (a, b) = (self.nodes[th.a].pos, self.nodes[th.b].pos);
         let p = project_onto(a, b, at);
         let m = self.add_node(p, Anchor::Free);
+        if let (Some(a), Some(b)) = (self.nodes[th.a].spatial, self.nodes[th.b].spatial) {
+            let u = param_along(self.nodes[th.a].pos, self.nodes[th.b].pos, p);
+            let mix = |a: [f32; 3], b: [f32; 3]| std::array::from_fn(|k| a[k] + (b[k] - a[k]) * u);
+            self.nodes[m].spatial = Some(SpatialNode { rest: mix(a.rest,b.rest), pos: mix(a.pos,b.pos), velocity: mix(a.velocity,b.velocity) });
+        }
         self.threads[t] = Thread {
+            material_len: th.material_len.map(|l|l * param_along(a,b,p)),
+            overstrain: th.overstrain,
             a: th.a,
             b: m,
             kind: th.kind,
@@ -355,6 +507,8 @@ impl Silk {
             tension: th.tension,
         };
         self.threads.push(Thread {
+            material_len: th.material_len.map(|l|l * (1.0-param_along(a,b,p))),
+            overstrain: th.overstrain,
             a: m,
             b: th.b,
             kind: th.kind,
@@ -467,6 +621,8 @@ fn dist(a: Vec2, b: Vec2) -> f32 {
     hypot(a.x - b.x, a.y - b.y)
 }
 
+fn length3(v: [f32; 3]) -> f32 { (v[0]*v[0]+v[1]*v[1]+v[2]*v[2]).sqrt() }
+
 /// Where along `ab` (0 at `a`, 1 at `b`) the point nearest `p` lies.
 fn param_along(a: Vec2, b: Vec2, p: Vec2) -> f32 {
     let abx = b.x - a.x;
@@ -508,6 +664,71 @@ fn segment_distance(a: Vec2, b: Vec2, p: Vec2) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spatial_silk_sags_but_keeps_its_pins_and_falls_when_released() {
+        let mut s = Silk::new();
+        s.pay_out(Vec2::new(-30.0,0.0),ThreadKind::Frame);
+        s.attach(Vec2::ZERO,Anchor::Free);
+        s.attach(Vec2::new(30.0,0.0),Anchor::Fixed);
+        s.release();
+        let map = |n: &Node| [n.pos.x,n.pos.y,40.0];
+        for _ in 0..240 { s.step_spatial(1.0/60.0,[0.0,0.0,-28.0],0.0,map); }
+        assert_eq!(s.nodes[0].spatial.unwrap().pos,[-30.0,0.0,40.0]);
+        assert_eq!(s.nodes[2].spatial.unwrap().pos,[30.0,0.0,40.0]);
+        let z = s.nodes[1].spatial.unwrap().pos[2];
+        assert!(z < 39.5 && z > 30.0,"junction did not settle: {z}");
+        for n in &mut s.nodes { n.anchor = Anchor::Free; }
+        for _ in 0..360 { s.step_spatial(1.0/60.0,[0.0,0.0,-28.0],0.0,map); }
+        assert!(s.nodes.iter().all(|n| n.spatial.unwrap().pos[2] < 1.0));
+    }
+
+    #[test]
+    fn splitting_spatial_silk_preserves_the_actual_attachment_point() {
+        let mut s = Silk::new();
+        s.pay_out(Vec2::ZERO,ThreadKind::Frame);
+        s.attach(Vec2::new(100.0,0.0),Anchor::Fixed);
+        s.release();
+        s.step_spatial(0.0,[0.0;3],0.0,|n| [n.pos.x,20.0,n.pos.x*0.5]);
+        let m = s.split_thread(0,Vec2::new(40.0,0.0));
+        assert_eq!(s.nodes[m].spatial.unwrap().pos,[40.0,20.0,20.0]);
+        let total: f32=s.threads.iter().map(|t|t.material_len.unwrap()).sum();
+        assert!((total-(100.0f32*100.0+50.0*50.0).sqrt()*1.004).abs()<0.001);
+    }
+
+    #[test]
+    fn spatial_material_survives_support_motion_and_excess_strain_breaks() {
+        let mut s=Silk::new();
+        s.pay_out(Vec2::ZERO,ThreadKind::Frame);
+        s.attach(Vec2::new(30.0,0.0),Anchor::Fixed);
+        s.release();
+        s.step_spatial(0.0,[0.0;3],0.0,|n|[n.pos.x,0.0,40.0]);
+        let material=s.threads[0].material_len;
+        for _ in 0..30 {s.step_spatial(1.0/60.0,[0.0;3],0.0,|n|[n.pos.x*2.0,0.0,40.0]);}
+        assert_eq!(s.threads[0].material_len,material);
+        assert!(s.threads[0].tension>100.0);
+        assert_eq!(s.break_overstrained(),1);
+        assert!(s.threads.is_empty());
+    }
+
+    #[test]
+    fn physical_contact_weight_increases_sag() {
+        let mut base=Silk::new();
+        base.pay_out(Vec2::new(-30.0,0.0),ThreadKind::Frame);
+        base.attach(Vec2::ZERO,Anchor::Free);
+        base.attach(Vec2::new(30.0,0.0),Anchor::Fixed);
+        base.release();
+        let mut loaded=base.clone();
+        let map=|n:&Node|[n.pos.x,0.0,40.0];
+        loaded.step_spatial(0.0,[0.0;3],0.0,map);
+        for _ in 0..480 {
+            let contact=loaded.nodes[1].spatial.unwrap().pos;
+            assert!(loaded.load_at(contact,[0.0,0.0,-28.0],0.1));
+            loaded.step_spatial(1.0/60.0,[0.0,0.0,-28.0],0.0,map);
+            base.step_spatial(1.0/60.0,[0.0,0.0,-28.0],0.0,map);
+        }
+        assert!(loaded.nodes[1].spatial.unwrap().pos[2]<base.nodes[1].spatial.unwrap().pos[2]-0.1);
+    }
 
     fn v(x: f32, y: f32) -> Vec2 {
         Vec2::new(x, y)

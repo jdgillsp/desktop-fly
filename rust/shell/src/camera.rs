@@ -64,7 +64,11 @@ pub enum Camera {
     ///
     /// `framing` is the close-up: centred on the animal and magnified, or
     /// `Framing::NONE` for the whole tank as placed.
-    Tilted { pitch: f32, yaw: f32, framing: Framing },
+    Tilted {
+        pitch: f32,
+        yaw: f32,
+        framing: Framing,
+    },
 }
 
 /// The default tilt: enough that the walls of a tank have real presence and a
@@ -92,8 +96,8 @@ pub const MAX_PITCH: f32 = 1.32;
 /// a flat elevation; it is the one setting where the tank reads as a backdrop.
 pub const MAX_YAW: f32 = 1.15;
 
-/// How much closer the close-up view looks: the animal a few times larger,
-/// the tank still mostly in frame around it.
+/// Legacy reference magnification used by camera regression tests.
+#[cfg(test)]
 pub const CLOSEUP_MAGNIFY: f32 = 2.6;
 
 /// A close-up: the view centred on a ground point and magnified about it.
@@ -202,7 +206,11 @@ impl Camera {
             // Turn first, then tilt. Negative pitch, so that +z (height) rises
             // *up* the screen rather than down it — getting that sign wrong
             // buries a flying fly instead of lifting it.
-            Camera::Tilted { pitch, yaw, framing } => {
+            Camera::Tilted {
+                pitch,
+                yaw,
+                framing,
+            } => {
                 let base = math::mul(
                     math::translate(0.0, 0.0, -EYE_TILTED),
                     math::mul(math::rotate_x(-pitch), math::rotate_z(*yaw)),
@@ -238,6 +246,47 @@ impl Camera {
         }
     }
 
+    /// Frame the visible animal geometry in 64% of the viewport. Projecting
+    /// actual vertices also centres elevated heads and swimming animals; the
+    /// resulting ground focus retains the existing cursor inverse transform.
+    pub fn fit_animal(
+        &self,
+        vertices: impl IntoIterator<Item = [f32; 3]>,
+        display: (f32, f32),
+    ) -> Option<Framing> {
+        let plain = match *self {
+            Camera::TopDown => return None,
+            Camera::Tilted { pitch, yaw, .. } => Camera::Tilted {
+                pitch,
+                yaw,
+                framing: Framing::NONE,
+            },
+        };
+        let view = plain.view();
+        let mut lo = Vec2::new(f32::INFINITY, f32::INFINITY);
+        let mut hi = Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for vertex in vertices {
+            if !vertex.iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            let p = math::transform_point(&view, vertex);
+            lo.x = lo.x.min(p[0]);
+            lo.y = lo.y.min(p[1]);
+            hi.x = hi.x.max(p[0]);
+            hi.y = hi.y.max(p[1]);
+        }
+        if !lo.x.is_finite() || display.0 <= 0.0 || display.1 <= 0.0 {
+            return None;
+        }
+        let center = Vec2::new((lo.x + hi.x) * 0.5, (lo.y + hi.y) * 0.5);
+        let magnify = (display.0 * 0.64 / (hi.x - lo.x).max(1.0))
+            .min(display.1 * 0.64 / (hi.y - lo.y).max(1.0))
+            .clamp(0.1, 400.0);
+        Some(Framing {
+            focus: plain.unproject_ground(center),
+            magnify,
+        })
+    }
 
     /// Unit vector from the scene toward the camera, in world space. The shader
     /// needs it for specular and rim light; it used to be hard-coded to +z,
@@ -362,7 +411,13 @@ impl Camera {
         let half = (region.size.0 / 2.0, region.size.1 / 2.0);
         let (olo, ohi) = self.screen_offsets(half, z_lo, z_hi);
         let at = self.project_ground(region.center);
-        let clamp = |v: f32, lo: f32, hi: f32| if lo > hi { (lo + hi) / 2.0 } else { v.clamp(lo, hi) };
+        let clamp = |v: f32, lo: f32, hi: f32| {
+            if lo > hi {
+                (lo + hi) / 2.0
+            } else {
+                v.clamp(lo, hi)
+            }
+        };
         let target = Vec2::new(
             clamp(
                 at.x,
@@ -413,6 +468,55 @@ impl Camera {
 mod tests {
     use super::*;
 
+    #[test]
+    fn inspection_fits_raised_long_animals_and_preserves_ground_picking() {
+        let plain = habitat();
+        // Long snake with an elevated head, deliberately far from the origin.
+        let points = [
+            [310.0, -180.0, 12.0],
+            [370.0, -178.0, 55.0],
+            [330.0, -169.0, 16.0],
+            [355.0, -186.0, 13.0],
+        ];
+        for display in [(560.0, 560.0), (1440.0, 900.0)] {
+            let fit = plain.fit_animal(points, display).unwrap();
+            let close = plain.framed(fit.focus, fit.magnify);
+            let projected: Vec<_> = points
+                .iter()
+                .map(|p| math::transform_point(&close.view(), *p))
+                .collect();
+            for axis in 0..2 {
+                let lo = projected
+                    .iter()
+                    .map(|p| p[axis])
+                    .fold(f32::INFINITY, f32::min);
+                let hi = projected
+                    .iter()
+                    .map(|p| p[axis])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let extent = if axis == 0 { display.0 } else { display.1 };
+                assert!((lo + hi).abs() < 0.02, "raised animal is not centred");
+                assert!(hi - lo <= extent * 0.641, "animal cropped");
+            }
+            let ground = Vec2::new(333.0, -173.0);
+            let picked = close.unproject_ground(close.project_ground(ground));
+            assert!((picked.x - ground.x).abs() < 0.01);
+            assert!((picked.y - ground.y).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn inspection_reveals_small_animals_without_changing_free_roam() {
+        let points = [[-3.0, -1.0, 2.0], [3.0, 1.0, 4.0]];
+        let fit = habitat().fit_animal(points, (560.0, 560.0)).unwrap();
+        assert!(fit.magnify > 20.0);
+        assert!(Camera::TopDown.fit_animal(points, (560.0, 560.0)).is_none());
+        assert!(habitat().fit_animal([], (560.0, 560.0)).is_none());
+        assert!(habitat()
+            .fit_animal([[f32::NAN; 3]], (560.0, 560.0))
+            .is_none());
+    }
+
     /// The default view must reproduce the constants the tank was designed and
     /// verified against, or making the view adjustable would silently have
     /// moved everyone's tank.
@@ -446,7 +550,10 @@ mod tests {
         assert_eq!(close.view_dir(), plain.view_dir(), "the angle changed");
 
         let at = close.project_ground(focus);
-        assert!(at.x.abs() < 1e-2 && at.y.abs() < 1e-2, "focus lands at {at:?}");
+        assert!(
+            at.x.abs() < 1e-2 && at.y.abs() < 1e-2,
+            "focus lands at {at:?}"
+        );
         for p in [
             Vec2::new(360.0, -900.0),
             Vec2::new(200.0, -1000.0),
@@ -462,13 +569,19 @@ mod tests {
             );
             // And a screen position goes back to the ground point under it.
             let back = close.unproject_ground(d);
-            assert!((back.x - p.x).abs() < 1e-2 && (back.y - p.y).abs() < 1e-2, "{p:?} -> {back:?}");
+            assert!(
+                (back.x - p.x).abs() < 1e-2 && (back.y - p.y).abs() < 1e-2,
+                "{p:?} -> {back:?}"
+            );
         }
         // Placement is done against the unframed camera, and a close-up on
         // the plain camera's own origin with no magnification is the plain
         // camera to the bit.
         assert_eq!(plain.framed(Vec2::ZERO, 1.0).view(), plain.view());
-        assert_eq!(Camera::TopDown.framed(focus, CLOSEUP_MAGNIFY), Camera::TopDown);
+        assert_eq!(
+            Camera::TopDown.framed(focus, CLOSEUP_MAGNIFY),
+            Camera::TopDown
+        );
     }
 
     /// However hard the user leans on a control, the projection has to stay one
@@ -488,7 +601,11 @@ mod tests {
             for _ in 0..64 {
                 v.adjust(dp, dy, dz);
             }
-            assert!((MIN_PITCH..=MAX_PITCH).contains(&v.pitch), "pitch {}", v.pitch);
+            assert!(
+                (MIN_PITCH..=MAX_PITCH).contains(&v.pitch),
+                "pitch {}",
+                v.pitch
+            );
             assert!(v.yaw.abs() <= MAX_YAW, "yaw {}", v.yaw);
             assert!(
                 (MIN_ZOOM..=MAX_ZOOM).contains(&v.clamped_zoom()),
@@ -507,7 +624,11 @@ mod tests {
             );
             let floor = math::transform_point(&c.view(), [0.0, 0.0, 0.0]);
             let up = math::transform_point(&c.view(), [0.0, 0.0, 10.0]);
-            assert!(up[1] > floor[1], "height stopped going up at pitch {}", v.pitch);
+            assert!(
+                up[1] > floor[1],
+                "height stopped going up at pitch {}",
+                v.pitch
+            );
         }
     }
 
@@ -534,13 +655,25 @@ mod tests {
     fn the_ground_mapping_round_trips_at_every_reachable_angle() {
         for &pitch in &[MIN_PITCH, 0.5, DEFAULT_PITCH, 1.1, MAX_PITCH] {
             for &yaw in &[-MAX_YAW, -0.3, 0.0, DEFAULT_YAW, MAX_YAW] {
-                let c = HabitatView { pitch, yaw, zoom: 1.0 }.camera();
-                for p in [Vec2::new(0.0, 0.0), Vec2::new(310.0, -244.0), Vec2::new(-88.0, 402.0)] {
+                let c = HabitatView {
+                    pitch,
+                    yaw,
+                    zoom: 1.0,
+                }
+                .camera();
+                for p in [
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(310.0, -244.0),
+                    Vec2::new(-88.0, 402.0),
+                ] {
                     let back = c.unproject_ground(c.project_ground(p));
                     assert!(
                         (back.x - p.x).abs() < 1e-2 && (back.y - p.y).abs() < 1e-2,
                         "pitch {pitch}, yaw {yaw}: ({}, {}) round-tripped to ({}, {})",
-                        p.x, p.y, back.x, back.y
+                        p.x,
+                        p.y,
+                        back.x,
+                        back.y
                     );
                 }
             }
@@ -557,7 +690,12 @@ mod tests {
         let base = (700.0, 460.0);
         let mut last = 0.0;
         for &z in &[MIN_ZOOM, 0.7, 1.0, 1.5, MAX_ZOOM] {
-            let c = HabitatView { pitch: DEFAULT_PITCH, yaw: DEFAULT_YAW, zoom: z }.camera();
+            let c = HabitatView {
+                pitch: DEFAULT_PITCH,
+                yaw: DEFAULT_YAW,
+                zoom: z,
+            }
+            .camera();
             let want = (base.0 * z, base.1 * z);
             let size = c.fit_size(display, want, lo, hi, 24.0);
             assert!(size.0 >= last, "zoom {z} shrank the tank");
@@ -567,11 +705,18 @@ mod tests {
             assert!(
                 ohi.x - olo.x <= display.0 - 48.0 + 1.0 && ohi.y - olo.y <= display.1 - 48.0 + 1.0,
                 "zoom {z} put a {:.0}x{:.0} tank on a {:.0}x{:.0} display",
-                ohi.x - olo.x, ohi.y - olo.y, display.0, display.1
+                ohi.x - olo.x,
+                ohi.y - olo.y,
+                display.0,
+                display.1
             );
         }
         // And the ends are genuinely different sizes, not a clamp doing nothing.
-        let small = HabitatView { pitch: DEFAULT_PITCH, yaw: DEFAULT_YAW, zoom: MIN_ZOOM };
+        let small = HabitatView {
+            pitch: DEFAULT_PITCH,
+            yaw: DEFAULT_YAW,
+            zoom: MIN_ZOOM,
+        };
         assert!(small.clamped_zoom() < 0.5);
     }
 
@@ -710,7 +855,12 @@ mod tests {
         );
         let mut worst_near = f32::MAX;
         let mut worst_far = f32::MIN;
-        for display in [(1280.0f32, 720.0f32), (2560.0, 1440.0), (3840.0, 2160.0), (5120.0, 2880.0)] {
+        for display in [
+            (1280.0f32, 720.0f32),
+            (2560.0, 1440.0),
+            (3840.0, 2160.0),
+            (5120.0, 2880.0),
+        ] {
             for pitch in [MIN_PITCH, DEFAULT_PITCH, MAX_PITCH] {
                 for yaw in [-MAX_YAW, 0.0, DEFAULT_YAW, MAX_YAW] {
                     for zoom in [MIN_ZOOM, 1.0, MAX_ZOOM] {
@@ -723,7 +873,8 @@ mod tests {
                         let corner = c.place_lower_right(display, size, lo, hi, 24.0);
                         // And every other corner, by dragging it there.
                         let mut regions = vec![corner];
-                        for &(sx, sy) in &[(-1.0f32, -1.0f32), (-1.0, 1.0), (1.0, 1.0), (1.0, -1.0)] {
+                        for &(sx, sy) in &[(-1.0f32, -1.0f32), (-1.0, 1.0), (1.0, 1.0), (1.0, -1.0)]
+                        {
                             let far_off = c.unproject_ground(Vec2::new(sx * 1e5, sy * 1e5));
                             regions.push(c.clamp_on_screen(
                                 Region::new(far_off, size),
@@ -756,7 +907,13 @@ mod tests {
         }
         // Not just inside, but with a margin: a display a little larger than
         // 5K, or a wall a little taller, must not be the next report.
-        assert!(worst_near > 500.0, "nearest corner is only {worst_near:.0} in front of the eye");
-        assert!(worst_far < FAR_TILTED - 500.0, "farthest corner is within 500 of the far plane: {worst_far:.0}");
+        assert!(
+            worst_near > 500.0,
+            "nearest corner is only {worst_near:.0} in front of the eye"
+        );
+        assert!(
+            worst_far < FAR_TILTED - 500.0,
+            "farthest corner is within 500 of the far plane: {worst_far:.0}"
+        );
     }
 }

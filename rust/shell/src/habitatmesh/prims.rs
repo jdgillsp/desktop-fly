@@ -4,7 +4,17 @@
 
 use dfcore::{Region, Vec2};
 
+pub use crate::mesh::Material;
 use crate::mesh::{Mesh, Vertex};
+
+/// Assign a surface response explicitly to a generated piece of furniture.
+pub fn surface(out: &mut Mesh, material: [f32; 4], build: impl FnOnce(&mut Mesh)) {
+    let start = out.verts.len();
+    build(out);
+    for vertex in &mut out.verts[start..] {
+        vertex.material = material;
+    }
+}
 
 pub fn rgba(c: [f32; 3], a: f32) -> [f32; 4] {
     [c[0], c[1], c[2], a]
@@ -52,9 +62,11 @@ pub fn face(out: &mut Mesh, quad: [[f32; 3]; 4], normal: [f32; 3], color: [f32; 
     let base = out.verts.len() as u32;
     for p in quad {
         out.verts.push(Vertex {
+            texcoord: [0.0; 4],
             pos: p,
             normal,
             color,
+            material: Material::MATTE,
         });
     }
     out.indices
@@ -66,9 +78,11 @@ pub fn tri(out: &mut Mesh, pts: [[f32; 3]; 3], normal: [f32; 3], color: [f32; 4]
     let base = out.verts.len() as u32;
     for p in pts {
         out.verts.push(Vertex {
+            texcoord: [0.0; 4],
             pos: p,
             normal,
             color,
+            material: Material::MATTE,
         });
     }
     out.indices.extend_from_slice(&[base, base + 1, base + 2]);
@@ -155,42 +169,65 @@ pub fn blob(
     seed: f32,
     color: [f32; 4],
 ) {
-    const SEG: usize = 18;
+    // Spend silhouette detail on furniture, not subpixel substrate grains.
+    let (segs, rings): (usize, usize) = if r < 2.0 {
+        (8, 2)
+    } else if r < 7.0 {
+        (12, 3)
+    } else {
+        (20, 4)
+    };
+    let rings = if rise < 0.01 { 1 } else { rings };
     let base = out.verts.len() as u32;
-    out.verts.push(Vertex {
-        pos: [at.x, at.y, z + rise],
-        normal: [0.0, 0.0, 1.0],
-        color,
-    });
-    for k in 0..SEG {
-        let a = std::f32::consts::TAU * k as f32 / SEG as f32;
-        let (s, c) = a.sin_cos();
-        let rr = r * (1.0 + wobble * ((3.0 * a + seed).sin() * 0.6 + (7.0 * a + seed * 1.7).sin() * 0.4));
-        // Slope of the flank, so a tall dome shades as a tall dome.
-        let up = (rr / rise.max(0.1)) * 0.45;
-        let l = (1.0 + up * up).sqrt();
-        out.verts.push(Vertex {
-            pos: [at.x + c * rr, at.y + s * rr, z],
-            normal: [c / l, s / l, up / l],
-            color,
-        });
+    for ring in 0..=rings {
+        let t = ring as f32 / rings as f32 * std::f32::consts::FRAC_PI_2;
+        let radial = t.sin();
+        let elevation = t.cos();
+        for k in 0..segs {
+            let a = std::f32::consts::TAU * k as f32 / segs as f32;
+            let (sn, cs) = a.sin_cos();
+            let noise = (3.0 * a + seed).sin() * 0.6 + (7.0 * a + seed * 1.7).sin() * 0.4;
+            let rr = r * (1.0 + wobble * noise);
+            let nx = cs * radial * rise.max(0.01);
+            let ny = sn * radial * rise.max(0.01);
+            let nz = elevation * rr;
+            let norm = (nx * nx + ny * ny + nz * nz).sqrt().max(0.001);
+            let tone = 1.0 + wobble * 0.20 * noise * radial;
+            out.verts.push(Vertex {
+                texcoord: [0.0; 4],
+                pos: [
+                    at.x + cs * rr * radial,
+                    at.y + sn * rr * radial,
+                    z + rise * elevation,
+                ],
+                normal: if rise < 0.01 {
+                    [0.0, 0.0, 1.0]
+                } else {
+                    [nx / norm, ny / norm, nz / norm]
+                },
+                color: [color[0] * tone, color[1] * tone, color[2] * tone, color[3]],
+                material: Material::MATTE,
+            });
+        }
     }
-    for k in 0..SEG {
-        let a = base + 1 + k as u32;
-        let b = base + 1 + ((k + 1) % SEG) as u32;
-        out.indices.extend_from_slice(&[base, a, b]);
+    for ring in 0..rings {
+        for k in 0..segs {
+            let a = base + (ring * segs + k) as u32;
+            let b = base + (ring * segs + (k + 1) % segs) as u32;
+            let c = a + segs as u32;
+            let d = b + segs as u32;
+            // The first ring collapses to the apex: omit its zero-area half.
+            out.indices.extend_from_slice(&[a, c, d]);
+            if ring > 0 {
+                out.indices.extend_from_slice(&[a, d, b]);
+            }
+        }
     }
 }
 
 /// A flat disc facing up, optionally with a wedge missing between two angles
 /// (a lily pad's notch).
-pub fn disc(
-    out: &mut Mesh,
-    at: [f32; 3],
-    r: f32,
-    gap: Option<(f32, f32)>,
-    color: [f32; 4],
-) {
+pub fn disc(out: &mut Mesh, at: [f32; 3], r: f32, gap: Option<(f32, f32)>, color: [f32; 4]) {
     const SEG: usize = 24;
     let (from, to) = match gap {
         Some((a, b)) => (b, a + std::f32::consts::TAU),
@@ -198,17 +235,21 @@ pub fn disc(
     };
     let base = out.verts.len() as u32;
     out.verts.push(Vertex {
+        texcoord: [0.0; 4],
         pos: at,
         normal: [0.0, 0.0, 1.0],
         color,
+        material: Material::MATTE,
     });
     for k in 0..=SEG {
         let a = from + (to - from) * k as f32 / SEG as f32;
         let (s, c) = a.sin_cos();
         out.verts.push(Vertex {
+            texcoord: [0.0; 4],
             pos: [at[0] + c * r, at[1] + s * r, at[2]],
             normal: [0.0, 0.0, 1.0],
             color,
+            material: Material::MATTE,
         });
     }
     for k in 0..SEG as u32 {
@@ -262,9 +303,11 @@ pub fn tube(
         ];
         for p in [a, b] {
             out.verts.push(Vertex {
+                texcoord: [0.0; 4],
                 pos: [p[0] + n[0] * r, p[1] + n[1] * r, p[2] + n[2] * r],
                 normal: n,
                 color,
+                material: Material::MATTE,
             });
         }
     }
@@ -279,9 +322,11 @@ pub fn tube(
             let n = [axis[0] * sign, axis[1] * sign, axis[2] * sign];
             let c0 = out.verts.len() as u32;
             out.verts.push(Vertex {
+                texcoord: [0.0; 4],
                 pos: p,
                 normal: n,
                 color,
+                material: Material::MATTE,
             });
             for k in 0..segs {
                 let t = std::f32::consts::TAU * k as f32 / segs as f32;
@@ -292,9 +337,11 @@ pub fn tube(
                     u[2] * c + v[2] * s,
                 ];
                 out.verts.push(Vertex {
+                    texcoord: [0.0; 4],
                     pos: [p[0] + m[0] * r, p[1] + m[1] * r, p[2] + m[2] * r],
                     normal: n,
                     color,
+                    material: Material::MATTE,
                 });
             }
             for k in 0..segs as u32 {
@@ -324,9 +371,11 @@ pub fn ribbon(out: &mut Mesh, pts: &[Vec2], z: f32, width: f32, color: [f32; 4])
         let (nx, ny) = (-dy / l * width * 0.5, dx / l * width * 0.5);
         for side in [-1.0f32, 1.0] {
             out.verts.push(Vertex {
+                texcoord: [0.0; 4],
                 pos: [pts[i].x + nx * side, pts[i].y + ny * side, z],
                 normal: [0.0, 0.0, 1.0],
                 color,
+                material: Material::MATTE,
             });
         }
     }
@@ -350,7 +399,7 @@ pub fn frond(
     color: [f32; 4],
     region: Region,
 ) {
-    const JOINTS: usize = 5;
+    const JOINTS: usize = 8;
     let base = out.verts.len() as u32;
     for j in 0..=JOINTS {
         let t = j as f32 / JOINTS as f32;
@@ -361,29 +410,31 @@ pub fn frond(
         // small thing to see and a hard thing to unsee, and the mesh promising
         // to stay inside the region is what makes the walls mean anything.
         let tip = region.clamp_inside(
-            Vec2::new(
-                root.x + bend * height * 0.55,
-                root.y + bend * height * 0.18,
-            ),
+            Vec2::new(root.x + bend * height * 0.55, root.y + bend * height * 0.18),
             half_width + 2.0,
         );
         let (x, y) = (tip.x, tip.y);
         let z = floor_z + 1.0 + height * t;
-        let w = half_width * (1.0 - t * 0.85);
+        let w = half_width * (0.08 + 0.92 * (std::f32::consts::PI * t).sin().powf(0.7));
         let k = 0.72 + 0.28 * t;
         let c = [color[0] * k, color[1] * k, color[2] * k, color[3]];
-        for side in [-1.0f32, 1.0] {
+        for side in [-1.0f32, 0.0, 1.0] {
             out.verts.push(Vertex {
-                pos: [x + side * w, y, z],
-                normal: [bend.sin() * 0.4, -0.5, 0.76],
+                texcoord: [0.0; 4],
+                pos: [x + side * w, y - (1.0 - side.abs()) * w * 0.22, z],
+                normal: [side * 0.35, -0.65, 0.76],
                 color: c,
+                material: Material::SKIN,
             });
         }
     }
     for j in 0..JOINTS as u32 {
-        let a = base + j * 2;
-        out.indices
-            .extend_from_slice(&[a, a + 1, a + 2, a + 1, a + 3, a + 2]);
+        let a = base + j * 3;
+        for side in 0..2 {
+            let k = a + side;
+            out.indices
+                .extend_from_slice(&[k, k + 1, k + 3, k + 1, k + 4, k + 3]);
+        }
     }
 }
 
@@ -430,4 +481,106 @@ pub fn tuft(
 /// visibly. Cheap, and it is most of what makes an enclosure look inhabited.
 pub fn contact_shade(out: &mut Mesh, at: Vec2, z: f32, r: f32) {
     dome(out, at, z, r * 1.35, 0.0, [0.0, 0.0, 0.0, 0.22]);
+}
+
+/// A pointed, folded broad leaf, bounded by its supplied radius.
+pub fn leaf(out: &mut Mesh, at: [f32; 3], radius: f32, angle: f32, color: [f32; 4]) {
+    let (sn, cs) = angle.sin_cos();
+    let p = |x: f32, y: f32, z: f32| [at[0] + cs * x - sn * y, at[1] + sn * x + cs * y, at[2] + z];
+    let root = p(-radius, 0.0, 0.0);
+    let tip = p(radius, 0.0, radius * 0.08);
+    let mid = p(0.0, 0.0, radius * 0.17);
+    for side in [-1.0f32, 1.0] {
+        let edge = p(-radius * 0.05, side * radius * 0.48, 0.0);
+        let tone = if side < 0.0 { 0.88 } else { 1.05 };
+        let col = [color[0] * tone, color[1] * tone, color[2] * tone, color[3]];
+        tri(
+            out,
+            [root, edge, mid],
+            [-sn * side * 0.2, cs * side * 0.2, 0.98],
+            col,
+        );
+        tri(
+            out,
+            [mid, edge, tip],
+            [-sn * side * 0.2, cs * side * 0.2, 0.98],
+            col,
+        );
+    }
+    tube(
+        out,
+        root,
+        tip,
+        radius * 0.022,
+        5,
+        false,
+        [color[0] * 1.2, color[1] * 1.2, color[2] * 1.2, color[3]],
+    );
+}
+
+/// Low-relief dry substrate. Shared grid vertices keep the mottling continuous;
+/// deterministic variation stays attached to the enclosure when it moves.
+#[allow(clippy::too_many_arguments)]
+pub fn substrate(
+    out: &mut Mesh,
+    lo: Vec2,
+    hi: Vec2,
+    z: f32,
+    relief: f32,
+    variation: f32,
+    seed: u32,
+    color: [f32; 4],
+) {
+    const CELLS: usize = 24;
+    const SIDE: usize = CELLS + 1;
+    let mut scatter = Scatter::new(seed);
+    let mut noise = [0.0f32; SIDE * SIDE];
+    for value in &mut noise {
+        *value = scatter.next();
+    }
+    let field = |x: usize, y: usize| {
+        let fine = noise[y * SIDE + x];
+        let broad = ((x as f32 * 0.43).sin() * (y as f32 * 0.37 + 0.8).cos() + 1.0) * 0.5;
+        fine * 0.48 + broad * 0.52
+    };
+    let dx = (hi.x - lo.x) / CELLS as f32;
+    let dy = (hi.y - lo.y) / CELLS as f32;
+    let base = out.verts.len() as u32;
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let h = field(x, y);
+            // Keep the perimeter at its established elevation for a sealed edge.
+            let edge = if x == 0 || y == 0 || x == CELLS || y == CELLS {
+                0.0
+            } else {
+                1.0
+            };
+            let nx = (field(x.saturating_sub(1), y) - field((x + 1).min(CELLS), y)) * relief
+                / (2.0 * dx).max(0.01);
+            let ny = (field(x, y.saturating_sub(1)) - field(x, (y + 1).min(CELLS))) * relief
+                / (2.0 * dy).max(0.01);
+            let norm = (nx * nx + ny * ny + 1.0).sqrt();
+            let tone = 1.0 + (h - 0.5) * variation * 2.0;
+            out.verts.push(Vertex {
+                texcoord: [0.0; 4],
+                pos: [
+                    lo.x + x as f32 * dx,
+                    lo.y + y as f32 * dy,
+                    z + h * relief * edge,
+                ],
+                normal: [nx / norm, ny / norm, 1.0 / norm],
+                color: [color[0] * tone, color[1] * tone, color[2] * tone, color[3]],
+                material: Material::MATTE,
+            });
+        }
+    }
+    for y in 0..CELLS {
+        for x in 0..CELLS {
+            let a = base + (y * SIDE + x) as u32;
+            let b = a + 1;
+            let c = a + SIDE as u32;
+            let d = c + 1;
+            out.indices.extend_from_slice(&[a, b, d, a, d, c]);
+        }
+    }
 }

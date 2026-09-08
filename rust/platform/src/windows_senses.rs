@@ -117,6 +117,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 }
 
 pub struct WindowsSenses {
+    ui_supports: crate::ui_supports::UiSupports,
     my_pid: u32,
     known_windows: HashSet<i64>,
     first_poll: bool,
@@ -145,6 +146,7 @@ impl Default for WindowsSenses {
 impl WindowsSenses {
     pub fn new() -> Self {
         WindowsSenses {
+            ui_supports: crate::ui_supports::UiSupports::new(),
             my_pid: unsafe { GetCurrentProcessId() },
             known_windows: HashSet::new(),
             first_poll: true,
@@ -394,8 +396,20 @@ impl Senses for WindowsSenses {
 
         // --- window terrain and looms ---
         let windows = self.enumerate();
+        // Rotate across the three front windows, retaining depth order. A
+        // foreground window hides the controls of windows behind it.
+        self.ui_supports.sample_windows(&windows.iter().take(3).map(|w| (w.hwnd,w.frame)).collect::<Vec<_>>());
         let mut ids = HashSet::new();
         for w in &windows {
+            for c in self.ui_supports.cached(w.hwnd,w.frame).into_iter().take(32) {
+                if snap.frames.len() >= 120 { break; }
+                let r = Rect::new(c.rect.left.max(space.display.left),c.rect.top.max(space.display.top),
+                    c.rect.right.min(space.display.right),c.rect.bottom.min(space.display.bottom));
+                if r.right <= r.left || r.bottom <= r.top {continue;}
+                let lo=space.to_scene(r.left as f32,r.bottom as f32);
+                let hi=space.to_scene(r.right as f32,r.top as f32);
+                snap.frames.push(dfcore::anchors::Frame {lo,hi,id:c.id});
+            }
             ids.insert(w.hwnd as i64);
             let r = Rect::new(w.frame.left, w.frame.top, w.frame.right, w.frame.bottom);
             if let Some(l) = space.ledge_from_window(&r, w.hwnd as i64) {
@@ -405,7 +419,7 @@ impl Senses for WindowsSenses {
             }
             // The same window, whole, for the weavers to fix silk to.
             if let Some(f) = space.frame_from_window(&r, w.hwnd as i64) {
-                if snap.frames.len() < 24 {
+                if snap.frames.len() < 120 {
                     snap.frames.push(f);
                 }
             }

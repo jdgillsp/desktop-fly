@@ -48,6 +48,8 @@ mod flycage;
 mod plate;
 mod pond;
 mod prims;
+pub(crate) mod fremen;
+pub(crate) use prims::tube as silk_tube;
 pub(crate) mod terrarium;
 mod vivarium;
 
@@ -203,6 +205,7 @@ impl<'a> Ctx<'a> {
         a1: f32,
     ) {
         let (lo, hi, top) = (self.lo, self.hi, self.top);
+        let start = out.verts.len();
         let f = fresnel(normal, self.view);
         face(
             out,
@@ -215,6 +218,14 @@ impl<'a> Ctx<'a> {
             normal,
             rgba(glass, a0 + a1 * f),
         );
+        let material = if self.h.kind == HabitatKind::FlyCage {
+            Material::MATTE
+        } else {
+            Material::GLASS
+        };
+        for v in &mut out.verts[start..] {
+            v.material = material;
+        }
     }
 
     /// The back wall and the far side wall of a glass box, seen from the
@@ -223,6 +234,7 @@ impl<'a> Ctx<'a> {
     pub fn far_walls(&self, out: &mut Mesh, glass: [f32; 3], a0: f32, a1: f32) {
         let (lo, hi, top) = (self.lo, self.hi, self.top);
         let normal = [0.0, -1.0, 0.0];
+        let start = out.verts.len();
         let f = fresnel(normal, self.view);
         face(
             out,
@@ -235,6 +247,14 @@ impl<'a> Ctx<'a> {
             normal,
             rgba(glass, a0 + a1 * f),
         );
+        let material = if self.h.kind == HabitatKind::FlyCage {
+            Material::MATTE
+        } else {
+            Material::GLASS
+        };
+        for v in &mut out.verts[start..] {
+            v.material = material;
+        }
         let (x, n) = self.far_side_x();
         self.side_wall(out, x, n, glass, a0, a1);
     }
@@ -250,6 +270,7 @@ impl<'a> Ctx<'a> {
     pub fn front_pane(&self, out: &mut Mesh, glass: [f32; 3], a0: f32, a1: f32) {
         let (lo, hi, top) = (self.lo, self.hi, self.top);
         let normal = [0.0, 1.0, 0.0];
+        let start = out.verts.len();
         let f = fresnel(normal, self.view);
         face(
             out,
@@ -262,6 +283,14 @@ impl<'a> Ctx<'a> {
             normal,
             rgba(glass, a0 + a1 * f),
         );
+        let material = if self.h.kind == HabitatKind::FlyCage {
+            Material::MATTE
+        } else {
+            Material::GLASS
+        };
+        for v in &mut out.verts[start..] {
+            v.material = material;
+        }
     }
 
     /// The cut top edge of all four walls, `t` wide, at the top of the box.
@@ -273,7 +302,9 @@ impl<'a> Ctx<'a> {
             (Vec2::new(lo.x, lo.y), Vec2::new(lo.x + t, hi.y)),
             (Vec2::new(hi.x - t, lo.y), Vec2::new(hi.x, hi.y)),
         ] {
-            ground_face(out, a, b, top, color);
+            surface(out, Material::GLASS, |out| {
+                ground_face(out, a, b, top, color)
+            });
         }
     }
 }
@@ -335,6 +366,33 @@ mod tests {
         )
     }
 
+    #[test]
+    fn see_through_hide_moves_after_animal_without_removing_shelter() {
+        let h = tank(HabitatKind::SandTerrarium);
+        let count = h.count(dfcore::PropKind::Hide);
+        assert!(count > 0);
+        let mut back = Mesh::default();
+        let mut front = Mesh::default();
+        build_display(&mut back, &mut front, &h, view(), false, true);
+        let mut without_hides = h.clone();
+        without_hides.props.retain(|p| p.kind != dfcore::PropKind::Hide);
+        let mut expected_back = Mesh::default();
+        build_back(&mut expected_back, &without_hides, view());
+        assert_eq!(back.indices, expected_back.indices);
+        assert_eq!(back.verts.len(), expected_back.verts.len());
+        let mut panes = Mesh::default();
+        build_front(&mut panes, &h, view(), false);
+        let hide_vertices = front.verts.len() - panes.verts.len();
+        assert!(hide_vertices > 0);
+        assert!(front.verts[..hide_vertices].iter().all(|v| v.color[3] <= 0.12));
+        assert_eq!(h.count(dfcore::PropKind::Hide), count);
+        build_display(&mut back, &mut front, &h, view(), false, false);
+        let mut normal = Mesh::default();
+        build_back(&mut normal, &h, view());
+        assert_eq!(back.indices, normal.indices);
+        assert_eq!(front.verts.len(), panes.verts.len());
+    }
+
     fn whole(h: &Habitat) -> Mesh {
         let mut m = Mesh::default();
         let mut f = Mesh::default();
@@ -362,7 +420,11 @@ mod tests {
     fn every_kind_produces_a_closed_mesh() {
         for kind in HabitatKind::ALL {
             let m = whole(&tank(kind));
-            assert!(m.verts.len() > 400, "{kind:?}: only {} verts", m.verts.len());
+            assert!(
+                m.verts.len() > 400,
+                "{kind:?}: only {} verts",
+                m.verts.len()
+            );
             assert_eq!(m.indices.len() % 3, 0);
             assert!(
                 m.indices.iter().all(|&i| (i as usize) < m.verts.len()),
@@ -519,7 +581,11 @@ mod tests {
             build_back(&mut back, &h, view());
             build_front(&mut front, &h, view(), false);
             let (lo, hi) = (h.region.min(), h.region.max());
-            let (near_x, far_x) = if v[0] < 0.0 { (lo.x, hi.x) } else { (hi.x, lo.x) };
+            let (near_x, far_x) = if v[0] < 0.0 {
+                (lo.x, hi.x)
+            } else {
+                (hi.x, lo.x)
+            };
             // A wall is present in a mesh if one of its *triangles* lies at
             // that x and reaches from the floor to the top — a frame bar has
             // vertices at both, but no single triangle spans them.
@@ -535,10 +601,22 @@ mod tests {
                         && v.iter().any(|p| (p[2] - top_z(kind)).abs() < 0.01)
                 })
             };
-            assert!(spans(&front, near_x), "{kind:?}: the near side wall is not in front");
-            assert!(!spans(&back, near_x), "{kind:?}: the near side wall is also behind");
-            assert!(spans(&back, far_x), "{kind:?}: the far side wall is not behind");
-            assert!(!spans(&front, far_x), "{kind:?}: the far side wall is in front");
+            assert!(
+                spans(&front, near_x),
+                "{kind:?}: the near side wall is not in front"
+            );
+            assert!(
+                !spans(&back, near_x),
+                "{kind:?}: the near side wall is also behind"
+            );
+            assert!(
+                spans(&back, far_x),
+                "{kind:?}: the far side wall is not behind"
+            );
+            assert!(
+                !spans(&front, far_x),
+                "{kind:?}: the far side wall is in front"
+            );
         }
     }
 
@@ -553,7 +631,10 @@ mod tests {
     fn glass_catches_the_light_at_grazing_angles() {
         let v = view();
         // Straight at the camera: no boost at all.
-        assert!(fresnel(v, v) < 0.01, "a face-on surface is being brightened");
+        assert!(
+            fresnel(v, v) < 0.01,
+            "a face-on surface is being brightened"
+        );
         // Exactly edge-on: full boost.
         let edge = [v[1], -v[0], 0.0];
         assert!(
@@ -573,7 +654,10 @@ mod tests {
             ];
             let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             let f = fresnel([n[0] / l, n[1] / l, n[2] / l], v);
-            assert!(f >= last - 1e-4, "fresnel dipped at t={t}: {f} after {last}");
+            assert!(
+                f >= last - 1e-4,
+                "fresnel dipped at t={t}: {f} after {last}"
+            );
             last = f;
         }
 
@@ -619,7 +703,10 @@ mod tests {
             height > h.props[i].radius * 2.0,
             "the plant is only {height:.1} tall"
         );
-        assert!(height < wall_height(h.kind), "the plant grows out of the tank");
+        assert!(
+            height < wall_height(h.kind),
+            "the plant grows out of the tank"
+        );
     }
 
     /// The spider's furniture is *vertical* furniture: the bark and the twig
@@ -636,7 +723,11 @@ mod tests {
             vivarium::prop(&mut m, &Ctx::new(&only, view()), &p);
             let (_, hi) = bounds(&m);
             let reach = (hi[2] - FLOOR_Z) / wall_height(h.kind);
-            assert!(reach > 0.5, "{kind:?} only reaches {:.0}% of the way up", reach * 100.0);
+            assert!(
+                reach > 0.5,
+                "{kind:?} only reaches {:.0}% of the way up",
+                reach * 100.0
+            );
             assert!(reach <= 1.0, "{kind:?} pokes out of the tank");
         }
     }
@@ -693,7 +784,11 @@ mod tests {
         let mut front = Mesh::default();
         build_back(&mut back, &h, view());
         build_front(&mut front, &h, view(), false);
-        let pad = h.props.iter().find(|p| p.kind == PropKind::LilyPad).unwrap();
+        let pad = h
+            .props
+            .iter()
+            .find(|p| p.kind == PropKind::LilyPad)
+            .unwrap();
         let near = |m: &Mesh| {
             m.verts
                 .iter()
@@ -757,8 +852,15 @@ mod tests {
             .iter()
             .find(|v| (v.pos[2] - (FLOOR_Z + SAND)).abs() < 0.01)
             .expect("no sand surface");
-        assert!(sand.color[0] > sand.color[2] + 0.15, "the sand is not warm: {:?}", sand.color);
-        assert!(sand.color[0] + sand.color[1] + sand.color[2] > 1.8, "the sand is dark");
+        assert!(
+            sand.color[0] > sand.color[2] + 0.15,
+            "the sand is not warm: {:?}",
+            sand.color
+        );
+        assert!(
+            sand.color[0] + sand.color[1] + sand.color[2] > 1.8,
+            "the sand is dark"
+        );
         assert!(creature_lift(HabitatKind::SandTerrarium, 0.0) > FLOOR_Z + SAND);
     }
 
@@ -775,8 +877,38 @@ mod tests {
         terrarium::prop_mesh(&mut m, &Ctx::new(&only, view()), &p);
         let (lo, hi) = bounds(&m);
         let sand = FLOOR_Z + SAND;
-        assert!(hi[2] > sand + p.radius * 0.4, "the hide is flat: top at {}", hi[2]);
+        assert!(
+            hi[2] > sand + p.radius * 0.4,
+            "the hide is flat: top at {}",
+            hi[2]
+        );
         assert!(lo[2] < sand, "the hide sits on the sand rather than in it");
         assert!(hi[2] < top_z(h.kind), "the hide pokes out of the tank");
     }
+}
+
+/// Move translucent shelter geometry after the animal so it cannot depth-occlude it.
+/// Only the drawing copy loses its hides; the simulation retains all shelter props.
+pub fn build_display(back: &mut Mesh, front: &mut Mesh, h: &Habitat,
+    view: [f32; 3], grabbed: bool, see_through_hides: bool) {
+    if !see_through_hides || h.kind != HabitatKind::SandTerrarium {
+        build_back(back, h, view);
+        build_front(front, h, view, grabbed);
+        return;
+    }
+    let mut drawing = h.clone();
+    drawing.props.retain(|p| p.kind != dfcore::PropKind::Hide);
+    build_back(back, &drawing, view);
+    front.verts.clear();
+    front.indices.clear();
+    let c = Ctx::new(h, view);
+    for prop in h.props.iter().filter(|p| p.kind == dfcore::PropKind::Hide) {
+        terrarium::prop_mesh(front, &c, prop);
+    }
+    for v in &mut front.verts { v.color[3] *= 0.12; }
+    let mut panes = Mesh::default();
+    build_front(&mut panes, h, view, grabbed);
+    let base = front.verts.len() as u32;
+    front.verts.extend_from_slice(&panes.verts);
+    front.indices.extend(panes.indices.iter().map(|i| i + base));
 }

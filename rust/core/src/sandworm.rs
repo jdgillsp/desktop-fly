@@ -84,6 +84,8 @@ pub struct Sandworm {
     pub swallowed: bool,
     /// Standing water, as a centre and a radius. Kept away from.
     pub hazard: Option<(Vec2, f32)>,
+    /// Solid enclosure footprints, including the Fremen cave.
+    pub obstacles: Vec<(Vec2, f32)>,
     pub time: f32,
 
     path: Vec<Vec2>,
@@ -119,6 +121,7 @@ impl Sandworm {
             lure: None,
             swallowed: false,
             hazard: None,
+            obstacles: Vec::new(),
             time: rng.range(0.0, 100.0),
             path: vec![tail, at],
             arc: vec![0.0, start],
@@ -217,17 +220,73 @@ impl Sandworm {
         self.state_timer = 2.5;
     }
 
-    fn take_turn(&mut self, dt: f32, rate: f32) {
-        if self.pending_turn.abs() < 1e-3 {
-            return;
+    fn navigate(&mut self, dt: f32, desired: f32, world: &World) -> bool {
+        let origin = self.sample(self.head_s);
+        let travel = self.speed * dt;
+        let mut best = None;
+        // Arc probes enforce a 38-unit minimum bend radius. The envelope
+        // includes the rendered maw and lateral motion, not just its centre.
+        for k in -12..=12 {
+            let bend = k as f32 / 12.0 / 38.0;
+            let mut p = origin;
+            let mut heading = self.heading;
+            let mut score = 0.0;
+            let mut safe = true;
+            for probe in 1..=24 {
+                heading += bend * 2.0;
+                p.x += heading.cos() * 2.0;
+                p.y += heading.sin() * 2.0;
+                if world.region.outside(p, 12.0)
+                    || self.obstacles.iter().any(|(c,r)| p.dist(*c) < r + 11.0)
+                    || self.spine.iter().skip(7).any(|q| p.dist(*q) < 13.0) {
+                    if probe <= 2 { safe = false; }
+                    score += (25-probe) as f32 * 12.0;
+                    break;
+                }
+            }
+            score += angle_diff(heading, desired).abs() * 8.0 + bend.abs() * 2.0;
+            if safe && best.map_or(true, |(_, s)| score < s) { best = Some((bend, score)); }
         }
-        let step = rate * dt * self.pending_turn.signum();
-        if step.abs() >= self.pending_turn.abs() {
-            self.heading += self.pending_turn;
-            self.pending_turn = 0.0;
-        } else {
-            self.heading += step;
-            self.pending_turn -= step;
+        if let Some((bend, _)) = best {
+            let heading = self.heading + bend * travel;
+            let next = Vec2::new(origin.x + heading.cos()*travel, origin.y + heading.sin()*travel);
+            if !world.region.outside(next, 11.0)
+                && !self.obstacles.iter().any(|(c,r)| next.dist(*c) < r+10.0)
+                && !self.spine.iter().skip(7).any(|q| next.dist(*q) < 12.0) {
+                self.heading = heading;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Furnishings may be inserted or moved onto the existing body. Re-seat
+    /// it under open sand only on those layout changes, never during travel.
+    pub fn fit_clearance(&mut self, region: crate::Region) {
+        let clear = |spine: &[Vec2]| spine.iter().all(|p| !region.outside(*p, 12.0)
+            && self.obstacles.iter().all(|(c,r)| p.dist(*c) > r+12.0));
+        if clear(&self.spine) { return; }
+        for ring in 0..=8 {
+            for location in 0..16 {
+                let a = std::f32::consts::TAU*location as f32/16.0;
+                let at = region.clamp_inside(Vec2::new(self.pos.x+a.cos()*ring as f32*25.0,
+                                                       self.pos.y+a.sin()*ring as f32*25.0), 15.0);
+                for orientation in 0..16 {
+                    let heading = self.heading + std::f32::consts::TAU*orientation as f32/16.0;
+                    let spine: Vec<_> = (0..SEGMENTS).map(|i| Vec2::new(at.x-heading.cos()*i as f32*SEGMENT_LEN,
+                                                                                     at.y-heading.sin()*i as f32*SEGMENT_LEN)).collect();
+                    if clear(&spine) {
+                        let mut replacement = Self::new(at, self.time.to_bits() as u64);
+                        replacement.heading = heading;
+                        replacement.path[0] = Vec2::new(at.x-heading.cos()*replacement.head_s,at.y-heading.sin()*replacement.head_s);
+                        replacement.resample_spine();
+                        replacement.hazard = self.hazard;
+                        replacement.obstacles = std::mem::take(&mut self.obstacles);
+                        *self = replacement;
+                        return;
+                    }
+                }
+            }
         }
     }
 }
@@ -238,6 +297,21 @@ impl Body for Sandworm {
     }
 
     fn step(&mut self, dt: f32, drives: &BrainSignals, world: &World) {
+        if self.path.len() == 2 {
+            self.path[0] = Vec2::new(self.path[1].x-self.heading.cos()*self.head_s,
+                                    self.path[1].y-self.heading.sin()*self.head_s);
+            self.resample_spine();
+        }
+        if dt > 1.0 / 30.0 {
+            let count = (dt * 60.0).ceil().min(600.0) as usize;
+            let mut swallowed = false;
+            for _ in 0..count {
+                self.step(dt / count as f32, drives, world);
+                swallowed |= self.swallowed;
+            }
+            self.swallowed = swallowed;
+            return;
+        }
         self.time += dt;
         self.state_timer -= dt;
         self.breach_cooldown = (self.breach_cooldown - dt).max(0.0);
@@ -258,7 +332,8 @@ impl Body for Sandworm {
                     .hazard
                     .map(|(w, r)| a.dist(w) < r + 40.0)
                     .unwrap_or(false);
-                self.lure = if by_water { None } else { Some(a) };
+                let blocked = self.obstacles.iter().any(|(p,r)| a.dist(*p) < r + 12.0);
+                self.lure = if by_water || blocked { None } else { Some(a) };
                 if self.state == SandwormState::Idle {
                     self.state = SandwormState::Submerged;
                     self.state_timer = 10.0;
@@ -358,32 +433,41 @@ impl Body for Sandworm {
         self.speed += (target - self.speed) * (1.5 * dt).min(1.0);
         self.speed = self.speed.max(0.0);
 
-        let turn_rate = if self.lure.is_some() { 2.0 } else { 0.7 };
-        self.take_turn(dt, turn_rate);
-        self.heading += drives.turn_bias * 0.2 * dt;
+        let mut desired = self.heading + self.pending_turn + drives.turn_bias * 0.5;
+        if let Some(lure) = self.lure {
+            // When a lure is inside the turning circle, open the approach
+            // before turning back; chasing its bearing would orbit forever.
+            let bearing = (lure.y-self.pos.y).atan2(lure.x-self.pos.x);
+            if self.pos.dist(lure) < 85.0 && angle_diff(self.heading, bearing).abs() > 1.0 {
+                desired = self.heading;
+            }
+        }
+        if world.region.outside(self.pos, 65.0) {
+            desired = world.region.bearing_home(self.pos);
+        } else if let Some((w,r)) = self.hazard {
+            if self.pos.dist(w) < r + 70.0 { desired = (self.pos.y-w.y).atan2(self.pos.x-w.x); }
+        }
+        let previous = self.heading;
+        for (c,r) in &self.obstacles {
+            let d = self.pos.dist(*c);
+            let toward = (c.y-self.pos.y).atan2(c.x-self.pos.x);
+            let angle = angle_diff(toward, desired);
+            if d < r+85.0 && angle.abs() < ((r+20.0)/d.max(r+20.0)).asin() + 0.3 {
+                let side = if angle >= 0.0 { 1.0 } else { -1.0 };
+                desired = toward + side * (((r+23.0)/d.max(r+23.0)).asin() + 0.35);
+            }
+        }
+        let can_move = self.navigate(dt, desired, world);
+        self.pending_turn -= angle_diff(previous, self.heading);
+        self.pending_turn = self.pending_turn.clamp(-1.2, 1.2);
 
         // The lateral wave is slow; the ring wave runs with the speed.
         self.phase = (self.phase + (0.05 + self.speed / 90.0) * dt) % 1.0;
         self.ring_phase = (self.ring_phase + (self.speed / 12.0) * dt) % 1.0;
 
         let step = self.speed * dt;
-        if step > 0.0 {
+        if step > 0.0 && can_move {
             self.advance(step);
-        }
-
-        if world.region.outside(self.pos, 50.0) {
-            let home = world.region.bearing_home(self.pos);
-            self.heading += angle_diff(self.heading, home) * (1.8 * dt).min(1.0);
-        } else if let Some((w, r)) = self.hazard {
-            // Water: turn away well before reaching it, harder the nearer.
-            let d = self.pos.dist(w);
-            let reach = r + 70.0;
-            if d < reach {
-                let away = (self.pos.y - w.y).atan2(self.pos.x - w.x);
-                let k = 1.0 - d / reach;
-                self.heading += angle_diff(self.heading, away) * (4.0 * k * dt).min(1.0);
-                self.pending_turn = 0.0;
-            }
         }
 
         self.resample_spine();
@@ -409,6 +493,23 @@ impl Body for Sandworm {
 mod tests {
     use super::*;
     use crate::habitat::Region;
+
+    #[test]
+    fn tight_turns_do_not_fold_the_body_into_itself() {
+        let mut w = Sandworm::new(Vec2::ZERO, 7);
+        let mut d = BrainSignals::new();
+        d.turn_bias = 4.0;
+        for _ in 0..2400 {
+            w.state = SandwormState::Cruise;
+            w.state_timer = 10.0;
+            w.step(1.0/60.0, &d, &world());
+            for i in 0..SEGMENTS {
+                for j in i+5..SEGMENTS {
+                    assert!(w.spine[i].dist(w.spine[j]) > 10.0, "self intersection: {i}, {j}");
+                }
+            }
+        }
+    }
 
     fn world() -> World {
         World {

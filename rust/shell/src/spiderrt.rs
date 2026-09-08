@@ -13,10 +13,10 @@
 //!   you work, and a reported build failure spawns bugs. Nothing else. Bugs
 //!   do not habituate — prey is not a threat — but a startle still does.
 
-use dfcore::Region;
 use dfcore::data::BrainPointsFile;
 use dfcore::env::{BuildEvent, Foreground};
 use dfcore::util::hypot;
+use dfcore::Region;
 use dfcore::{
     Creature, EnvSnapshot, Habituation, LifParams, LifSim, Origin, Salticid, SignalBuilder, Sim,
     Spider, Vec2,
@@ -89,10 +89,16 @@ impl SpiderRuntime {
         };
         match dfcore::data::load_for(rt.creature.data_dir()) {
             Ok(brain) => {
-                let mut sim =
-                    LifSim::with_params(&brain.circuit, seed, LifParams::default(), rt.creature.manifest());
+                let mut sim = LifSim::with_params(
+                    &brain.circuit,
+                    seed,
+                    LifParams::default(),
+                    rt.creature.manifest(),
+                );
                 sim.collect_spikes = true;
-                let authored = (0..sim.n).filter(|&i| sim.origin(i) == Origin::Authored).count();
+                let authored = (0..sim.n)
+                    .filter(|&i| sim.origin(i) == Origin::Authored)
+                    .count();
                 println!(
                     "{} - circuit {}n/{}e, {authored} authored neuron(s)",
                     rt.creature.provenance().describe(),
@@ -103,7 +109,9 @@ impl SpiderRuntime {
                 rt.sim = Some(sim);
                 rt.brain_points = Some(brain.points);
             }
-            Err(e) => eprintln!("no chimera data ({e}) - run etl_chimera.py; the spider runs brainless"),
+            Err(e) => {
+                eprintln!("no chimera data ({e}) - run etl_chimera.py; the spider runs brainless")
+            }
         }
         rt
     }
@@ -183,6 +191,17 @@ impl Runtime for SpiderRuntime {
         self.trans.trigger_scare();
     }
 
+    fn offer(&mut self, at: Vec2) -> bool {
+        if self.spider.prey.len() >= 3 {
+            return false;
+        }
+        self.spider.spawn_bug(at, Vec2::new(18.0, 7.0));
+        true
+    }
+    fn stop_interaction(&mut self) {
+        self.spider.prey.clear();
+    }
+
     fn sense(&mut self, env: &EnvSnapshot, dt: f32) {
         self.spider.terrain = env.ledges.clone();
         self.foreground = env.foreground;
@@ -258,15 +277,28 @@ impl Runtime for SpiderRuntime {
 
     fn build(&mut self, glass: bool) -> Geometry<'_> {
         let pose = self.spider.pose();
-        spiderbody::build_frame(&mut self.frame_mesh, &self.meshes, &self.spider, &pose, glass);
+        let inspection_vertices = spiderbody::build_frame(
+            &mut self.frame_mesh,
+            &self.meshes,
+            &self.spider,
+            &pose,
+            glass,
+        );
         self.has_neurons = false;
         if glass {
             if let Some(sim) = self.sim.as_ref() {
-                spiderbody::build_neuron_field(&mut self.neuron_mesh, sim, &self.body_flash, &self.spider, &pose);
+                spiderbody::build_neuron_field(
+                    &mut self.neuron_mesh,
+                    sim,
+                    &self.body_flash,
+                    &self.spider,
+                    &pose,
+                );
                 self.has_neurons = true;
             }
         }
         Geometry {
+            inspection_vertices: Some(inspection_vertices),
             body: &self.frame_mesh,
             neurons: if self.has_neurons {
                 Some(&self.neuron_mesh)
@@ -316,7 +348,8 @@ impl Runtime for SpiderRuntime {
         self.spider.state = dfcore::SpiderState::Watching;
         self.spider.head_yaw = 0.55;
         self.spider.crouch = 0.35;
-        self.spider.spawn_bug(Vec2::new(46.0, 30.0), Vec2::new(20.0, 5.0));
+        self.spider
+            .spawn_bug(Vec2::new(46.0, 30.0), Vec2::new(20.0, 5.0));
         if let Some(sim) = self.sim.as_mut() {
             sim.step(1500);
             // A faint small object in the left eye: enough for LC11 to

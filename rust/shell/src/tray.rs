@@ -23,6 +23,7 @@ pub const CONTENT_SLOTS: usize = 4;
 /// this file owns nothing but presentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
+    Interactions,
     TogglePause,
     ToggleBrain,
     EscapeTest,
@@ -36,6 +37,8 @@ pub enum TrayCommand {
     ToggleGlass,
     /// Confine the creature to a rendered enclosure, or let it have the screen.
     ToggleHabitat,
+    SetAnimalSize(u16),
+    ToggleSeeThroughHides,
     /// Nudge the habitat view: tilt, turn and size, as (pitch, yaw, zoom)
     /// deltas in the same units the drag chords use. One menu step is
     /// deliberately coarse — the chords are the fine control.
@@ -44,6 +47,7 @@ pub enum TrayCommand {
     ResetView,
     /// The camera on the animal, close, following it — or the whole tank.
     ToggleCloseup,
+    ToggleHeadCloseup,
     /// Add or remove one of the prop in this slot of the current enclosure's
     /// catalogue.
     AddProp(usize),
@@ -76,6 +80,8 @@ pub struct Tray {
     creatures: Vec<(&'static str, CheckMenuItem)>,
     glass: CheckMenuItem,
     habitat: CheckMenuItem,
+    animal_sizes: Vec<(u16, CheckMenuItem)>,
+    see_through_hides: CheckMenuItem,
     /// The current view, shown as text so the numbers are legible rather than
     /// something you can only infer from the picture.
     view: MenuItem,
@@ -83,6 +89,7 @@ pub struct Tray {
     /// offers to do nothing.
     reset_view: MenuItem,
     closeup: CheckMenuItem,
+    head_closeup: CheckMenuItem,
     /// Add/remove pairs, one per catalogue slot. Retargeted when the enclosure
     /// changes; disabled when the slot is unused.
     contents: Vec<(MenuItem, MenuItem)>,
@@ -177,6 +184,15 @@ impl Tray {
         let glass = CheckMenuItem::new("Glass Anatomy (see the circuit)", true, glass_on, None);
         let habitat = CheckMenuItem::new("Habitat (confine to a tank)", true, habitat_on, None);
 
+        let size_menu = Submenu::new("Animal size (habitat off)", true);
+        let animal_sizes: Vec<_> = [50u16, 100, 150, 200, 300, 400].into_iter()
+            .map(|percent| {
+                let item = CheckMenuItem::new(format!("{percent}%"), !habitat_on, percent == 100, None);
+                (percent, item)
+            }).collect();
+        for (_, item) in &animal_sizes { size_menu.append(item).ok()?; }
+        let see_through_hides = CheckMenuItem::new("See-through hides", true, false, None);
+
         // The view controls. Under a submenu because they are six items that
         // only matter inside a tank, and the top level is already long.
         let view = MenuItem::new("default view", false, None);
@@ -193,11 +209,13 @@ impl Tray {
             .map(|(label, step)| (MenuItem::new(*label, true, None), *step))
             .collect();
         let reset_view = MenuItem::new("Reset View", true, None);
+        let head_closeup = CheckMenuItem::new("Head close-up", false, false, None);
         let closeup = CheckMenuItem::new("Close-up (follow the animal)", true, false, None);
         let view_menu = Submenu::new("View", true);
         view_menu.append(&view).ok()?;
         view_menu.append(&PredefinedMenuItem::separator()).ok()?;
         view_menu.append(&closeup).ok()?;
+        view_menu.append(&head_closeup).ok()?;
         view_menu.append(&PredefinedMenuItem::separator()).ok()?;
         for (item, _) in &step_items {
             view_menu.append(item).ok()?;
@@ -207,17 +225,26 @@ impl Tray {
 
         // The contents controls. Fixed slots, relabelled per enclosure.
         let contents: Vec<(MenuItem, MenuItem)> = (0..CONTENT_SLOTS)
-            .map(|_| (MenuItem::new("-", false, None), MenuItem::new("-", false, None)))
+            .map(|_| {
+                (
+                    MenuItem::new("-", false, None),
+                    MenuItem::new("-", false, None),
+                )
+            })
             .collect();
         let restock = MenuItem::new("Restock (default contents)", true, None);
         let contents_menu = Submenu::new("Contents", true);
         for (add, remove) in &contents {
             contents_menu.append(add).ok()?;
             contents_menu.append(remove).ok()?;
-            contents_menu.append(&PredefinedMenuItem::separator()).ok()?;
+            contents_menu
+                .append(&PredefinedMenuItem::separator())
+                .ok()?;
         }
         contents_menu.append(&restock).ok()?;
+        contents_menu.append(&see_through_hides).ok()?;
 
+        let interactions = MenuItem::new("Habitat interactions...", true, None);
         let mood = MenuItem::new("getting to know you", false, None);
         let forget = MenuItem::new("Forget Me (reset habituation)", true, None);
         let quit = MenuItem::new("Quit", true, None);
@@ -227,9 +254,7 @@ impl Tray {
         let creatures: Vec<(&'static str, CheckMenuItem)> = CREATURE_IDS
             .iter()
             .map(|id| {
-                let name = dfcore::by_id(id)
-                    .map(|c| c.display_name())
-                    .unwrap_or(id);
+                let name = dfcore::by_id(id).map(|c| c.display_name()).unwrap_or(id);
                 (*id, CheckMenuItem::new(name, true, *id == current, None))
             })
             .collect();
@@ -239,6 +264,7 @@ impl Tray {
         }
 
         let mut ids = vec![
+            (interactions.id().clone(), TrayCommand::Interactions),
             (pause.id().clone(), TrayCommand::TogglePause),
             (brain.id().clone(), TrayCommand::ToggleBrain),
             (escape.id().clone(), TrayCommand::EscapeTest),
@@ -250,6 +276,10 @@ impl Tray {
             (forget.id().clone(), TrayCommand::ForgetMe),
             (quit.id().clone(), TrayCommand::Quit),
         ];
+        for (percent, item) in &animal_sizes {
+            ids.push((item.id().clone(), TrayCommand::SetAnimalSize(*percent)));
+        }
+        ids.push((see_through_hides.id().clone(), TrayCommand::ToggleSeeThroughHides));
         for (id, item) in &creatures {
             ids.push((item.id().clone(), TrayCommand::SelectCreature(id)));
         }
@@ -258,6 +288,7 @@ impl Tray {
         }
         ids.push((reset_view.id().clone(), TrayCommand::ResetView));
         ids.push((closeup.id().clone(), TrayCommand::ToggleCloseup));
+        ids.push((head_closeup.id().clone(), TrayCommand::ToggleHeadCloseup));
         ids.push((restock.id().clone(), TrayCommand::Restock));
         for (i, (add, remove)) in contents.iter().enumerate() {
             ids.push((add.id().clone(), TrayCommand::AddProp(i)));
@@ -277,8 +308,10 @@ impl Tray {
             &shadow,
             &glass,
             &habitat,
+            &size_menu,
             &view_menu,
             &contents_menu,
+            &interactions,
             &PredefinedMenuItem::separator(),
             &mood,
             &forget,
@@ -303,12 +336,29 @@ impl Tray {
             creatures,
             glass,
             habitat,
+            animal_sizes,
+            see_through_hides,
             view,
             reset_view,
             closeup,
+            head_closeup,
             contents,
             ids,
         })
+    }
+
+    pub fn set_animal_display(&self, scale: f32, habitat_on: bool, hides: bool, hides_available: bool) {
+        for (percent, item) in &self.animal_sizes {
+            item.set_checked((*percent as f32 - scale * 100.0).abs() < 0.5);
+            item.set_enabled(!habitat_on);
+        }
+        self.see_through_hides.set_checked(hides);
+        self.see_through_hides.set_enabled(hides_available);
+    }
+
+    pub fn set_head_closeup(&self, on: bool, available: bool) {
+        self.head_closeup.set_checked(on);
+        self.head_closeup.set_enabled(available);
     }
 
     pub fn set_closeup(&self, on: bool) {

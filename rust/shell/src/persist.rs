@@ -71,11 +71,17 @@ fn save_setting(key: &str, value: serde_json::Value) {
 
 /// Which creature was running last time, if a choice was ever saved.
 pub fn load_creature_choice() -> Option<String> {
-    load_settings().get("creature")?.as_str().map(|s| s.to_string())
+    load_settings()
+        .get("creature")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 pub fn save_creature_choice(creature_id: &str) {
-    save_setting("creature", serde_json::Value::String(creature_id.to_string()));
+    save_setting(
+        "creature",
+        serde_json::Value::String(creature_id.to_string()),
+    );
 }
 
 /// Glass anatomy or the literal animal, if the user ever toggled it.
@@ -178,7 +184,9 @@ pub fn load(creature_id: &str) -> Habituation {
 }
 
 pub fn save(creature_id: &str, h: &Habituation) {
-    let Some(p) = state_path_for(creature_id) else { return };
+    let Some(p) = state_path_for(creature_id) else {
+        return;
+    };
     if let Some(dir) = p.parent() {
         if std::fs::create_dir_all(dir).is_err() {
             return;
@@ -207,7 +215,10 @@ mod tests {
     #[test]
     fn the_state_path_is_under_a_per_user_data_directory() {
         let p = state_path_for("drosophila").expect("a state path on this platform");
-        assert!(p.ends_with("DesktopFly/habituation.json") || p.ends_with("DesktopFly\\habituation.json"));
+        assert!(
+            p.ends_with("DesktopFly/habituation.json")
+                || p.ends_with("DesktopFly\\habituation.json")
+        );
         assert!(p.is_absolute());
     }
 
@@ -218,8 +229,13 @@ mod tests {
         let fly = state_path_for("drosophila").unwrap();
         let worm = state_path_for("c_elegans").unwrap();
         assert_ne!(fly, worm);
-        assert!(fly.ends_with("habituation.json"), "the fly's file is the legacy one");
-        assert!(worm.to_string_lossy().ends_with("habituation-c_elegans.json"));
+        assert!(
+            fly.ends_with("habituation.json"),
+            "the fly's file is the legacy one"
+        );
+        assert!(worm
+            .to_string_lossy()
+            .ends_with("habituation-c_elegans.json"));
         assert_eq!(fly.parent(), worm.parent());
     }
 
@@ -246,4 +262,41 @@ mod tests {
         let back: Habituation = serde_json::from_str(&text).unwrap();
         assert!((back.loom_gain - h.loom_gain).abs() < 1e-9);
     }
+}
+
+/// No off-line starvation: appetite advances only while the simulation runs.
+pub fn save_appetite(id: &str, value: f32) {
+    save_setting(&format!("appetite-{id}"), serde_json::json!(value));
+}
+pub fn load_appetite(id: &str) -> Option<f32> {
+    load_settings()
+        .get(format!("appetite-{id}"))?
+        .as_f64()
+        .map(|v| v as f32)
+}
+
+pub fn save_heat(kind: &str, value: Option<u8>) {
+    save_setting(&format!("heat-{kind}"), serde_json::json!(value));
+}
+pub fn load_heat(kind: &str) -> Option<u8> {
+    load_settings()
+        .get(format!("heat-{kind}"))?
+        .as_u64()
+        .filter(|v| *v < 2)
+        .map(|v| v as u8)
+}
+
+/// Display preferences do not alter the animal's simulation or shelter.
+pub fn load_animal_scale() -> f32 {
+    load_settings().get("animal_scale").and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.5, 4.0) as f32
+}
+pub fn save_animal_scale(scale: f32) {
+    save_setting("animal_scale", serde_json::json!(scale));
+}
+pub fn load_see_through_hides() -> bool {
+    load_settings().get("see_through_hides").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+pub fn save_see_through_hides(on: bool) {
+    save_setting("see_through_hides", serde_json::json!(on));
 }

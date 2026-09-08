@@ -74,6 +74,7 @@ pub struct Koi {
     /// Apparent depth, 0 = deep, 1 = at the surface. Drives scale and speed:
     /// the desktop is flat, so depth has to read as size.
     pub depth: f32,
+    pub feeding: f32,
     depth_target: f32,
     pub state_timer: f32,
     /// Heading change still owed to the current manoeuvre, in radians. Turns
@@ -110,6 +111,7 @@ impl Koi {
             beat: 1.0,
             c_bend: 0.0,
             depth: rng.range(0.35, 0.75),
+            feeding: 0.0,
             depth_target: 0.5,
             state_timer: rng.range(1.5, 4.0),
             pending_turn: 0.0,
@@ -122,6 +124,17 @@ impl Koi {
         };
         koi.resample_spine();
         koi
+    }
+
+    /// An available surface meal changes depth gradually; startles still win.
+    pub fn seek_surface_food(&mut self, at: Vec2) {
+        if matches!(self.state, KoiState::Cruise | KoiState::Hover) {
+            self.depth_target = 0.98;
+            if self.pos.dist(at) < 28.0 {
+                self.state = KoiState::Hover;
+                self.state_timer = 0.6;
+            }
+        }
     }
 
     /// Uniform scale from apparent depth. A koi near the surface reads larger.
@@ -310,6 +323,7 @@ impl Body for Koi {
             }
         }
 
+        self.feeding = (self.feeding - dt*1.5).max(0.0);
         // Depth eases, never jumps: a fish changing level is a slow thing.
         self.depth += (self.depth_target - self.depth) * (0.55 * dt).min(1.0);
         self.depth = clamp(self.depth, 0.0, 1.0);

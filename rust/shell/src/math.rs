@@ -94,10 +94,8 @@ pub fn transform_point(m: &Mat4, p: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// Directions ignore translation. This is *not* the inverse-transpose, so it is
-/// only correct for uniform scale; the fly's parts use non-uniform scale, and
-/// the resulting slight normal skew is what SceneKit's default shading shows
-/// too — matching it keeps the look faithful.
+/// Directions ignore translation. Use `transform_normal` for surface normals:
+/// unlike directions, they need the inverse-transpose under non-uniform scale.
 pub fn transform_dir(m: &Mat4, p: [f32; 3]) -> [f32; 3] {
     let v = [
         m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2],
@@ -106,6 +104,29 @@ pub fn transform_dir(m: &Mat4, p: [f32; 3]) -> [f32; 3] {
     ];
     let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
     [v[0] / l, v[1] / l, v[2] / l]
+}
+
+/// Inverse-transpose normal transform for flattened wings and ellipsoidal
+/// bodies. Direction transforms stretch their highlights along the long axis.
+pub fn transform_normal(m: &Mat4, n: [f32; 3]) -> [f32; 3] {
+    let cross = |a: [f32; 4], b: [f32; 4]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let x = cross(m[1], m[2]);
+    let y = cross(m[2], m[0]);
+    let z = cross(m[0], m[1]);
+    let det = m[0][0] * x[0] + m[0][1] * x[1] + m[0][2] * x[2];
+    if det.abs() < 1e-10 {
+        return transform_dir(m, n);
+    }
+    let v: [f32; 3] =
+        std::array::from_fn(|i| (x[i] * n[0] + y[i] * n[1] + z[i] * n[2]) * det.signum());
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
+    [v[0] / len, v[1] / len, v[2] / len]
 }
 
 /// Orthographic projection matching the SceneKit camera in `main.swift:buildScene`
@@ -128,6 +149,17 @@ mod tests {
     }
 
     #[test]
+    fn scaled_surface_normals_stay_perpendicular_to_tangents() {
+        for scale in [[3.0, 0.4, 1.2], [-3.0, 0.4, 1.2]] {
+            let m = trs([7.0, 2.0, -1.0], [0.3, 0.6, 0.2], scale);
+            let normal = transform_normal(&m, [1.0, 1.0, 0.0]);
+            let tangent = transform_dir(&m, [1.0, -1.0, 0.0]);
+            let dot: f32 = normal.iter().zip(tangent).map(|(a, b)| a * b).sum();
+            assert!(dot.abs() < 1e-5, "normal is not perpendicular: {dot}");
+        }
+    }
+
+    #[test]
     fn translate_moves_a_point() {
         let m = translate(1.0, 2.0, 3.0);
         assert!(close(transform_point(&m, [0.0, 0.0, 0.0]), [1.0, 2.0, 3.0]));
@@ -142,7 +174,10 @@ mod tests {
     #[test]
     fn rotate_y_takes_x_toward_negative_z() {
         let m = rotate_y(std::f32::consts::FRAC_PI_2);
-        assert!(close(transform_point(&m, [1.0, 0.0, 0.0]), [0.0, 0.0, -1.0]));
+        assert!(close(
+            transform_point(&m, [1.0, 0.0, 0.0]),
+            [0.0, 0.0, -1.0]
+        ));
     }
 
     #[test]
@@ -169,12 +204,19 @@ mod tests {
     /// applying the two steps in sequence.
     #[test]
     fn hierarchy_composes() {
-        let parent = trs([10.0, 0.0, 0.0], [0.0, 0.0, std::f32::consts::FRAC_PI_2], [1.0; 3]);
+        let parent = trs(
+            [10.0, 0.0, 0.0],
+            [0.0, 0.0, std::f32::consts::FRAC_PI_2],
+            [1.0; 3],
+        );
         let child = trs([5.0, 0.0, 0.0], [0.0; 3], [1.0; 3]);
         let world = mul(parent, child);
         // The child sits 5 along the parent's local +x, which the parent's 90 deg
         // roll has turned into world +y.
-        assert!(close(transform_point(&world, [0.0, 0.0, 0.0]), [10.0, 5.0, 0.0]));
+        assert!(close(
+            transform_point(&world, [0.0, 0.0, 0.0]),
+            [10.0, 5.0, 0.0]
+        ));
     }
 
     #[test]

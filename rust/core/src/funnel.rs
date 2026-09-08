@@ -48,6 +48,7 @@ pub const SHEET_H: f32 = 0.45;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
+    SeekingSite,
     Funnel,
     Supports,
     Filling,
@@ -223,6 +224,7 @@ impl FunnelProgram {
 
     fn plan(&mut self, world: &Anchors, rng: &mut Pcg32) {
         match self.stage {
+            Stage::SeekingSite => {},
             Stage::Funnel => {
                 // A tube of dense silk from the wall to the mouth: zigzag
                 // attachments along both sides of the tube.
@@ -288,6 +290,7 @@ impl WebProgram for FunnelProgram {
     }
 
     fn next(&mut self, _silk: &Silk, world: &Anchors, rng: &mut Pcg32, _pos: Vec2) -> Option<Move> {
+        if self.stage==Stage::SeekingSite {self.reset(world,rng); if self.stage==Stage::SeekingSite{return None;}}
         if self.queue.is_empty() && self.stage != Stage::Done {
             self.plan(world, rng);
         }
@@ -313,6 +316,7 @@ impl WebProgram for FunnelProgram {
     fn stage(&self) -> &'static str {
         match self.stage {
             Stage::Funnel => "funnel",
+            Stage::SeekingSite => "seeking a supported site",
             Stage::Supports => "support threads",
             Stage::Filling => "filling the sheet",
             Stage::Done => "complete",
@@ -330,7 +334,12 @@ impl WebProgram for FunnelProgram {
         let rhi = region.max();
         let (w, h) = region.size;
         self.side = if rng.f32() < 0.5 { -1.0 } else { 1.0 };
-        let y = region.center.y + rng.range(-0.25, 0.25) * h;
+        // A sheet/funnel belongs low beside shelter, rather than halfway up
+        // the open enclosure. Desktop frames remain the available substrate.
+        let jitter = rng.range(-0.25, 0.25);
+        let y = if world.is_enclosure() {
+            rlo.y + h * (0.28 + jitter * 0.16)
+        } else { region.center.y + jitter * h };
         let wall_x = if self.side > 0.0 { rhi.x - WALL_INSET } else { rlo.x + WALL_INSET };
         // The funnel is against whatever is really there on that side: the
         // wall, or on the desktop the nearest window edge or the screen.
@@ -347,12 +356,33 @@ impl WebProgram for FunnelProgram {
         };
         self.lo = Vec2::new(x0.max(rlo.x + WALL_INSET), (y - sh * 0.5).max(rlo.y + WALL_INSET));
         self.hi = Vec2::new(x1.min(rhi.x - WALL_INSET), (y + sh * 0.5).min(rhi.y - WALL_INSET));
+        if self.hi.x - self.lo.x < tube || self.hi.y - self.lo.y < 20.0 {
+            // A real UI support can lie outside the proposed planning patch.
+            // Re-site the sheet beside that support within the actual world;
+            // never clamp into an inverted rectangle or invent an anchor.
+            let boundary = world.structures.iter().find(|f| f.id == crate::anchors::SCREEN || f.id == crate::anchors::WALLS)
+                .copied().unwrap_or(crate::anchors::Frame::of(region,crate::anchors::WALLS));
+            for side in [self.side,-self.side] {
+                let mouth = Vec2::new(self.wall.x-side*tube,y);
+                let (a,b) = if side>0.0 {(mouth.x-sw,mouth.x)} else {(mouth.x,mouth.x+sw)};
+                let lo=Vec2::new(a.max(boundary.lo.x+WALL_INSET),(y-sh*0.5).max(boundary.lo.y+WALL_INSET));
+                let hi=Vec2::new(b.min(boundary.hi.x-WALL_INSET),(y+sh*0.5).min(boundary.hi.y-WALL_INSET));
+                if hi.x-lo.x>=tube && hi.y-lo.y>=20.0 {
+                    self.side=side; self.mouth=mouth; self.lo=lo; self.hi=hi;
+                    break;
+                }
+            }
+        }
         self.stage = Stage::Funnel;
         self.queue.clear();
         self.sessions_done = 0;
         self.sessions_target = SESSIONS;
         self.in_session_fill = false;
         self.coverage = vec![0; GRID.0 * GRID.1];
+        if self.lo.x>=self.hi.x || self.lo.y>=self.hi.y {
+            // No feasible sheet can fit. Wait for the world to change.
+            self.stage=Stage::SeekingSite;
+        }
     }
 
     fn on_damage(&mut self, silk: &Silk) -> bool {
@@ -515,7 +545,17 @@ mod tests {
         build(&mut w, 300.0);
         assert!(w.silk.count_kind(ThreadKind::Sheet) > before);
         let mid = {
-            let th = w.silk.threads.iter().find(|t| t.kind == ThreadKind::Sheet).unwrap();
+            // Cut the sheet away from the retreat; ordering does not guarantee
+            // that the first sheet strand is clear of the funnel mouth.
+            let home = w.sit_point().unwrap();
+            let th = w.silk.threads.iter().filter(|t| t.kind == ThreadKind::Sheet).max_by(|a, b| {
+                let distance = |t: &&crate::silk::Thread| {
+                    let p = w.silk.nodes[t.a].pos;
+                    let q = w.silk.nodes[t.b].pos;
+                    crate::util::hypot((p.x + q.x) * 0.5 - home.x, (p.y + q.y) * 0.5 - home.y)
+                };
+                distance(a).total_cmp(&distance(b))
+            }).unwrap();
             let (a, b) = (w.silk.nodes[th.a].pos, w.silk.nodes[th.b].pos);
             Vec2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5)
         };

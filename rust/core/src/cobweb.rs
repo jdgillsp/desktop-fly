@@ -104,10 +104,11 @@ impl CobwebProgram {
     /// A point in the tangle volume: under the top, within the web's width.
     fn tangle_point(&self, world: &Anchors, rng: &mut Pcg32) -> Vec2 {
         let top = Self::top_y(world);
-        Vec2::new(
-            self.retreat.x + rng.range(-1.0, 1.0) * self.half_w,
+        world.bounds.clamp_inside(Vec2::new(
+            rng.range((self.retreat.x - self.half_w).max(world.bounds.min().x + WALL_INSET),
+                (self.retreat.x + self.half_w).min(world.bounds.max().x - WALL_INSET)),
             top - rng.range(0.08, 1.0) * (top - self.sheet_y),
-        )
+        ), WALL_INSET)
     }
 
     /// An anchor in the upper part of the web: on the structure above or to
@@ -166,7 +167,7 @@ impl CobwebProgram {
         // Down from the retreat to sheet level, then a zigzag across it,
         // fixing to the tangle where it hangs low enough and to the walls at
         // the ends.
-        let start = Vec2::new(r.x + rng.range(-0.3, 0.3) * self.half_w, self.sheet_y);
+        let start = Vec2::new((r.x + rng.range(-0.3, 0.3) * self.half_w).clamp(left, right), self.sheet_y);
         self.queue.push_back(Move::new(
             start,
             Op::StartOn {
@@ -220,7 +221,7 @@ impl CobwebProgram {
         let region = world.bounds;
         let lo = region.min();
         let hi = region.max();
-        let x = (r.x + rng.range(-1.0, 1.0) * self.half_w).clamp(lo.x + WALL_INSET, hi.x - WALL_INSET);
+        let x = rng.range((r.x - self.half_w).max(lo.x + WALL_INSET), (r.x + self.half_w).min(hi.x - WALL_INSET));
         let top = Vec2::new(x, self.sheet_y + rng.range(-4.0, 12.0));
         // Straight down to whatever the floor is: the enclosure's, or on the
         // desktop the top of a window below or the bottom of the screen.
@@ -369,7 +370,14 @@ impl WebProgram for CobwebProgram {
         self.half_w = (0.30 * w).clamp(80.0, 260.0);
         let jx = (hw - self.half_w - 2.0 * WALL_INSET).max(0.0);
         let top = Self::top_y(world);
-        self.retreat = Vec2::new(region.center.x + rng.range(-0.6, 0.6) * jx, top - 6.0);
+        let side = if rng.f32() < 0.5 { -1.0 } else { 1.0 };
+        // Sheltered wall/ceiling junction, not a retreat suspended in open air.
+        self.retreat = if world.is_enclosure() {
+            Vec2::new(region.center.x + side * (hw - WALL_INSET - 6.0).max(0.0), top - 2.0)
+        } else {
+            let from = Vec2::new(region.center.x + side * jx * 0.6, top - 6.0);
+            world.anchor(from, std::f32::consts::FRAC_PI_2, WALL_INSET)
+        };
         self.sheet_y = top - TANGLE_DEPTH * h;
         self.floor_y = region.min().y + 6.0;
         self.stage = Stage::Retreat;

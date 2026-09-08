@@ -24,7 +24,7 @@
 
 use crate::arachnid::{new_legs, step_legs, LegMode, SpiderLeg};
 use crate::creature::{Body, Proprioception, Substrate, Weaver as Species, World};
-use crate::anchors::{Anchors, Frame, SCREEN};
+use crate::anchors::{Anchors, Frame};
 use crate::habitat::Region;
 use crate::rng::Pcg32;
 use crate::signals::BrainSignals;
@@ -283,6 +283,10 @@ pub struct WeaverPose {
 }
 
 pub struct Weaver {
+    pub navigation: Option<Navigation>,
+    pub spatial_pos: Option<[f32; 3]>,
+    pub spatial_vertical: bool,
+    pub spatial_habitat: bool,
     pub species: Species,
     pub traits: Traits,
     pub pos: Vec2,
@@ -331,6 +335,9 @@ pub struct Weaver {
     /// The windows on screen, as things a thread can be fixed to. Set by the
     /// runtime from the senses; empty in an enclosure.
     pub frames: Vec<Frame>,
+    /// Explicit runtime habitat; avoids mistaking a small display for a tank.
+    pub habitat_world: Option<Anchors>,
+    pub desktop_mode: bool,
     /// What the current web is fixed to. Rebuilt on every plan and whenever
     /// the frames change.
     anchors: Anchors,
@@ -345,11 +352,60 @@ pub struct Weaver {
     rng: Pcg32,
 }
 
+#[derive(Debug, Clone)]
+pub enum Waypoint { Node(usize), Point([f32;3]) }
+
+#[derive(Debug, Clone, Default)]
+pub struct Navigation {
+    pub goal: Option<Move>,
+    pub route: std::collections::VecDeque<Waypoint>,
+    pub ready: bool,
+    pub topology: (usize,usize),
+    pub safety_anchor: Option<[f32;3]>,
+    pub mode: &'static str,
+}
+
 impl Weaver {
+    /// Physical navigation owns the gait when the construction chart is embedded in 3D.
+    pub fn physical_gait(&mut self, delta: [f32;3], dt:f32) {
+        let length=delta.iter().map(|v|v*v).sum::<f32>().sqrt();
+        self.speed=if dt>0.0 {length/dt}else{0.0};
+        let y=if self.spatial_vertical {delta[2]}else{delta[1]};
+        if delta[0]*delta[0]+y*y>0.0001 {self.heading=y.atan2(delta[0]);}
+        self.update_legs(dt);
+    }
+    pub fn construction_move(&self) -> Option<&Move> { self.current.as_ref() }
+
+    pub fn physical_damage(&mut self) {
+        self.current=None;
+        if let Some(n)=&mut self.navigation { *n=Navigation::default(); }
+        if self.program.on_damage(&self.silk) {self.begin_rebuild();}
+    }
+
+    fn resolve_attachment(&self, mut m: Move) -> Move {
+        for op in &m.ops {
+            let kind=match op {
+                Op::AttachOn {kind,..}=>Some(*kind),
+                Op::StartOn {on,..}=>Some(*on),
+                _=>None,
+            };
+            if let Some(kind)=kind {
+                if let Some((t,_))=self.silk.thread_near(m.to,kind,f32::INFINITY) {
+                    m.to=self.silk.point_on_thread(t,m.to);
+                }
+                break;
+            }
+        }
+        m
+    }
     pub fn new(species: Species, at: Vec2, seed: u64, program: Box<dyn WebProgram>) -> Self {
         let mut rng = Pcg32::new(seed);
         let heading = rng.range(0.0, std::f32::consts::TAU);
         Weaver {
+            navigation: None,
+            spatial_pos: None,
+            spatial_vertical: false,
+            spatial_habitat: false,
             species,
             traits: Traits::of(species),
             pos: at,
@@ -387,6 +443,8 @@ impl Weaver {
             build_region: None,
             anchor_ledge: None,
             frames: Vec::new(),
+            habitat_world: None,
+            desktop_mode: false,
             anchors: Anchors::enclosure(Region::new(at, (1.0, 1.0))),
             hour: 12.0,
             web_age: 0.0,
@@ -528,7 +586,7 @@ impl Weaver {
     /// the old box under the widest window edge.
     fn replan(&mut self, region: Region) {
         let (w, h) = region.size;
-        let enclosure = w <= ENCLOSURE_MAX && h <= ENCLOSURE_MAX;
+        let enclosure = self.habitat_world.is_some() || (!self.desktop_mode && w <= ENCLOSURE_MAX && h <= ENCLOSURE_MAX);
         let mut r = Pcg32::new(self.rng.next_u32() as u64);
         let (build, ledge) = if !enclosure && !self.frames.is_empty() {
             match Anchors::choose_site(region, &self.frames, &mut r) {
@@ -541,7 +599,7 @@ impl Weaver {
         self.build_region = Some(build);
         self.anchor_ledge = ledge;
         self.anchors = if enclosure {
-            Anchors::enclosure(build)
+            self.habitat_world.clone().unwrap_or_else(|| Anchors::enclosure(build))
         } else {
             Anchors::desktop(build, region, &self.frames)
         };
@@ -559,14 +617,14 @@ impl Weaver {
     /// start again. A window that appeared becomes something new to fix to.
     /// Returns how many threads went.
     fn check_structures(&mut self, world: Region) -> usize {
-        if self.anchors.is_enclosure() {
-            return 0;
-        }
+        let next = if self.anchors.is_enclosure() {
+            match &self.habitat_world { Some(w) => w.clone(), None => return 0 }
+        } else { Anchors::desktop(self.build_region.unwrap_or(world), world, &self.frames) };
         let old = self.anchors.structures.clone();
         let mut cut = 0;
         let mut changed = false;
-        for s in old.iter().filter(|s| s.id != SCREEN) {
-            match self.frames.iter().find(|f| f.id == s.id) {
+        for s in &old {
+            match next.structures.iter().find(|f| f.id == s.id) {
                 Some(f) if !f.moved_from(s) => {}
                 _ => {
                     cut += self.silk.cut_on(s.id);
@@ -574,12 +632,24 @@ impl Weaver {
                 }
             }
         }
-        if self.frames.iter().any(|f| !old.iter().any(|s| s.id == f.id)) {
+        if next.structures.iter().any(|f| !old.iter().any(|s| s.id == f.id)) {
+            changed = true;
+        }
+        if next.structures.iter().map(|f| f.id).collect::<Vec<_>>() != old.iter().map(|f| f.id).collect::<Vec<_>>() {
             changed = true;
         }
         if changed {
-            if let Some(build) = self.build_region {
-                self.anchors = Anchors::desktop(build, world, &self.frames);
+            let target_changed = self.current.as_ref().is_some_and(|m|
+                self.anchors.on(m.to, ON_TOL) != next.on(m.to, ON_TOL));
+            self.anchors = next;
+            // A stationary window can lose its supports when another window
+            // covers it. Cut only attachments whose outline is no longer visible.
+            cut += self.silk.cut_attachments(|n| n.on.is_some() && self.anchors.on(n.pos, ON_TOL) != n.on);
+            // Queued construction targets describe the old world as well.
+            if !self.program.complete() && (cut > 0 || target_changed) {
+                self.current = None;
+                self.silk.release();
+                self.build_region = None;
             }
         }
         if cut > 0 {
@@ -611,11 +681,15 @@ impl Weaver {
     }
 
     fn apply_op(&mut self, at: Vec2, op: Op) {
+        let first_new=self.silk.nodes.len();
         match op {
             Op::Nothing => {}
             Op::PayOut(kind) => {
                 let n = self.silk.pay_out(at, kind);
                 self.silk.nodes[n].on = self.anchors.on(at, ON_TOL);
+                if self.silk.nodes[n].on.is_none() {
+                    self.silk.nodes[n].anchor = Anchor::Free;
+                }
             }
             Op::StartLine { kind, radius } => {
                 self.silk.release();
@@ -647,6 +721,9 @@ impl Weaver {
                     // Which structure this end is on, if any — the thing
                     // whose moving will cut this thread.
                     self.silk.nodes[m].on = self.anchors.on(at, ON_TOL);
+                    if self.silk.nodes[m].on.is_none() {
+                        self.silk.nodes[m].anchor = Anchor::Free;
+                    }
                 }
             }
             Op::AttachNear(r) => match self.silk.node_at(at, r) {
@@ -697,6 +774,13 @@ impl Weaver {
                 }
             }
         }
+        if self.navigation.is_some() {
+            if let Some(p)=self.spatial_pos {
+                for n in self.silk.nodes.iter_mut().skip(first_new) {
+                    if n.spatial.is_none() {n.spatial=Some(crate::silk::SpatialNode {rest:p,pos:p,velocity:[0.0;3]});}
+                }
+            }
+        }
     }
 
     pub fn update(&mut self, dt: f32, region: Region, mouse: Option<Vec2>, signals: Option<BrainSignals>) {
@@ -720,6 +804,9 @@ impl Weaver {
             self.replan(region);
         }
         self.check_structures(world);
+        if self.build_region.is_none() {
+            self.replan(world);
+        }
         let region = self.build_region.unwrap_or(region);
 
         self.update_bugs(dt, region);
@@ -762,7 +849,7 @@ impl Weaver {
 
         self.z = 0.0;
         self.update_posture(dt);
-        self.update_legs(dt);
+        if self.navigation.is_none() {self.update_legs(dt);}
     }
 
     fn update_bugs(&mut self, dt: f32, region: Region) {
@@ -1167,7 +1254,8 @@ impl Weaver {
         if self.current.is_none() && self.build_gate {
             let here = self.pos;
             let mut r = Pcg32::new(self.rng.next_u32() as u64);
-            self.current = self.program.next(&self.silk, &self.anchors, &mut r, here);
+            let next = self.program.next(&self.silk, &self.anchors, &mut r, here);
+            self.current = next.map(|m| if self.navigation.is_some() {self.resolve_attachment(m)} else {m});
         }
         if let Some(mv) = self.current.clone() {
             if !self.build_gate {
@@ -1176,12 +1264,13 @@ impl Weaver {
             }
             self.set_state(WeaverState::Building);
             self.walk_target = None;
-            if self.walk_toward(mv.to, build, dt) {
+            if self.walk_toward(mv.to, build, dt) && self.navigation.as_ref().is_none_or(|n|n.ready && n.goal.as_ref()==Some(&mv)) {
                 for op in &mv.ops {
                     self.apply_op(mv.to, *op);
                 }
                 self.current = None;
                 self.dwell_timer = mv.dwell;
+                if let Some(n)=&mut self.navigation {n.ready=false;n.goal=None;n.route.clear();}
             }
             return;
         }
@@ -1294,6 +1383,72 @@ mod tests {
 
     fn idle(species: Species) -> Weaver {
         Weaver::new(species, Vec2::ZERO, 3, Box::new(Idle(species)))
+    }
+
+    #[test]
+    fn covered_attachments_break_without_cutting_exposed_ends_on_the_same_window() {
+        let mut w = idle(Species::Araneus);
+        let window = Frame::of(Region::centered((400.0, 300.0)), 7);
+        w.desktop_mode = true;
+        w.frames = vec![window];
+        w.replan(BOUNDS);
+        for y in [-100.0, 100.0] {
+            w.apply_op(Vec2::new(190.0, y), Op::PayOut(ThreadKind::Frame));
+            w.apply_op(Vec2::new(120.0, y), Op::Attach(Anchor::Free));
+            w.apply_op(Vec2::ZERO, Op::Release);
+        }
+        assert_eq!(w.check_structures(BOUNDS), 0);
+        let cover = Frame::of(Region::new(Vec2::new(190.0, 100.0), (160.0, 100.0)), 8);
+        w.frames = vec![cover, window];
+        assert_eq!(w.check_structures(BOUNDS), 1);
+        assert_eq!(w.silk.threads.len(), 1);
+        assert!(w.silk.nodes.iter().any(|n| n.on == Some(7) && n.pos.y == -100.0));
+    }
+
+    #[test]
+    fn unsupported_points_are_not_fixed_and_small_desktops_are_not_habitats() {
+        let mut w = idle(Species::Araneus);
+        w.desktop_mode = true;
+        w.replan(BOUNDS);
+        assert!(!w.anchors.is_enclosure());
+        w.apply_op(Vec2::ZERO, Op::PayOut(ThreadKind::Frame));
+        w.apply_op(Vec2::new(50.0, 0.0), Op::Attach(Anchor::Fixed));
+        assert!(w.silk.nodes.iter().all(|n| n.anchor == Anchor::Free && n.on.is_none()));
+    }
+
+    #[test]
+    fn habitat_furniture_changes_disrupt_attached_silk() {
+        let mut w = idle(Species::Parasteatoda);
+        let mut world = Anchors::enclosure(BOUNDS);
+        world.structures.push(Frame::of(Region::centered((80.0, 80.0)), -2));
+        w.habitat_world = Some(world.clone());
+        w.replan(BOUNDS);
+        w.apply_op(Vec2::new(40.0, 0.0), Op::PayOut(ThreadKind::Tangle));
+        w.apply_op(Vec2::new(160.0, 0.0), Op::Attach(Anchor::Free));
+        w.apply_op(Vec2::ZERO, Op::Release);
+        assert_eq!(w.silk.nodes[0].on, Some(-2));
+        world.structures[1].lo.x += 20.0;
+        world.structures[1].hi.x += 20.0;
+        w.habitat_world = Some(world);
+        assert_eq!(w.check_structures(BOUNDS), 1);
+        assert!(w.silk.threads.is_empty());
+    }
+
+    #[test]
+    fn each_web_family_finishes_in_a_furnished_habitat() {
+        let h = crate::habitat::Habitat::new(crate::habitat::HabitatKind::Vivarium, BOUNDS, 12);
+        for species in [Species::Araneus, Species::Parasteatoda, Species::Agelenopsis] {
+            let world = Anchors::habitat(&h);
+            let mut rng = Pcg32::new(12);
+            let mut w = Weaver::new(species, BOUNDS.center, 12, program_for(species, &world, &mut rng));
+            w.habitat_world = Some(world);
+            for _ in 0..72_000 {
+                w.update(DT, BOUNDS, None, None);
+                if w.web_complete() { break; }
+            }
+            assert!(w.web_complete(), "{species:?} stalled in {} at {:?}", w.program.stage(), w.pos);
+            assert!(w.silk.nodes.iter().filter(|n| n.anchor == Anchor::Fixed).all(|n| n.on.is_some()));
+        }
     }
 
     #[test]
