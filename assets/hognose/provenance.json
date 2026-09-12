@@ -1,0 +1,18 @@
+{
+  "source": "art/blender/build_study.py",
+  "authorship": "Original local Blender/Python geometry and procedural maps",
+  "vertices": 21116,
+  "triangles": 39932,
+  "runtime": "rust/shell/src/hognoseasset.rs",
+  "maps": {
+    "size": [
+      3072,
+      1536
+    ]
+  },
+  "sha256": {
+    "albedo.png": "7862d2961618e24eadbfd6a0f5df0e21bab8f8e61a1fb12e8ad856d990be18d8",
+    "mesh.json": "e968a82218cd5e03841f22335648b89483b5d212afb097b6490d51964523497d",
+    "scale_height.png": "249498af383c00ac66d5f5d5b6972b69e3e91f008b6ddae0515a9397b836c545"
+  }
+}

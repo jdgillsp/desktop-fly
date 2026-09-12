@@ -1,0 +1,14 @@
+{
+  "scene": "DF_Hognose_Study_v2",
+  "objects": 145,
+  "mesh_objects": 127,
+  "source_polygons": 81542,
+  "finite_vertices": true,
+  "original_scene_preserved": true,
+  "body_has_uv": true,
+  "status": "visual prototype, not runtime integrated",
+  "render_files": [
+    "art/blender/renders/hognose-study.png",
+    "art/blender/renders/hognose-head-detail.png"
+  ]
+}
