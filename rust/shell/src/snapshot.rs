@@ -460,7 +460,19 @@ pub fn render_to_png(
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     let data = slice.get_mapped_range().expect("map read-back buffer");
 
-    // Composite over a checkerboard so transparency is visible in the PNG.
+    // Composite over a checkerboard so transparency is visible in the PNG —
+    // or, when DESKTOPFLY_SNAPSHOT_BG=rrggbb is set, over that solid colour, so
+    // a frame sequence can be cut straight into video without keying.
+    let solid: Option<[f32; 3]> = std::env::var("DESKTOPFLY_SNAPSHOT_BG")
+        .ok()
+        .and_then(|h| u32::from_str_radix(h.trim().trim_start_matches('#'), 16).ok())
+        .map(|v| {
+            [
+                ((v >> 16) & 0xff) as f32 / 255.0,
+                ((v >> 8) & 0xff) as f32 / 255.0,
+                (v & 0xff) as f32 / 255.0,
+            ]
+        });
     let mut rgba = vec![0u8; (width * height * 4) as usize];
     let mut opaque_px = 0u64;
     for y in 0..height {
@@ -480,11 +492,12 @@ pub fn render_to_png(
             } else {
                 0.68
             };
+            let bg = solid.unwrap_or([check, check, check]);
             // Source is premultiplied, so: out = src + dst * (1 - a).
             let di = ((y * width + x) * 4) as usize;
-            rgba[di] = (((r + check * (1.0 - a)).clamp(0.0, 1.0)) * 255.0) as u8;
-            rgba[di + 1] = (((g + check * (1.0 - a)).clamp(0.0, 1.0)) * 255.0) as u8;
-            rgba[di + 2] = (((b + check * (1.0 - a)).clamp(0.0, 1.0)) * 255.0) as u8;
+            rgba[di] = (((r + bg[0] * (1.0 - a)).clamp(0.0, 1.0)) * 255.0) as u8;
+            rgba[di + 1] = (((g + bg[1] * (1.0 - a)).clamp(0.0, 1.0)) * 255.0) as u8;
+            rgba[di + 2] = (((b + bg[2] * (1.0 - a)).clamp(0.0, 1.0)) * 255.0) as u8;
             rgba[di + 3] = 255;
         }
     }
